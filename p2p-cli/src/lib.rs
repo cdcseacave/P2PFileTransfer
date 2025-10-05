@@ -12,6 +12,7 @@ mod send;
 mod receive;
 mod discover;
 mod resume;
+mod nat_test;
 
 use anyhow::Result;
 use clap::Parser;
@@ -51,6 +52,9 @@ pub async fn run_cli() -> Result<()> {
         }
         cli::Commands::Discover { timeout } => {
             discover::handle_discover(timeout).await?;
+        }
+        cli::Commands::NatTest { stun_server } => {
+            nat_test::handle_nat_test(stun_server).await?;
         }
         cli::Commands::Resume { transfer_id, to, path } => {
             resume::handle_resume(transfer_id, to, path).await?;

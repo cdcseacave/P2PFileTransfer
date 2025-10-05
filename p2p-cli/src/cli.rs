@@ -83,6 +83,13 @@ pub enum Commands {
         timeout: u64,
     },
 
+    /// Test NAT traversal - discover public IP and port
+    NatTest {
+        /// STUN server to use (default: Google's public STUN)
+        #[arg(long)]
+        stun_server: Option<String>,
+    },
+
     /// Resume a previous transfer
     Resume {
         /// Transfer ID to resume (or state file path)

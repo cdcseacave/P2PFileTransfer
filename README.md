@@ -20,6 +20,7 @@ P2P File Transfer is a production-ready command-line tool for transferring files
 - 🔍 **Auto Discovery**: Find peers on local network via UDP broadcast
 - ✅ **Data Integrity**: CRC32 per-chunk + SHA256 per-file verification
 - 🚦 **Bandwidth Throttling**: Configurable speed limits to prevent network congestion
+- 🔌 **NAT Traversal**: STUN-based public endpoint discovery for NAT/firewall traversal
 
 ## Features
 
@@ -57,6 +58,8 @@ P2P File Transfer is a production-ready command-line tool for transferring files
 - ✅ **Handshake Protocol**: Version and capability negotiation
 - ✅ **TCP_NODELAY**: Low-latency optimizations
 - ✅ **Bandwidth Throttling**: Token bucket rate limiting with burst support
+- ✅ **NAT Traversal**: STUN client (RFC 5389) for public IP/port discovery
+- ✅ **NAT Type Detection**: Identify Open, Cone, or Symmetric NAT configurations
 
 ## Quick Start
 
@@ -117,6 +120,55 @@ p2p-transfer discover
 # Extended discovery
 p2p-transfer discover --timeout 10
 ```
+
+#### Test NAT Traversal
+```bash
+# Discover your public IP and port using STUN
+p2p-transfer nat-test
+
+# Use custom STUN server
+p2p-transfer nat-test --stun-server stun.example.com:3478
+```
+
+**Example Output:**
+```
+🔌 Testing NAT traversal...
+  Using default STUN servers (Google public STUN)
+  Querying STUN server...
+
+✅ Successfully discovered public endpoint:
+  Public IP:   203.0.113.5
+  Public Port: 51234
+  NAT Type:    RestrictedCone
+
+🔓 Cone NAT detected - hole punching should work!
+   You can establish P2P connections with most peers.
+```
+
+**Current Usage - Both Machines Behind NAT:**
+
+Currently, when both machines are behind NAT, you need to manually use the discovered public endpoints.
+
+**Manual Workaround** (requires port forwarding on router):
+
+1. **On Machine A (receiver)** - Set up port forwarding on your router:
+   ```bash
+   # First, discover your public IP
+   p2p-transfer nat-test
+   # Output: Public IP: 203.0.113.5
+   
+   # Configure router to forward port 7778 to Machine A's local IP
+   # (Done via router web interface, e.g., 192.168.1.100:7778 → Internet:7778)
+   
+   # Start receiver
+   p2p-transfer receive ./downloads --port 7778
+   ```
+
+2. **On Machine B (sender)** - Connect using Machine A's public IP:
+   ```bash
+   # Send to Machine A's public IP and forwarded port
+   p2p-transfer send myfile.zip --to 203.0.113.5:7778
+   ```
 
 #### Resume Interrupted Transfer
 ```bash

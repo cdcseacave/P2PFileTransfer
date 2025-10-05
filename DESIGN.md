@@ -1061,6 +1061,236 @@ pub enum P2PError {
 
 ---
 
+### 9. NAT Traversal (STUN)
+
+#### Overview
+
+**Purpose**: Enable P2P connections between peers behind NAT/firewalls by discovering public IP addresses and ports.
+
+**Implementation**: `p2p-core/src/nat.rs`
+
+#### STUN Client
+
+**Protocol**: RFC 5389 (Session Traversal Utilities for NAT)
+
+```rust
+pub struct StunClient {
+    stun_servers: Vec<String>,
+    timeout: Duration,
+}
+
+impl StunClient {
+    pub fn discover_public_endpoint(&self) -> Result<PublicEndpoint>;
+}
+
+pub struct PublicEndpoint {
+    pub ip: IpAddr,
+    pub port: u16,
+    pub nat_type: NatType,
+}
+```
+
+**STUN Message Format** (RFC 5389):
+```
+ 0                   1                   2                   3
+ 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|0 0|  Message Type (14 bits)  |      Message Length (16 bits)  |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                    Magic Cookie (0x2112A442)                  |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                                                               |
+|                  Transaction ID (96 bits)                     |
+|                                                               |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                    Attributes (variable)                      |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+```
+
+**STUN Workflow**:
+1. Bind UDP socket to ephemeral port
+2. Send BINDING REQUEST to STUN server
+3. Receive BINDING RESPONSE with XOR-MAPPED-ADDRESS
+4. Parse public IP and port from response
+5. Detect NAT type by comparing public vs local address
+
+**Supported Attributes**:
+- `XOR-MAPPED-ADDRESS` (0x0020): XOR-encoded address (preferred)
+- `MAPPED-ADDRESS` (0x0001): Plain address (fallback)
+
+**XOR Encoding** (prevents ALG modification):
+```rust
+// Port: XOR with upper 16 bits of magic cookie
+xor_port = port ^ (MAGIC_COOKIE >> 16)
+
+// IPv4 address: XOR with magic cookie
+xor_addr = ipv4_addr ^ MAGIC_COOKIE
+
+// IPv6 address: XOR with magic cookie + transaction ID
+xor_addr[i] = ipv6_addr[i] ^ (MAGIC_COOKIE || TRANSACTION_ID)[i]
+```
+
+#### NAT Type Detection
+
+```rust
+pub enum NatType {
+    Open,                  // No NAT - direct connection
+    FullCone,              // Any external host can send packets
+    RestrictedCone,        // Only contacted hosts can reply
+    PortRestrictedCone,    // Only contacted host:port can reply
+    Symmetric,             // Different mapping per destination (hardest)
+    Unknown,               // Could not determine
+}
+```
+
+**Detection Logic**:
+- If `public_ip == local_ip` → **Open** (no NAT)
+- If `public_ip != local_ip` → **RestrictedCone** (basic detection)
+- Full detection requires multiple STUN servers (future enhancement)
+
+**Default STUN Servers** (Google Public STUN):
+- `stun.l.google.com:19302`
+- `stun1.l.google.com:19302`
+- `stun2.l.google.com:19302`
+- `stun3.l.google.com:19302`
+- `stun4.l.google.com:19302`
+
+#### CLI Integration
+
+```bash
+# Test NAT traversal
+p2p-transfer nat-test
+
+# Custom STUN server
+p2p-transfer nat-test --stun-server stun.example.com:3478
+```
+
+**Example Output**:
+```
+🔌 Testing NAT traversal...
+✅ Successfully discovered public endpoint:
+  Public IP:   203.0.113.5
+  Public Port: 51234
+  NAT Type:    RestrictedCone
+
+🔓 Cone NAT detected - hole punching should work!
+```
+
+#### Current Limitations
+
+**STUN-only implementation**: The current version only discovers public endpoints but does not automatically establish connections through NAT. Users must manually configure port forwarding on their routers.
+
+**Workaround for NAT-to-NAT transfers**:
+1. Machine A: Discover public IP with `nat-test`, configure router port forwarding
+2. Machine B: Connect directly to Machine A's public IP:port
+
+#### Future Enhancements - Full Hole Punching
+
+**1. UDP Hole Punching**:
+
+Simultaneous bidirectional UDP packets to establish NAT mapping:
+
+```
+Peer A (behind NAT A)                      Peer B (behind NAT B)
+  Local: 192.168.1.5:5000                   Local: 10.0.0.3:6000
+  Public: 203.0.113.5:51234                 Public: 198.51.100.7:42000
+       |                                           |
+       |---- UDP packet to B's public -------->   | (NAT A maps A→B)
+       |   <------- UDP packet to A's public -----| (NAT B maps B→A)
+       |                                           |
+       |===== Bidirectional UDP established =====|
+       |                                           |
+       |------- Upgrade to TCP connection ------->|
+```
+
+**Implementation Plan**:
+```rust
+pub struct HolePunchingClient {
+    stun_client: StunClient,
+    rendezvous_server: String,
+}
+
+impl HolePunchingClient {
+    pub async fn establish_connection(
+        &self,
+        peer_id: &str
+    ) -> Result<TcpConnection>;
+}
+```
+
+**2. Rendezvous Server**:
+
+Central coordination server for peer endpoint exchange:
+
+```rust
+// Rendezvous protocol messages
+pub enum RendezvousMessage {
+    Register { 
+        peer_id: Uuid, 
+        public_endpoint: SocketAddr,
+        nat_type: NatType,
+    },
+    RequestPeer { peer_id: Uuid },
+    PeerInfo { 
+        endpoint: SocketAddr,
+        nat_type: NatType,
+    },
+    InitiateHolePunch { 
+        peer_a: SocketAddr,
+        peer_b: SocketAddr,
+    },
+}
+```
+
+**Workflow**:
+```
+1. Both peers discover public endpoints via STUN
+2. Both peers register with rendezvous server
+3. Sender requests receiver's endpoint from rendezvous
+4. Rendezvous signals both peers to start hole punching
+5. Simultaneous UDP packets create bidirectional NAT mapping
+6. TCP connection established through punched hole
+```
+
+**Example Future Usage**:
+```bash
+# Machine A (receiver) - auto hole punching
+p2p-transfer receive ./downloads --port 7778 \
+    --enable-hole-punching \
+    --rendezvous wss://rendezvous.example.com
+
+# Machine B (sender) - discovers via rendezvous
+p2p-transfer send myfile.zip \
+    --discover \
+    --enable-hole-punching \
+    --rendezvous wss://rendezvous.example.com
+```
+
+**3. TURN Fallback**:
+   - Relay server for symmetric NAT (when hole punching fails)
+   - TURN protocol (RFC 5766) for packet relay
+   - Fallback chain: Direct → STUN → TURN
+
+**4. ICE Framework**:
+   - Try multiple connection methods in priority order
+   - Connection priority: Local → Direct → STUN hole punching → TURN relay
+   - Interactive Connectivity Establishment (RFC 8445)
+   - Automatic best path selection
+
+**Performance**:
+- STUN query: ~100-200ms typical
+- Fallback across servers: automatic on failure
+- No performance impact on actual transfers
+- Discovery happens once per session
+
+**Error Handling**:
+- Timeout after 3 seconds per server
+- Fallback to next STUN server on error
+- Clear error messages (firewall, no internet, etc.)
+- Graceful degradation (direct connections still work)
+
+---
+
 ## Future Enhancements
 
 See [TODO.md](TODO.md) for complete roadmap.
@@ -1068,7 +1298,8 @@ See [TODO.md](TODO.md) for complete roadmap.
 **Highlights**:
 - Benchmarking suite for windowed vs sequential
 - Security layer (TLS, authentication)
-- Advanced features (bandwidth throttling, adaptive compression)
+- Advanced features (adaptive compression, transfer history)
+- Full UDP hole punching with rendezvous server
 - GUI with Iced framework
 - Mobile support (iOS, Android)
 

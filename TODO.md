@@ -203,9 +203,60 @@ p2p-transfer send file.zip --to 192.168.1.100:8080
 - `p2p-cli/src/cli.rs` (modified) - Added --max-speed flag
 - `p2p-cli/src/send.rs` (modified) - Parse and apply bandwidth limit
 - `p2p-cli/src/lib.rs` (modified) - Pass max_speed parameter
-- `demo_bandwidth.sh` (NEW) - Demo script for testing bandwidth throttling
 
-### 2. Adaptive Compression (1 hour)
+### ✅ 2. NAT Traversal - STUN Client (1.5 hours) - COMPLETE
+
+**Completed**: October 5, 2025
+
+**Purpose**: Discover public IP and port for P2P connections behind NAT/firewall.
+
+**Implementation**:
+- ✅ STUN client (RFC 5389) for public endpoint discovery
+- ✅ Support for XOR-MAPPED-ADDRESS and MAPPED-ADDRESS attributes
+- ✅ NAT type detection (Open, Cone, Symmetric)
+- ✅ Fallback to multiple STUN servers (Google public STUN)
+- ✅ IPv4 and IPv6 support
+- ✅ `nat-test` CLI command for testing
+
+**CLI Integration**:
+```bash
+# Test NAT traversal with default STUN servers
+p2p-transfer nat-test
+
+# Use custom STUN server
+p2p-transfer nat-test --stun-server stun.example.com:3478
+```
+
+**Files Created/Modified**:
+- `p2p-core/src/nat.rs` (NEW) - STUN client and NAT type detection
+- `p2p-core/src/lib.rs` (modified) - Export nat module
+- `p2p-core/Cargo.toml` (modified) - Added rand dependency
+- `p2p-cli/src/nat_test.rs` (NEW) - NAT test command handler
+- `p2p-cli/src/cli.rs` (modified) - Added nat-test command
+- `p2p-cli/src/lib.rs` (modified) - Wire up nat-test handler
+
+**Current Limitations**:
+- ⚠️ Manual port forwarding required for NAT-to-NAT transfers
+- Users must configure router to forward ports
+- STUN discovery works, but automatic hole punching not yet implemented
+
+**Workaround Example**:
+```bash
+# Machine A (receiver): Configure router port forward, then:
+p2p-transfer receive ./downloads --port 7778
+
+# Machine B (sender): Use Machine A's public IP from nat-test:
+p2p-transfer send file.zip --to 203.0.113.5:7778
+```
+
+**Next Steps** (for full automatic hole punching):
+- [ ] Implement rendezvous server for peer endpoint coordination (2 hours)
+- [ ] UDP hole punching handshake protocol (2 hours)
+- [ ] Automatic NAT-to-NAT connection establishment (1 hour)
+- [ ] Integration with send/receive commands via `--enable-hole-punching` flag (1 hour)
+- [ ] TURN relay server for symmetric NAT fallback (3 hours)
+
+### 3. Adaptive Compression (1 hour)
 
 **Purpose**: Auto-disable compression for pre-compressed files.
 

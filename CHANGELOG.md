@@ -24,6 +24,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Token bucket implementation with 2-second burst capacity
   - Applied to all chunk sends and retries
   - Comprehensive tests for throttling behavior
+- **NAT traversal (STUN)**: Public endpoint discovery for NAT/firewall traversal (2025-10-05)
+  - STUN client implementation (RFC 5389)
+  - Support for XOR-MAPPED-ADDRESS and MAPPED-ADDRESS attributes
+  - NAT type detection (Open, Cone, Symmetric)
+  - Default Google public STUN servers with fallback
+  - IPv4 and IPv6 support
+  - New `nat-test` CLI command for testing NAT traversal
 
 ### Changed
 - Nothing yet

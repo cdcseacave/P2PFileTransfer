@@ -8,6 +8,7 @@ pub mod compression;
 pub mod discovery;
 pub mod error;
 pub mod handshake;
+pub mod nat;             // NAT traversal and hole punching
 pub mod network;
 pub mod protocol;
 pub mod transfer;
