@@ -19,7 +19,7 @@ use crate::{
     window::{InFlightChunk, SlidingWindow, WindowConfig},
 };
 use std::{
-    default, io::SeekFrom, path::{Path, PathBuf}, time::{Duration, Instant}
+    io::SeekFrom, path::{Path, PathBuf}, time::{Duration, Instant}
 };
 use tokio::{
     fs::File,
@@ -68,12 +68,24 @@ impl<'a> FileTransferSession<'a> {
 
     /// Send a file to the peer
     pub async fn send_file(&mut self, path: &Path) -> Result<()> {
+        self.send_file_with_resume(path, &[]).await
+    }
+
+    /// Send a file with chunk-level resume support
+    /// 
+    /// # Arguments
+    /// * `path` - Path to the file to send
+    /// * `completed_chunks` - Slice of chunk indices that have already been transferred
+    pub async fn send_file_with_resume(&mut self, path: &Path, completed_chunks: &[u64]) -> Result<()> {
         info!("Starting file send: {:?}", path);
 
         let mut reader = ChunkReader::new(path, self.config.chunk_size as usize).await?;
         let total_chunks = reader.total_chunks();
 
-        info!("File has {} chunks", total_chunks);
+        if !completed_chunks.is_empty() {
+            info!("Resuming: {} chunks already completed", completed_chunks.len());
+        }
+        info!("File has {} total chunks", total_chunks);
 
         // Compression if enabled
         let mut compressor: Option<AdaptiveCompressor> = if self.config.compression_enabled {
@@ -87,6 +99,11 @@ impl<'a> FileTransferSession<'a> {
         };
 
         for chunk_index in 0..total_chunks {
+            // Skip already completed chunks
+            if completed_chunks.contains(&(chunk_index as u64)) {
+                debug!("Skipping already completed chunk {}", chunk_index);
+                continue;
+            }
             // Read chunk
             let chunk_data = reader.read_chunk(chunk_index).await?;
             let uncompressed_size = chunk_data.len() as u32;
@@ -147,12 +164,30 @@ impl<'a> FileTransferSession<'a> {
 
     /// Send a file using sliding window protocol for better performance
     pub async fn send_file_windowed(&mut self, path: &Path, window_config: &WindowConfig) -> Result<()> {
+        self.send_file_windowed_with_resume(path, window_config, &[]).await
+    }
+
+    /// Send a file using sliding window protocol with chunk-level resume support
+    /// 
+    /// # Arguments
+    /// * `path` - Path to the file to send
+    /// * `window_config` - Window configuration
+    /// * `completed_chunks` - Slice of chunk indices that have already been transferred
+    pub async fn send_file_windowed_with_resume(
+        &mut self, 
+        path: &Path, 
+        window_config: &WindowConfig,
+        completed_chunks: &[u64]
+    ) -> Result<()> {
         info!("Starting windowed file send: {:?}", path);
 
         let mut reader = ChunkReader::new(path, self.config.chunk_size as usize).await?;
         let total_chunks = reader.total_chunks();
 
-        info!("File has {} chunks, using sliding window protocol", total_chunks);
+        if !completed_chunks.is_empty() {
+            info!("Resuming: {} chunks already completed", completed_chunks.len());
+        }
+        info!("File has {} total chunks, using sliding window protocol", total_chunks);
 
         // Create sliding window
         let mut window = SlidingWindow::new(
@@ -161,6 +196,14 @@ impl<'a> FileTransferSession<'a> {
             self.file_index,
             total_chunks,
         );
+
+        // Mark completed chunks in the window
+        for &chunk_index in completed_chunks {
+            if chunk_index < total_chunks as u64 {
+                window.mark_completed(chunk_index as u32);
+                debug!("Marked chunk {} as already completed", chunk_index);
+            }
+        }
 
         // Compression if enabled
         let mut compressor: Option<AdaptiveCompressor> = if self.config.compression_enabled {

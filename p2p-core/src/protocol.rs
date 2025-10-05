@@ -163,8 +163,9 @@ pub struct ResumePoint {
     pub transfer_id: Uuid,
     /// File index within transfer
     pub file_index: u32,
-    /// Chunk index within file
-    pub chunk_index: u64,
+    /// Bitmap of completed chunks (for chunk-level resume)
+    /// Empty vector means no chunks completed yet
+    pub completed_chunks: Vec<u64>,
 }
 
 /// Resume request message

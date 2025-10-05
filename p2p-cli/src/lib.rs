@@ -13,6 +13,7 @@ mod receive;
 mod discover;
 mod resume;
 mod nat_test;
+mod history;
 
 use anyhow::Result;
 use clap::Parser;
@@ -59,6 +60,9 @@ pub async fn run_cli() -> Result<()> {
         }
         cli::Commands::Resume { transfer_id, to, path } => {
             resume::handle_resume(transfer_id, to, path).await?;
+        }
+        cli::Commands::History { limit, direction, completed, failed } => {
+            history::handle_history(limit, direction, completed, failed).await?;
         }
     }
 

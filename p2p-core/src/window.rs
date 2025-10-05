@@ -209,6 +209,46 @@ impl SlidingWindow {
             .map(|(idx, _)| *idx)
             .collect()
     }
+
+    /// Mark a chunk as already completed (for resume support)
+    /// 
+    /// This is used when resuming a transfer to mark chunks that were
+    /// successfully transferred in a previous session.
+    pub fn mark_completed(&mut self, chunk_index: u32) {
+        if chunk_index >= self.total_chunks {
+            return;
+        }
+
+        // Add to acked set
+        if !self.acked_chunks.contains(&chunk_index) {
+            self.acked_chunks.insert(chunk_index);
+            self.acked_count += 1;
+        }
+
+        // Advance next_to_send if this creates a gap that we should skip
+        if chunk_index == self.next_to_send {
+            self.next_to_send += 1;
+            
+            // Skip past any other completed chunks
+            while self.acked_chunks.contains(&self.next_to_send) 
+                && self.next_to_send < self.total_chunks 
+            {
+                self.next_to_send += 1;
+            }
+        }
+
+        // Advance next_expected_ack similarly
+        if chunk_index == self.next_expected_ack {
+            self.next_expected_ack += 1;
+            
+            // Skip past any other completed chunks
+            while self.acked_chunks.contains(&self.next_expected_ack)
+                && self.next_expected_ack < self.total_chunks
+            {
+                self.next_expected_ack += 1;
+            }
+        }
+    }
 }
 
 /// Result of processing an ACK

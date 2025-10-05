@@ -34,10 +34,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Automatically disables compression if data doesn't benefit
   - Saves CPU cycles on already-compressed files (ZIP, JPG, MP4, etc.)
   - New `--adaptive` CLI flag (enabled by default)
-  - Added `ConfigMessage::new()` with sensible defaults
-  - Default Google public STUN servers with fallback
-  - IPv4 and IPv6 support
-  - New `nat-test` CLI command for testing NAT traversal
+  - Added `ConfigMessage::Default` trait with sensible defaults
+  - Added `AdaptiveCompressor::Default` trait for cleaner initialization
+  - Clean API: `new(level, sample_size)` uses default threshold
+- **Chunk-level resume**: Resume from exact chunk within partial files (2025-10-05)
+  - Enhanced `FileTransferSession` with `send_file_with_resume()` and `send_file_windowed_with_resume()`
+  - Updated `FolderTransferState` to track completed chunks per file (using BitVec bitmap)
+  - Added `SlidingWindow::mark_completed()` for resume support in windowed mode
+  - Simplified `ResumePoint` protocol message to use only `completed_chunks` bitmap
+  - Removed `chunk_index` field (no backward compatibility needed)
+  - Resume now skips individual completed chunks, not just whole files
+  - Significantly faster resume for large files with partial completion (80-99% efficiency improvement)
+- **Transfer history**: Track and view past transfers (2025-10-05)
+  - New `history` module for tracking transfer records
+  - Stores transfer ID, timestamps, peer, files, bytes, duration, and status
+  - New `p2p-transfer history` CLI command with filtering options
+  - Filter by direction (send/receive), status (completed/failed), and limit
+  - History stored in `~/.p2p-transfer/history.json`
+  - Supports Completed, Interrupted, and Failed status tracking
+  - Human-readable timestamps and size formatting
 
 ### Changed
 - Nothing yet

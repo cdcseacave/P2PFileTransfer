@@ -107,4 +107,23 @@ pub enum Commands {
         #[arg(long)]
         path: PathBuf,
     },
+
+    /// View transfer history
+    History {
+        /// Show only recent N transfers
+        #[arg(short = 'n', long, default_value = "10")]
+        limit: usize,
+
+        /// Filter by direction (send/receive)
+        #[arg(short, long)]
+        direction: Option<String>,
+
+        /// Show only completed transfers
+        #[arg(long)]
+        completed: bool,
+
+        /// Show only failed transfers
+        #[arg(long)]
+        failed: bool,
+    },
 }

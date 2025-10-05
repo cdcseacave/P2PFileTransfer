@@ -43,8 +43,10 @@ P2P File Transfer is a production-ready command-line tool for transferring files
 ### Fault Tolerance
 - ✅ **Auto-save State**: Transfer state saved after each file completion
 - ✅ **Graceful Interruption**: Ctrl+C saves state for later resume
-- ✅ **Smart Resume**: Skip completed files, resume from last incomplete
+- ✅ **Chunk-Level Resume**: Resume from exact chunk within partial files (not just whole files)
+- ✅ **Smart Resume**: Skip completed chunks, resume from next incomplete chunk
 - ✅ **Auto-reconnect**: Exponential backoff with configurable max attempts
+- ✅ **Transfer History**: Track past transfers with timestamps, sizes, and completion status
 
 ### User Experience
 - ✅ **Real-time Progress Bars**: Overall progress (files) + current file progress (bytes)
@@ -183,10 +185,28 @@ Currently, when both machines are behind NAT, you need to manually use the disco
 p2p-transfer send ./large_folder --to 192.168.1.100:8080
 # State saved to: transfer_12345678-1234-5678-1234-567812345678.json
 
-# Resume later
+# Resume later (supports chunk-level resume)
 p2p-transfer resume 12345678-1234-5678-1234-567812345678 \
     --to 192.168.1.100:8080 \
     --path ./large_folder
+```
+
+#### View Transfer History
+```bash
+# Show recent transfers
+p2p-transfer history
+
+# Show last 20 transfers
+p2p-transfer history -n 20
+
+# Show only sent transfers
+p2p-transfer history --direction send
+
+# Show only completed transfers
+p2p-transfer history --completed
+
+# Show only failed transfers
+p2p-transfer history --failed
 ```
 
 ### Performance Tuning

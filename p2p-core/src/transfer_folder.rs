@@ -245,12 +245,13 @@ impl<'a> FolderTransferSession<'a> {
         let mut transferred_bytes = state.transferred_bytes;
         let total_bytes = state.total_bytes;
 
-        // Send resume transfer info
+        // Send resume transfer info with chunk-level data
         let resume_point = if let Some(next_file) = state.next_file() {
+            let completed_chunks = state.get_completed_chunks(next_file).to_vec();
             Some(crate::protocol::ResumePoint {
                 transfer_id: self.transfer_id,
                 file_index: next_file as u32,
-                chunk_index: 0, // Start from beginning of file
+                completed_chunks,
             })
         } else {
             None
@@ -284,11 +285,15 @@ impl<'a> FolderTransferSession<'a> {
             let relative_path = PathBuf::from(&file_meta.path);
             let full_path = folder_path.join(&relative_path);
             
+            // Get completed chunks for this file (for resume within file)
+            let completed_chunks = state.get_completed_chunks(file_index);
+            
             info!(
-                "Transferring file {}/{}: {}",
+                "Transferring file {}/{}: {} ({} chunks already completed)",
                 file_index + 1,
                 total_files,
-                relative_path.display()
+                relative_path.display(),
+                completed_chunks.len()
             );
 
             // Update progress
@@ -304,8 +309,8 @@ impl<'a> FolderTransferSession<'a> {
                 });
             }
 
-            // Send the file
-            self.send_single_file(&full_path, file_index as u32).await?;
+            // Send the file with chunk-level resume
+            self.send_single_file_with_resume(&full_path, file_index as u32, completed_chunks).await?;
 
             transferred_bytes += file_meta.size;
 
@@ -451,6 +456,16 @@ impl<'a> FolderTransferSession<'a> {
     /// Send a single file (internal helper)
     /// Uses windowed or sequential mode based on config.window_size
     async fn send_single_file(&mut self, path: &Path, file_index: u32) -> Result<()> {
+        self.send_single_file_with_resume(path, file_index, &[]).await
+    }
+
+    /// Send a single file with chunk-level resume support (internal helper)
+    async fn send_single_file_with_resume(
+        &mut self, 
+        path: &Path, 
+        file_index: u32,
+        completed_chunks: &[u64]
+    ) -> Result<()> {
         // Create a FileTransferSession with borrowed connection
         let mut file_session = FileTransferSession::new(
             self.connection,
@@ -467,9 +482,9 @@ impl<'a> FolderTransferSession<'a> {
                 ack_timeout: std::time::Duration::from_secs(10),
                 max_retries: 3,
             };
-            file_session.send_file_windowed(path, &window_config).await
+            file_session.send_file_windowed_with_resume(path, &window_config, completed_chunks).await
         } else {
-            file_session.send_file(path).await
+            file_session.send_file_with_resume(path, completed_chunks).await
         }
     }
 
@@ -631,6 +646,17 @@ pub struct FolderTransferState {
     pub total_bytes: u64,
     /// Transferred bytes
     pub transferred_bytes: u64,
+    /// Completed chunks per file (file_index -> Vec<chunk_index>)
+    /// Used for chunk-level resume
+    #[serde(default)]
+    pub file_chunks: std::collections::HashMap<usize, Vec<u64>>,
+    /// Chunk size used for the transfer
+    #[serde(default = "default_chunk_size")]
+    pub chunk_size: u32,
+}
+
+fn default_chunk_size() -> u32 {
+    65536
 }
 
 impl FolderTransferState {
@@ -646,7 +672,25 @@ impl FolderTransferState {
             current_file: None,
             total_bytes,
             transferred_bytes: 0,
+            file_chunks: std::collections::HashMap::new(),
+            chunk_size: 65536,
         }
+    }
+
+    /// Mark a chunk as completed for a file
+    pub fn mark_chunk_complete(&mut self, file_index: usize, chunk_index: u64) {
+        self.file_chunks
+            .entry(file_index)
+            .or_insert_with(Vec::new)
+            .push(chunk_index);
+    }
+
+    /// Get completed chunks for a file
+    pub fn get_completed_chunks(&self, file_index: usize) -> &[u64] {
+        self.file_chunks
+            .get(&file_index)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
     }
 
     /// Mark a file as completed
