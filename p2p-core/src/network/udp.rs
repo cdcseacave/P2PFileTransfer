@@ -31,16 +31,13 @@ impl DiscoveryService {
     ) -> Result<Self> {
         let discovery_port = DEFAULT_DISCOVERY_PORT;
         let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), discovery_port);
-        
+
         info!("Creating discovery service on port {}", discovery_port);
         let socket = UdpSocket::bind(bind_addr).await?;
         socket.set_broadcast(true)?;
-        
-        let broadcast_addr = SocketAddr::new(
-            IpAddr::V4(Ipv4Addr::BROADCAST),
-            discovery_port,
-        );
-        
+
+        let broadcast_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::BROADCAST), discovery_port);
+
         Ok(Self {
             socket,
             device_id: Uuid::new_v4(),
@@ -66,14 +63,14 @@ impl DiscoveryService {
     pub async fn broadcast_beacon(&self) -> Result<()> {
         let beacon = self.create_beacon();
         let data = rmp_serde::to_vec(&beacon)?;
-        
+
         if data.len() > MAX_PACKET_SIZE {
             return Err(Error::Protocol(format!(
                 "Beacon too large: {} bytes",
                 data.len()
             )));
         }
-        
+
         debug!("Broadcasting beacon to {}", self.broadcast_addr);
         self.socket.send_to(&data, self.broadcast_addr).await?;
         Ok(())
@@ -82,14 +79,14 @@ impl DiscoveryService {
     /// Receive a discovery beacon
     pub async fn recv_beacon(&self) -> Result<(DiscoveryBeacon, SocketAddr)> {
         let mut buf = vec![0u8; MAX_PACKET_SIZE];
-        
+
         let (len, src_addr) = self.socket.recv_from(&mut buf).await?;
         buf.truncate(len);
-        
+
         // Deserialize beacon
         let beacon: DiscoveryBeacon = rmp_serde::from_slice(&buf)
             .map_err(|e| Error::Protocol(format!("Invalid beacon: {}", e)))?;
-        
+
         // Verify version
         if beacon.version != PROTOCOL_VERSION {
             warn!(
@@ -101,7 +98,7 @@ impl DiscoveryService {
                 ours: PROTOCOL_VERSION,
             });
         }
-        
+
         debug!("Received beacon from {} ({})", beacon.device_name, src_addr);
         Ok((beacon, src_addr))
     }
@@ -168,13 +165,9 @@ mod tests {
     #[tokio::test]
     async fn test_create_discovery_service() {
         // Use a random high port for testing to avoid conflicts
-        let service = DiscoveryService::new(
-            "Test Device".to_string(),
-            7778,
-            Capabilities::all(),
-        )
-        .await;
-        
+        let service =
+            DiscoveryService::new("Test Device".to_string(), 7778, Capabilities::all()).await;
+
         // May fail if port is in use, which is okay for this test
         if let Ok(svc) = service {
             assert_eq!(svc.device_name(), "Test Device");
@@ -190,12 +183,12 @@ mod tests {
             port: 7778,
             capabilities: Capabilities::all(),
         };
-        
+
         let mut peer = PeerInfo::from((beacon, IpAddr::V4(Ipv4Addr::LOCALHOST)));
-        
+
         // Should be alive with large TTL
         assert!(peer.is_alive(Duration::from_secs(60)));
-        
+
         // Update timestamp
         peer.update_last_seen();
         assert!(peer.is_alive(Duration::from_secs(60)));
@@ -210,10 +203,10 @@ mod tests {
             port: 7778,
             capabilities: Capabilities::all(),
         };
-        
+
         let peer = PeerInfo::from((beacon, IpAddr::V4(Ipv4Addr::LOCALHOST)));
         let addr = peer.socket_addr();
-        
+
         assert_eq!(addr.port(), 7778);
         assert_eq!(addr.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
     }

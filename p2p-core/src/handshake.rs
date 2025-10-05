@@ -2,9 +2,7 @@
 
 use crate::error::{Error, Result};
 use crate::network::tcp::TcpConnection;
-use crate::protocol::{
-    Capabilities, ConfigMessage, HelloMessage, Message, TransferInfo,
-};
+use crate::protocol::{Capabilities, ConfigMessage, HelloMessage, Message, TransferInfo};
 use crate::{MIN_PROTOCOL_VERSION, PROTOCOL_VERSION};
 use log::{debug, info};
 use uuid::Uuid;
@@ -77,8 +75,7 @@ impl HandshakeClient {
 
         // Step 5: Send CONFIG
         debug!("Sending CONFIG");
-        conn.send_message(&Message::Config(config.clone()))
-            .await?;
+        conn.send_message(&Message::Config(config.clone())).await?;
 
         // Step 6: Receive CONFIG_ACK
         debug!("Waiting for CONFIG_ACK");
@@ -87,7 +84,12 @@ impl HandshakeClient {
             Message::Error(e) => {
                 return Err(Error::Protocol(format!("Config rejected: {}", e.message)))
             }
-            msg => return Err(Error::Protocol(format!("Expected ConfigAck, got {:?}", msg))),
+            msg => {
+                return Err(Error::Protocol(format!(
+                    "Expected ConfigAck, got {:?}",
+                    msg
+                )))
+            }
         }
 
         info!("Handshake completed successfully");
@@ -133,10 +135,7 @@ impl HandshakeServer {
     }
 
     /// Perform the complete handshake as responder
-    pub async fn perform_handshake(
-        &self,
-        conn: &mut TcpConnection,
-    ) -> Result<HandshakeResult> {
+    pub async fn perform_handshake(&self, conn: &mut TcpConnection) -> Result<HandshakeResult> {
         info!("Starting handshake with {}", conn.peer_addr());
 
         // Step 1: Receive HELLO
@@ -239,7 +238,7 @@ mod tests {
         // Client performs handshake
         let mut client_conn = TcpConnection::connect(server_addr).await.unwrap();
         let handshake_client = HandshakeClient::new(Uuid::new_v4(), Capabilities::all());
-        
+
         let config = ConfigMessage::default();
 
         let client_result = handshake_client

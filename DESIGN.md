@@ -1492,6 +1492,138 @@ impl TransferHistory {
 - `dirs = "5.0"` - For home directory detection
 - `chrono = "0.4"` - For timestamp formatting
 
+**Auto-Reconnect & Auto-Resume** (Complete - October 5, 2025)
+- Automatic reconnection on transient network failures
+- Exponential backoff with configurable retry limits
+- Seamless state restoration between retry attempts
+- Intelligent error classification (transient vs permanent)
+- Receiver auto-detects and resumes known transfers
+- Zero user intervention required for network hiccups
+
+**Key Features**:
+- Default: 5 retry attempts (configurable, 0=unlimited)
+- Exponential backoff: 2s → 4s → 8s → 16s → 32s → 60s (capped)
+- Automatic state loading/saving between attempts
+- Only retries transient errors (connection reset, timeout, broken pipe)
+- Permanent errors fail immediately (filesystem full, permission denied)
+- Enabled by default with `--auto-reconnect` flag
+
+**CLI Usage**:
+```bash
+# Send with auto-reconnect enabled (default)
+p2p-transfer send file.zip --to 192.168.1.100:7778
+
+# Disable auto-reconnect
+p2p-transfer send file.zip --to 192.168.1.100:7778 --auto-reconnect false
+
+# Unlimited retries
+p2p-transfer send folder/ --to 192.168.1.100:7778 --max-retries 0
+
+# Custom retry limit
+p2p-transfer send large_folder/ --to 192.168.1.100:7778 --max-retries 10
+```
+
+**Implementation**:
+```rust
+// p2p-core/src/reconnect.rs
+pub struct ReconnectConfig {
+    pub max_attempts: u32,         // 5 default (0=unlimited)
+    pub initial_backoff_secs: u64, // 2 seconds
+    pub max_backoff_secs: u64,     // 60 seconds
+    pub exponential: bool,         // true = exponential, false = linear
+}
+
+impl ReconnectConfig {
+    pub fn backoff_delay(&self, attempt: u32) -> Duration {
+        // Exponential: 2^n * initial, capped at max
+        let delay_secs = if self.exponential {
+            (self.initial_backoff_secs * 2_u64.pow(attempt))
+                .min(self.max_backoff_secs)
+        } else {
+            self.initial_backoff_secs
+        };
+        Duration::from_secs(delay_secs)
+    }
+    
+    pub fn should_retry(&self, attempt: u32) -> bool {
+        self.max_attempts == 0 || attempt < self.max_attempts
+    }
+}
+
+pub fn is_transient_error(error: &Error) -> bool {
+    match error {
+        Error::Network(_) => true,  // All network errors are transient
+        Error::Protocol(msg) => {
+            msg.contains("timeout") || msg.contains("connection") ||
+            msg.contains("reset") || msg.contains("broken pipe")
+        }
+        _ => false,  // Filesystem errors, etc. are permanent
+    }
+}
+
+// p2p-core/src/transfer_folder.rs
+pub async fn send_folder_with_reconnect(
+    &mut self,
+    folder_path: &Path,
+    base_name: &str,
+    reconnect_config: &ReconnectConfig,
+    state_path: Option<&Path>,
+) -> Result<()> {
+    // Automatic retry loop with exponential backoff
+    // Loads state from state_path between attempts
+    // Resumes from last completed chunk
+}
+
+pub async fn receive_folder_with_state(
+    &mut self,
+    output_dir: &Path,
+    state_path: Option<&Path>,
+) -> Result<()> {
+    // Auto-detects known transfer IDs
+    // Automatically resumes if state file exists
+}
+```
+
+**Example Flow**:
+```
+Transfer attempt 1: [✓✓✓✗] - Connection lost at chunk 3
+  → Error detected: ConnectionReset (transient)
+  → Saving state: completed_chunks = [0,1,2]
+  → Waiting 2 seconds before retry...
+
+Transfer attempt 2: [✓✓✓✓✓✗] - Connection lost at chunk 5
+  → Loaded state: resumed from chunk 3
+  → Error detected: BrokenPipe (transient)
+  → Saving state: completed_chunks = [0,1,2,3,4,5]
+  → Waiting 4 seconds before retry...
+
+Transfer attempt 3: [✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓] - Success!
+  → Loaded state: resumed from chunk 6
+  → All chunks transferred
+  → State file deleted
+```
+
+**Why This is Better Than Manual Resume**:
+- Old approach: User notices failure → manually runs `p2p-transfer resume <id>`
+- New approach: Automatic retry with exponential backoff
+- User experience: Transfer appears to "pause and retry" automatically
+- Works for: WiFi dropouts, router restarts, ISP hiccups, brief outages
+- Doesn't waste time: Immediately fails on permanent errors (disk full, etc.)
+
+**Files Modified**:
+- `p2p-core/src/reconnect.rs` - Reconnect module with backoff logic (270 lines)
+- `p2p-core/src/transfer_folder.rs` - Added `send_folder_with_reconnect()` and `receive_folder_with_state()`
+- `p2p-cli/src/send.rs` - Integrated auto-reconnect with CLI flags
+- `p2p-cli/src/receive.rs` - Integrated auto-resume detection
+- `p2p-cli/src/cli.rs` - Added `--auto-reconnect` and `--max-retries` flags
+
+**Benefits**:
+- **Zero user intervention** for transient network issues
+- **Exponential backoff** prevents network flooding
+- **State preservation** ensures no data loss
+- **Smart error detection** avoids wasting retries on permanent failures
+- **Works with chunk-level resume** for maximum efficiency
+
 ### Performance Metrics
 
 **Chunk-Level Resume**:

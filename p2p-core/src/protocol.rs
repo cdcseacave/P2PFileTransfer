@@ -5,13 +5,14 @@ use uuid::Uuid;
 
 /// Custom serialization for checksum as hex string
 mod checksum_hex {
-    use serde::{Deserializer, Serializer, Deserialize};
+    use serde::{Deserialize, Deserializer, Serializer};
 
     pub fn serialize<S>(bytes: &[u8; 32], serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        let hex_string = bytes.iter()
+        let hex_string = bytes
+            .iter()
             .map(|b| format!("{:02x}", b))
             .collect::<String>();
         serializer.serialize_str(&hex_string)
@@ -22,23 +23,28 @@ mod checksum_hex {
         D: Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-        
+
         // Handle both hex string and array formats for backward compatibility
         if s.starts_with('[') {
             // Old format: JSON array - skip it
-            return Err(serde::de::Error::custom("Array format is deprecated, please use hex string"));
+            return Err(serde::de::Error::custom(
+                "Array format is deprecated, please use hex string",
+            ));
         }
-        
+
         if s.len() != 64 {
-            return Err(serde::de::Error::custom(format!("Expected 64 hex characters, got {}", s.len())));
+            return Err(serde::de::Error::custom(format!(
+                "Expected 64 hex characters, got {}",
+                s.len()
+            )));
         }
-        
+
         let mut bytes = [0u8; 32];
         for i in 0..32 {
-            bytes[i] = u8::from_str_radix(&s[i*2..i*2+2], 16)
+            bytes[i] = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16)
                 .map_err(|e| serde::de::Error::custom(format!("Invalid hex: {}", e)))?;
         }
-        
+
         Ok(bytes)
     }
 }
@@ -213,13 +219,17 @@ pub struct ChunkMessage {
 impl std::fmt::Debug for ChunkMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         const MAX_DATA_DISPLAY: usize = 128;
-        
+
         let data_display = if self.data.len() > MAX_DATA_DISPLAY {
-            format!("[{} bytes: {:02x?}...]", self.data.len(), &self.data[..MAX_DATA_DISPLAY])
+            format!(
+                "[{} bytes: {:02x?}...]",
+                self.data.len(),
+                &self.data[..MAX_DATA_DISPLAY]
+            )
         } else {
             format!("[{} bytes: {:02x?}]", self.data.len(), &self.data)
         };
-        
+
         f.debug_struct("ChunkMessage")
             .field("transfer_id", &self.transfer_id)
             .field("file_index", &self.file_index)
@@ -303,10 +313,7 @@ impl Capabilities {
 
     pub const fn all() -> Self {
         Self {
-            bits: Self::COMPRESSION
-                | Self::RESUME
-                | Self::BATCH_TRANSFER
-                | Self::FOLDER_TRANSFER,
+            bits: Self::COMPRESSION | Self::RESUME | Self::BATCH_TRANSFER | Self::FOLDER_TRANSFER,
         }
     }
 
@@ -370,9 +377,7 @@ mod tests {
 
     #[test]
     fn test_capabilities() {
-        let caps = Capabilities::new()
-            .with_compression()
-            .with_resume();
+        let caps = Capabilities::new().with_compression().with_resume();
 
         assert!(caps.has_compression());
         assert!(caps.has_resume());
@@ -387,12 +392,8 @@ mod tests {
 
     #[test]
     fn test_capabilities_intersect() {
-        let caps1 = Capabilities::new()
-            .with_compression()
-            .with_resume();
-        let caps2 = Capabilities::new()
-            .with_resume()
-            .with_batch_transfer();
+        let caps1 = Capabilities::new().with_compression().with_resume();
+        let caps2 = Capabilities::new().with_resume().with_batch_transfer();
 
         let common = caps1.intersect(&caps2);
         assert!(!common.has_compression());

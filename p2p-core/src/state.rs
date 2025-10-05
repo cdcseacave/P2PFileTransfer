@@ -127,11 +127,7 @@ impl TransferState {
     pub fn next_chunk(&self) -> Option<(u32, u64)> {
         for file in &self.files {
             if file.status == FileStatus::Pending || file.status == FileStatus::InProgress {
-                if let Some(chunk_idx) = file
-                    .completed_chunks
-                    .iter()
-                    .position(|b| !*b)
-                {
+                if let Some(chunk_idx) = file.completed_chunks.iter().position(|b| !*b) {
                     return Some((file.file_index, chunk_idx as u64));
                 }
             }

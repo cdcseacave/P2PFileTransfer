@@ -1,16 +1,8 @@
 //! Discovery operations
 
 use anyhow::Result;
-use p2p_core::{
-    discovery::DiscoveryManager,
-    protocol::Capabilities,
-    Uuid,
-};
-use std::{
-    net::SocketAddr,
-    sync::Arc,
-    time::Duration,
-};
+use p2p_core::{discovery::DiscoveryManager, protocol::Capabilities, Uuid};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 pub async fn handle_discover(timeout_secs: u64) -> Result<()> {
     println!("🔍 Discovering peers on network...");
@@ -24,7 +16,7 @@ pub async fn handle_discover(timeout_secs: u64) -> Result<()> {
             Capabilities::all(),
             Duration::from_secs(10),
         )
-        .await?
+        .await?,
     );
 
     // Start discovery
@@ -38,10 +30,11 @@ pub async fn handle_discover(timeout_secs: u64) -> Result<()> {
 
     // Get discovered peers
     let peers = manager.get_peers().await;
-    
+
     println!("\n📡 Discovered {} peer(s):", peers.len());
     for (idx, peer) in peers.iter().enumerate() {
-        println!("  [{}] {} - {} ({})", 
+        println!(
+            "  [{}] {} - {} ({})",
             idx + 1,
             peer.device_name,
             peer.socket_addr(),
@@ -64,7 +57,7 @@ pub async fn discover_and_select_peer(transfer_port: u16) -> Result<SocketAddr> 
             Capabilities::all(),
             Duration::from_secs(10),
         )
-        .await?
+        .await?,
     );
 
     let manager_clone = manager.clone();

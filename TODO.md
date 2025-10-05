@@ -53,10 +53,18 @@
    - Stored in `~/.p2p-transfer/history.json`
    - Filter by direction, status, limit
 
-**Total Time**: ~5 hours  
-**Files Added**: 3 new files (~550 lines)  
-**Files Modified**: 10 files  
-**Tests**: All passing (4/4) ✅
+6. ✅ **Auto-Reconnect & Auto-Resume** (2 hours)
+   - Automatic reconnection on transient network failures
+   - Exponential backoff: 2s → 4s → 8s → 16s → 32s → 60s (capped)
+   - Intelligent error classification (transient vs permanent)
+   - CLI: `--auto-reconnect` flag (default: true), `--max-retries` (default: 5)
+   - Receiver auto-detects and resumes known transfers
+   - Zero user intervention for network hiccups
+
+**Total Time**: ~7 hours  
+**Files Added**: 4 new files (~820 lines)  
+**Files Modified**: 13 files  
+**Tests**: All passing (49/49 unit + 4/4 integration) ✅
 
 ---
 

@@ -63,6 +63,14 @@ pub enum Commands {
         /// Transfer port (TCP port for file transfer connections)
         #[arg(short, long, default_value = "7778")]
         transfer_port: u16,
+
+        /// Enable automatic reconnection on network failures
+        #[arg(long, default_value = "true")]
+        auto_reconnect: bool,
+
+        /// Maximum reconnection attempts (0 = unlimited)
+        #[arg(long, default_value = "5")]
+        max_retries: u32,
     },
 
     /// Receive files from a peer
@@ -98,11 +106,11 @@ pub enum Commands {
     Resume {
         /// Transfer ID to resume (or state file path)
         transfer_id: String,
-        
+
         /// Peer address (IP:PORT) to reconnect to
         #[arg(long)]
         to: String,
-        
+
         /// Original folder path to resume from
         #[arg(long)]
         path: PathBuf,

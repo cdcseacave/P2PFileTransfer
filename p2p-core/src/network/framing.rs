@@ -46,10 +46,7 @@ where
     reader.read_exact(&mut magic).await?;
 
     if magic != PROTOCOL_MAGIC {
-        return Err(Error::Protocol(format!(
-            "Invalid magic bytes: {:?}",
-            magic
-        )));
+        return Err(Error::Protocol(format!("Invalid magic bytes: {:?}", magic)));
     }
 
     // Read length
@@ -58,10 +55,7 @@ where
     let len = u32::from_be_bytes(len_buf);
 
     if len > MAX_MESSAGE_SIZE {
-        return Err(Error::Protocol(format!(
-            "Message too large: {} bytes",
-            len
-        )));
+        return Err(Error::Protocol(format!("Message too large: {} bytes", len)));
     }
 
     // Read payload

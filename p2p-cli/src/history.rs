@@ -77,7 +77,10 @@ pub async fn handle_history(
         // Format duration
         let duration_str = format_duration(record.duration_secs);
 
-        println!("{} {} Transfer {}", direction_icon, status_icon, record.transfer_id);
+        println!(
+            "{} {} Transfer {}",
+            direction_icon, status_icon, record.transfer_id
+        );
         println!("  Started:   {}", datetime);
         println!("  Peer:      {}", record.peer_address);
         println!("  Files:     {} file(s)", record.files.len());
@@ -91,7 +94,10 @@ pub async fn handle_history(
                 println!("    - {}", file);
             }
         } else if record.files.len() > 5 {
-            println!("  Files: {} files (use details command to see all)", record.files.len());
+            println!(
+                "  Files: {} files (use details command to see all)",
+                record.files.len()
+            );
         }
 
         println!();
@@ -102,7 +108,7 @@ pub async fn handle_history(
 
 fn format_timestamp(unix_secs: u64) -> String {
     use chrono::{DateTime, Local};
-    
+
     let datetime = DateTime::from_timestamp(unix_secs as i64, 0)
         .unwrap_or_else(|| DateTime::from_timestamp(0, 0).unwrap());
     let local: DateTime<Local> = datetime.into();
@@ -111,7 +117,7 @@ fn format_timestamp(unix_secs: u64) -> String {
 
 fn format_bytes(bytes: u64) -> String {
     const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB"];
-    
+
     if bytes == 0 {
         return "0 B".to_string();
     }

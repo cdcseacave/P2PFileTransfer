@@ -248,6 +248,52 @@ p2p-transfer send largefile.zip --to 192.168.1.100:8080
 
 **How it works**:
 - Token bucket algorithm with 2-second burst capacity
+- Applied to all chunk sends and retries
+- Allows burst traffic up to 2 seconds worth of data
+- Smooths out to configured limit over time
+
+### Auto-Reconnect & Auto-Resume
+
+Transfers automatically recover from network failures with exponential backoff:
+
+```bash
+# Auto-reconnect is enabled by default
+p2p-transfer send large_folder/ --to 192.168.1.100:8080
+
+# Disable auto-reconnect (manual resume only)
+p2p-transfer send large_folder/ --to 192.168.1.100:8080 --auto-reconnect false
+
+# Unlimited retries (keeps trying until success or permanent error)
+p2p-transfer send large_folder/ --to 192.168.1.100:8080 --max-retries 0
+
+# Custom retry limit
+p2p-transfer send large_folder/ --to 192.168.1.100:8080 --max-retries 10
+```
+
+**How it works**:
+- Detects transient network errors (connection reset, timeout, broken pipe)
+- Exponential backoff: 2s → 4s → 8s → 16s → 32s → 60s (capped)
+- Automatically saves and loads state between attempts
+- Resumes from last completed chunk (chunk-level resume)
+- Fails immediately on permanent errors (disk full, permission denied, etc.)
+- Receiver automatically detects and resumes known transfers
+
+**Example scenario**:
+```
+Transfer starts: [✓✓✓✓✓✓✓✓] - Transferring chunks...
+WiFi drops:      [✓✓✓✓✓✓✓✓✗] - Connection lost at chunk 8
+Auto-reconnect:  Waiting 2 seconds...
+Retry attempt 1: [✓✓✓✓✓✓✓✓✓✓✓✓] - Resumed from chunk 8, continuing...
+WiFi drops:      [✓✓✓✓✓✓✓✓✓✓✓✓✗] - Connection lost at chunk 12
+Auto-reconnect:  Waiting 4 seconds...
+Retry attempt 2: [✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓] - Completed successfully!
+```
+
+**Benefits**:
+- Zero user intervention for transient failures
+- Works seamlessly with chunk-level resume
+- Prevents wasted retries on permanent errors
+- Configurable for different reliability requirements
 - Allows short bursts while maintaining average rate
 - Applied to all chunk sends including retries
 - Supported units: K (KB/s), M (MB/s), G (GB/s)

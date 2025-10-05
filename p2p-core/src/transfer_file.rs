@@ -19,7 +19,9 @@ use crate::{
     window::{InFlightChunk, SlidingWindow, WindowConfig},
 };
 use std::{
-    io::SeekFrom, path::{Path, PathBuf}, time::{Duration, Instant}
+    io::SeekFrom,
+    path::{Path, PathBuf},
+    time::{Duration, Instant},
 };
 use tokio::{
     fs::File,
@@ -47,8 +49,8 @@ pub struct FileTransferSession<'a> {
 impl<'a> FileTransferSession<'a> {
     /// Create a new file transfer session with borrowed connection
     pub fn new(
-        connection: &'a mut TcpConnection, 
-        config: ConfigMessage, 
+        connection: &'a mut TcpConnection,
+        config: ConfigMessage,
         transfer_id: Uuid,
         file_index: u32,
     ) -> Self {
@@ -72,27 +74,38 @@ impl<'a> FileTransferSession<'a> {
     }
 
     /// Send a file with chunk-level resume support
-    /// 
+    ///
     /// # Arguments
     /// * `path` - Path to the file to send
     /// * `completed_chunks` - Slice of chunk indices that have already been transferred
-    pub async fn send_file_with_resume(&mut self, path: &Path, completed_chunks: &[u64]) -> Result<()> {
+    pub async fn send_file_with_resume(
+        &mut self,
+        path: &Path,
+        completed_chunks: &[u64],
+    ) -> Result<()> {
         info!("Starting file send: {:?}", path);
 
         let mut reader = ChunkReader::new(path, self.config.chunk_size as usize).await?;
         let total_chunks = reader.total_chunks();
 
         if !completed_chunks.is_empty() {
-            info!("Resuming: {} chunks already completed", completed_chunks.len());
+            info!(
+                "Resuming: {} chunks already completed",
+                completed_chunks.len()
+            );
         }
         info!("File has {} total chunks", total_chunks);
 
         // Compression if enabled
         let mut compressor: Option<AdaptiveCompressor> = if self.config.compression_enabled {
-            let sample_size = if self.config.adaptive_compression { 3 } else { 0 };
+            let sample_size = if self.config.adaptive_compression {
+                3
+            } else {
+                0
+            };
             Some(AdaptiveCompressor::new(
                 self.config.compression_level,
-                sample_size
+                sample_size,
             ))
         } else {
             None
@@ -163,21 +176,26 @@ impl<'a> FileTransferSession<'a> {
     }
 
     /// Send a file using sliding window protocol for better performance
-    pub async fn send_file_windowed(&mut self, path: &Path, window_config: &WindowConfig) -> Result<()> {
-        self.send_file_windowed_with_resume(path, window_config, &[]).await
+    pub async fn send_file_windowed(
+        &mut self,
+        path: &Path,
+        window_config: &WindowConfig,
+    ) -> Result<()> {
+        self.send_file_windowed_with_resume(path, window_config, &[])
+            .await
     }
 
     /// Send a file using sliding window protocol with chunk-level resume support
-    /// 
+    ///
     /// # Arguments
     /// * `path` - Path to the file to send
     /// * `window_config` - Window configuration
     /// * `completed_chunks` - Slice of chunk indices that have already been transferred
     pub async fn send_file_windowed_with_resume(
-        &mut self, 
-        path: &Path, 
+        &mut self,
+        path: &Path,
         window_config: &WindowConfig,
-        completed_chunks: &[u64]
+        completed_chunks: &[u64],
     ) -> Result<()> {
         info!("Starting windowed file send: {:?}", path);
 
@@ -185,9 +203,15 @@ impl<'a> FileTransferSession<'a> {
         let total_chunks = reader.total_chunks();
 
         if !completed_chunks.is_empty() {
-            info!("Resuming: {} chunks already completed", completed_chunks.len());
+            info!(
+                "Resuming: {} chunks already completed",
+                completed_chunks.len()
+            );
         }
-        info!("File has {} total chunks, using sliding window protocol", total_chunks);
+        info!(
+            "File has {} total chunks, using sliding window protocol",
+            total_chunks
+        );
 
         // Create sliding window
         let mut window = SlidingWindow::new(
@@ -207,10 +231,14 @@ impl<'a> FileTransferSession<'a> {
 
         // Compression if enabled
         let mut compressor: Option<AdaptiveCompressor> = if self.config.compression_enabled {
-            let sample_size = if self.config.adaptive_compression { 3 } else { 0 };
+            let sample_size = if self.config.adaptive_compression {
+                3
+            } else {
+                0
+            };
             Some(AdaptiveCompressor::new(
                 self.config.compression_level,
-                sample_size
+                sample_size,
             ))
         } else {
             None
@@ -229,7 +257,8 @@ impl<'a> FileTransferSession<'a> {
 
                     // Compress if enabled
                     let final_data = if let Some(comp) = &mut compressor {
-                        let (compressed, _was_compressed, decision_changed) = comp.compress(&chunk_data)?;
+                        let (compressed, _was_compressed, decision_changed) =
+                            comp.compress(&chunk_data)?;
                         if decision_changed {
                             info!("Adaptive compression: disabled compression after sampling (data is incompressible)");
                         }
@@ -273,8 +302,9 @@ impl<'a> FileTransferSession<'a> {
                     };
                     window.mark_sent(in_flight);
 
-                    debug!("Sent chunk {} (window: {}/{})", 
-                        chunk_index, 
+                    debug!(
+                        "Sent chunk {} (window: {}/{})",
+                        chunk_index,
                         window.in_flight_count(),
                         window_config.max_window_size
                     );
@@ -303,9 +333,9 @@ impl<'a> FileTransferSession<'a> {
             // Check for timeouts and retry
             let timed_out = window.check_timeouts();
             for chunk in timed_out {
-                warn!("Chunk {} timed out, retrying (attempt {})", 
-                    chunk.chunk_index, 
-                    chunk.retry_count
+                warn!(
+                    "Chunk {} timed out, retrying (attempt {})",
+                    chunk.chunk_index, chunk.retry_count
                 );
 
                 // Apply bandwidth throttling for retries if enabled
@@ -371,7 +401,7 @@ impl<'a> FileTransferSession<'a> {
     }
 
     /// Receive a file from the peer
-    /// 
+    ///
     /// The total number of chunks is determined from the first chunk message received.
     pub async fn receive_file(&mut self, output_path: &Path) -> Result<()> {
         info!("Starting file receive: {:?}", output_path);
@@ -401,7 +431,7 @@ impl<'a> FileTransferSession<'a> {
                         total_chunks = Some(chunk_msg.total_chunks);
                         info!("Transfer has {} total chunks", chunk_msg.total_chunks);
                     }
-                    
+
                     let chunk_index = chunk_msg.chunk_index as u32;
 
                     // Verify checksum first (fast, must be sync to catch corruption)
@@ -418,7 +448,7 @@ impl<'a> FileTransferSession<'a> {
                     };
                     writer.write_chunk(chunk_index, &final_data).await?;
                     received += 1;
-                    
+
                     // Ensure ACK send completed before processing next chunk
                     ack_future.await?;
 
@@ -547,7 +577,7 @@ impl ChunkWriter {
         let mut partial_path = path.as_os_str().to_os_string();
         partial_path.push(".partial");
         let partial_path = PathBuf::from(partial_path);
-        
+
         let file = File::create(&partial_path).await.map_err(|e| {
             Error::Network(std::io::Error::new(
                 e.kind(),
@@ -571,7 +601,7 @@ impl ChunkWriter {
 
         Ok(())
     }
-    
+
     /// Get the partial file path
     fn partial_path(&self) -> PathBuf {
         let mut partial_path = self.path.as_os_str().to_os_string();
@@ -584,7 +614,7 @@ impl ChunkWriter {
         // Compute paths before consuming self
         let partial_path = self.partial_path();
         let final_path = self.path.clone();
-        
+
         // Ensure all data is written
         self.file.sync_all().await?;
         drop(self.file);

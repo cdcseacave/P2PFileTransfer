@@ -107,8 +107,7 @@ impl Default for UiConfig {
         Self {
             theme: "dark".to_string(),
             auto_accept_transfers: false,
-            default_download_path: dirs::download_dir()
-                .unwrap_or_else(|| PathBuf::from(".")),
+            default_download_path: dirs::download_dir().unwrap_or_else(|| PathBuf::from(".")),
         }
     }
 }
@@ -144,15 +143,11 @@ mod dirs {
         }
         #[cfg(target_os = "macos")]
         {
-            Some(PathBuf::from(
-                std::env::var("HOME").ok()? + "/Downloads",
-            ))
+            Some(PathBuf::from(std::env::var("HOME").ok()? + "/Downloads"))
         }
         #[cfg(target_os = "linux")]
         {
-            Some(PathBuf::from(
-                std::env::var("HOME").ok()? + "/Downloads",
-            ))
+            Some(PathBuf::from(std::env::var("HOME").ok()? + "/Downloads"))
         }
         #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
         {

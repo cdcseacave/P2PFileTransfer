@@ -73,7 +73,7 @@ impl AdaptiveCompressor {
     /// Returns (compressed_data, compression_was_used, compression_decision_changed)
     pub fn compress(&mut self, data: &[u8]) -> Result<(Vec<u8>, bool, bool)> {
         let original_size = data.len();
-        
+
         // If compression is already decided and disabled, return original data
         if self.compression_decided && !self.compression_enabled {
             return Ok((data.to_vec(), false, false));
@@ -92,23 +92,25 @@ impl AdaptiveCompressor {
             // After sampling enough chunks, make a decision
             if self.chunks_sampled >= self.sample_size {
                 self.compression_decided = true;
-                
+
                 // Calculate compression ratio: original / compressed
                 let ratio = self.total_original_size as f64 / self.total_compressed_size as f64;
-                
+
                 let decision_changed = if ratio < self.threshold {
                     // Compression not beneficial, disable it
                     self.compression_enabled = false;
                     tracing::info!(
                         "Adaptive compression: DISABLED (ratio: {:.2}, threshold: {:.2})",
-                        ratio, self.threshold
+                        ratio,
+                        self.threshold
                     );
                     true
                 } else {
                     // Compression is beneficial, keep it enabled
                     tracing::info!(
                         "Adaptive compression: ENABLED (ratio: {:.2}, threshold: {:.2})",
-                        ratio, self.threshold
+                        ratio,
+                        self.threshold
                     );
                     false
                 };
@@ -249,7 +251,10 @@ mod tests {
         assert!(used3, "Should compress this chunk");
         assert!(!changed3, "Should keep compression enabled");
         assert!(compressor.is_decided(), "Should be decided now");
-        assert!(compressor.is_compression_enabled(), "Compression should stay enabled");
+        assert!(
+            compressor.is_compression_enabled(),
+            "Compression should stay enabled"
+        );
 
         // Verify compression was effective
         assert!(compressed1.len() < chunk1.len());
@@ -269,7 +274,7 @@ mod tests {
         // This creates high-entropy data that won't compress further
         let random_data = b"Random text that will be pre-compressed ".repeat(100);
         let pre_compressed = compress(&random_data, 3).unwrap();
-        
+
         // Split into 3 chunks for sampling
         let chunk_size = pre_compressed.len() / 3;
         let chunk1 = &pre_compressed[0..chunk_size];
@@ -286,7 +291,10 @@ mod tests {
         // Should decide to disable compression (already compressed data doesn't compress further)
         assert!(changed, "Should change decision to disable");
         assert!(compressor.is_decided(), "Should be decided");
-        assert!(!compressor.is_compression_enabled(), "Should disable compression");
+        assert!(
+            !compressor.is_compression_enabled(),
+            "Should disable compression"
+        );
 
         // Subsequent chunks should not be compressed
         let chunk4 = &pre_compressed[0..chunk_size];

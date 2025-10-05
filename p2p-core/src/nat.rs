@@ -132,7 +132,10 @@ impl StunClient {
         for stun_server in &self.stun_servers {
             match self.query_stun_server(stun_server) {
                 Ok(endpoint) => {
-                    info!("Discovered public endpoint via {}: {:?}", stun_server, endpoint);
+                    info!(
+                        "Discovered public endpoint via {}: {:?}",
+                        stun_server, endpoint
+                    );
                     return Ok(endpoint);
                 }
                 Err(e) => {
@@ -141,10 +144,10 @@ impl StunClient {
                 }
             }
         }
-        
+
         Err(Error::Network(std::io::Error::new(
             std::io::ErrorKind::Other,
-            "Failed to discover public endpoint from any STUN server"
+            "Failed to discover public endpoint from any STUN server",
         )))
     }
 
@@ -153,13 +156,13 @@ impl StunClient {
         // Create UDP socket bound to any available port
         let socket = UdpSocket::bind("0.0.0.0:0")?;
         socket.set_read_timeout(Some(self.timeout))?;
-        
+
         let local_addr = socket.local_addr()?;
         debug!("Local socket bound to: {}", local_addr);
 
         // Build STUN BINDING request
         let request = self.build_binding_request();
-        
+
         // Send request to STUN server
         socket.send_to(&request, server)?;
         debug!("Sent BINDING request to {}", server);
@@ -176,25 +179,29 @@ impl StunClient {
     /// Build a STUN BINDING request packet
     fn build_binding_request(&self) -> Vec<u8> {
         let mut packet = Vec::new();
-        
+
         // Message Type (2 bytes): BINDING REQUEST
         packet.extend_from_slice(&BINDING_REQUEST.to_be_bytes());
-        
+
         // Message Length (2 bytes): 0 (no attributes)
         packet.extend_from_slice(&0u16.to_be_bytes());
-        
+
         // Magic Cookie (4 bytes)
         packet.extend_from_slice(&MAGIC_COOKIE.to_be_bytes());
-        
+
         // Transaction ID (12 bytes) - random
         let transaction_id: [u8; 12] = rand::random();
         packet.extend_from_slice(&transaction_id);
-        
+
         packet
     }
 
     /// Parse a STUN BINDING response packet
-    fn parse_binding_response(&self, data: &[u8], local_addr: SocketAddr) -> Result<PublicEndpoint> {
+    fn parse_binding_response(
+        &self,
+        data: &[u8],
+        local_addr: SocketAddr,
+    ) -> Result<PublicEndpoint> {
         if data.len() < 20 {
             return Err(Error::Protocol("STUN response too short".to_string()));
         }
@@ -210,7 +217,7 @@ impl StunClient {
 
         // Parse message length
         let msg_length = u16::from_be_bytes([data[2], data[3]]) as usize;
-        
+
         // Verify magic cookie
         let cookie = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
         if cookie != MAGIC_COOKIE {
@@ -223,7 +230,7 @@ impl StunClient {
         // Parse attributes
         let mut offset = 20;
         let end = 20 + msg_length;
-        
+
         while offset < end {
             if offset + 4 > data.len() {
                 break;
@@ -270,7 +277,9 @@ impl StunClient {
             offset += (attr_length + 3) & !3;
         }
 
-        Err(Error::Protocol("No address attribute found in STUN response".to_string()))
+        Err(Error::Protocol(
+            "No address attribute found in STUN response".to_string(),
+        ))
     }
 
     /// Parse XOR-MAPPED-ADDRESS attribute
@@ -281,7 +290,7 @@ impl StunClient {
 
         let family = data[1];
         let xor_port = u16::from_be_bytes([data[2], data[3]]);
-        
+
         // XOR port with most significant 16 bits of magic cookie
         let port = xor_port ^ (MAGIC_COOKIE >> 16) as u16;
 
@@ -289,34 +298,41 @@ impl StunClient {
             0x01 => {
                 // IPv4
                 if data.len() < 8 {
-                    return Err(Error::Protocol("XOR-MAPPED-ADDRESS IPv4 data too short".to_string()));
+                    return Err(Error::Protocol(
+                        "XOR-MAPPED-ADDRESS IPv4 data too short".to_string(),
+                    ));
                 }
-                
+
                 let xor_addr = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
                 let addr = xor_addr ^ MAGIC_COOKIE;
                 let ip = Ipv4Addr::from(addr);
-                
+
                 Ok(SocketAddr::new(IpAddr::V4(ip), port))
             }
             0x02 => {
                 // IPv6 - XOR with magic cookie + transaction ID
                 if data.len() < 20 {
-                    return Err(Error::Protocol("XOR-MAPPED-ADDRESS IPv6 data too short".to_string()));
+                    return Err(Error::Protocol(
+                        "XOR-MAPPED-ADDRESS IPv6 data too short".to_string(),
+                    ));
                 }
-                
+
                 let mut xor_key = Vec::new();
                 xor_key.extend_from_slice(&MAGIC_COOKIE.to_be_bytes());
                 xor_key.extend_from_slice(transaction_id);
-                
+
                 let mut addr_bytes = [0u8; 16];
                 for i in 0..16 {
                     addr_bytes[i] = data[4 + i] ^ xor_key[i];
                 }
-                
+
                 let ip = std::net::Ipv6Addr::from(addr_bytes);
                 Ok(SocketAddr::new(IpAddr::V6(ip), port))
             }
-            _ => Err(Error::Protocol(format!("Unknown address family: {}", family))),
+            _ => Err(Error::Protocol(format!(
+                "Unknown address family: {}",
+                family
+            ))),
         }
     }
 
@@ -339,14 +355,19 @@ impl StunClient {
             0x02 => {
                 // IPv6
                 if data.len() < 20 {
-                    return Err(Error::Protocol("MAPPED-ADDRESS IPv6 data too short".to_string()));
+                    return Err(Error::Protocol(
+                        "MAPPED-ADDRESS IPv6 data too short".to_string(),
+                    ));
                 }
                 let mut addr_bytes = [0u8; 16];
                 addr_bytes.copy_from_slice(&data[4..20]);
                 let ip = std::net::Ipv6Addr::from(addr_bytes);
                 Ok(SocketAddr::new(IpAddr::V6(ip), port))
             }
-            _ => Err(Error::Protocol(format!("Unknown address family: {}", family))),
+            _ => Err(Error::Protocol(format!(
+                "Unknown address family: {}",
+                family
+            ))),
         }
     }
 
@@ -377,14 +398,14 @@ mod tests {
     fn test_build_binding_request() {
         let client = StunClient::new();
         let request = client.build_binding_request();
-        
+
         // Verify structure
         assert_eq!(request.len(), 20); // Header only, no attributes
-        
+
         // Verify message type
         let msg_type = u16::from_be_bytes([request[0], request[1]]);
         assert_eq!(msg_type, BINDING_REQUEST);
-        
+
         // Verify magic cookie
         let cookie = u32::from_be_bytes([request[4], request[5], request[6], request[7]]);
         assert_eq!(cookie, MAGIC_COOKIE);
@@ -393,22 +414,24 @@ mod tests {
     #[test]
     fn test_parse_xor_mapped_address() {
         let client = StunClient::new();
-        
+
         // Create test data for 192.0.2.1:32853
         // XOR with magic cookie: 0x2112A442
         let port = 32853u16;
         let xor_port = port ^ (MAGIC_COOKIE >> 16) as u16;
-        
+
         let ip = 0xC0000201u32; // 192.0.2.1
         let xor_ip = ip ^ MAGIC_COOKIE;
-        
+
         let mut data = vec![0u8, 0x01]; // Reserved, Family (IPv4)
         data.extend_from_slice(&xor_port.to_be_bytes());
         data.extend_from_slice(&xor_ip.to_be_bytes());
-        
+
         let transaction_id = [0u8; 12];
-        let result = client.parse_xor_mapped_address(&data, &transaction_id).unwrap();
-        
+        let result = client
+            .parse_xor_mapped_address(&data, &transaction_id)
+            .unwrap();
+
         assert_eq!(result.port(), port);
         assert_eq!(result.ip(), IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)));
     }
@@ -416,12 +439,15 @@ mod tests {
     #[test]
     fn test_nat_type_detection() {
         let client = StunClient::new();
-        
+
         let local = "192.168.1.100:5000".parse().unwrap();
         let public_nat = "203.0.113.5:5000".parse().unwrap();
         let public_open = "192.168.1.100:5000".parse().unwrap();
-        
+
         assert_eq!(client.detect_nat_type(&public_open, &local), NatType::Open);
-        assert_eq!(client.detect_nat_type(&public_nat, &local), NatType::RestrictedCone);
+        assert_eq!(
+            client.detect_nat_type(&public_nat, &local),
+            NatType::RestrictedCone
+        );
     }
 }

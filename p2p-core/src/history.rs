@@ -2,10 +2,10 @@
 //!
 //! This module provides functionality to track and query past transfers.
 
+use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
-use crate::error::{Error, Result};
 
 /// Direction of a transfer
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,11 +52,7 @@ pub struct TransferRecord {
 
 impl TransferRecord {
     /// Create a new transfer record
-    pub fn new(
-        transfer_id: Uuid,
-        direction: TransferDirection,
-        peer_address: String,
-    ) -> Self {
+    pub fn new(transfer_id: Uuid, direction: TransferDirection, peer_address: String) -> Self {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -113,7 +109,7 @@ impl TransferRecord {
         self.end_time = now;
         self.duration_secs = now.saturating_sub(self.start_time);
         self.status = TransferStatus::Failed;
-        
+
         // Store error in files list for now (could add dedicated error field)
         self.files.push(format!("Error: {}", error));
     }
@@ -154,17 +150,12 @@ impl TransferHistory {
 
     /// Get records filtered by status
     pub fn filter_by_status(&self, status: TransferStatus) -> Vec<&TransferRecord> {
-        self.records
-            .iter()
-            .filter(|r| r.status == status)
-            .collect()
+        self.records.iter().filter(|r| r.status == status).collect()
     }
 
     /// Get a specific transfer by ID
     pub fn get_by_id(&self, transfer_id: Uuid) -> Option<&TransferRecord> {
-        self.records
-            .iter()
-            .find(|r| r.transfer_id == transfer_id)
+        self.records.iter().find(|r| r.transfer_id == transfer_id)
     }
 
     /// Get most recent transfers (up to limit)
@@ -178,9 +169,8 @@ impl TransferHistory {
     pub async fn load_from_file(path: &Path) -> Result<Self> {
         let data = tokio::fs::read(path).await?;
 
-        serde_json::from_slice(&data).map_err(|e| {
-            Error::Protocol(format!("Failed to deserialize history: {}", e))
-        })
+        serde_json::from_slice(&data)
+            .map_err(|e| Error::Protocol(format!("Failed to deserialize history: {}", e)))
     }
 
     /// Save history to file
@@ -190,9 +180,8 @@ impl TransferHistory {
             tokio::fs::create_dir_all(parent).await?;
         }
 
-        let data = serde_json::to_vec_pretty(self).map_err(|e| {
-            Error::Protocol(format!("Failed to serialize history: {}", e))
-        })?;
+        let data = serde_json::to_vec_pretty(self)
+            .map_err(|e| Error::Protocol(format!("Failed to serialize history: {}", e)))?;
 
         tokio::fs::write(path, data).await?;
         Ok(())
@@ -239,7 +228,8 @@ mod tests {
         assert_eq!(record.status, TransferStatus::Completed);
         assert_eq!(record.bytes_transferred, 1024);
         assert_eq!(record.files, files);
-        assert!(record.duration_secs >= 0);
+        // duration_secs should be positive (end_time >= start_time)
+        assert!(record.duration_secs > 0 || record.end_time == record.start_time);
     }
 
     #[test]
@@ -262,8 +252,16 @@ mod tests {
         history.add_record(record2.clone());
 
         assert_eq!(history.records().len(), 2);
-        assert_eq!(history.filter_by_direction(TransferDirection::Send).len(), 1);
-        assert_eq!(history.filter_by_direction(TransferDirection::Receive).len(), 1);
+        assert_eq!(
+            history.filter_by_direction(TransferDirection::Send).len(),
+            1
+        );
+        assert_eq!(
+            history
+                .filter_by_direction(TransferDirection::Receive)
+                .len(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -281,7 +279,9 @@ mod tests {
 
         // Save and load
         history.save_to_file(&history_path).await.unwrap();
-        let loaded = TransferHistory::load_from_file(&history_path).await.unwrap();
+        let loaded = TransferHistory::load_from_file(&history_path)
+            .await
+            .unwrap();
 
         assert_eq!(loaded.records().len(), 1);
         assert_eq!(loaded.records()[0].direction, TransferDirection::Send);

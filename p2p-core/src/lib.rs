@@ -3,22 +3,23 @@
 //! This crate provides the core functionality for peer-to-peer file transfers
 //! with compression and resume capabilities.
 
-pub mod bandwidth;       // Bandwidth throttling
+pub mod bandwidth; // Bandwidth throttling
 pub mod compression;
+pub mod config;
 pub mod discovery;
 pub mod error;
 pub mod handshake;
-pub mod history;         // Transfer history tracking
-pub mod nat;             // NAT traversal and hole punching
+pub mod history; // Transfer history tracking
+pub mod nat; // NAT traversal and hole punching
 pub mod network;
 pub mod protocol;
+pub mod reconnect; // Auto-reconnect with exponential backoff
+pub mod state;
 pub mod transfer;
-pub mod transfer_file;   // Single-file transfer
+pub mod transfer_file; // Single-file transfer
 pub mod transfer_folder; // Folder transfer orchestration
 pub mod verification;
-pub mod config;
-pub mod state;
-pub mod window;          // Sliding window protocol
+pub mod window; // Sliding window protocol
 
 pub use error::{Error, Result};
 pub use protocol::Message;

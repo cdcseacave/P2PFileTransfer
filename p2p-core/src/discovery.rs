@@ -27,7 +27,7 @@ impl DiscoveryManager {
         peer_ttl: Duration,
     ) -> Result<Self> {
         let service = DiscoveryService::new(device_name, transfer_port, capabilities).await?;
-        
+
         Ok(Self {
             service: Arc::new(service),
             peers: Arc::new(RwLock::new(HashMap::new())),
@@ -38,7 +38,7 @@ impl DiscoveryManager {
     /// Start the discovery service
     pub async fn start(self: Arc<Self>) -> Result<()> {
         info!("Starting discovery manager");
-        
+
         // Spawn beacon broadcaster
         let broadcaster = {
             let service = Arc::clone(&self.service);
@@ -58,7 +58,7 @@ impl DiscoveryManager {
             let service = Arc::clone(&self.service);
             let peers = Arc::clone(&self.peers);
             let our_device_id = service.device_id();
-            
+
             tokio::spawn(async move {
                 loop {
                     match service.recv_beacon().await {
@@ -67,12 +67,12 @@ impl DiscoveryManager {
                             if beacon.device_id == our_device_id {
                                 continue;
                             }
-                            
+
                             let ip = src_addr.ip();
                             let peer_info = PeerInfo::from((beacon.clone(), ip));
-                            
+
                             let mut peers_lock = peers.write().await;
-                            
+
                             if let Some(existing) = peers_lock.get_mut(&beacon.device_id) {
                                 existing.update_last_seen();
                                 debug!("Updated peer: {}", existing.device_name);
@@ -93,15 +93,15 @@ impl DiscoveryManager {
         let cleanup = {
             let peers = Arc::clone(&self.peers);
             let ttl = self.peer_ttl;
-            
+
             tokio::spawn(async move {
                 let mut ticker = interval(Duration::from_secs(5));
                 loop {
                     ticker.tick().await;
-                    
+
                     let mut peers_lock = peers.write().await;
                     let before_count = peers_lock.len();
-                    
+
                     peers_lock.retain(|_, peer| {
                         let alive = peer.is_alive(ttl);
                         if !alive {
@@ -109,7 +109,7 @@ impl DiscoveryManager {
                         }
                         alive
                     });
-                    
+
                     let after_count = peers_lock.len();
                     if before_count != after_count {
                         debug!("Cleaned up {} stale peers", before_count - after_count);
@@ -199,7 +199,7 @@ mod tests {
         if let Ok(mgr) = manager {
             // Initially no peers
             assert_eq!(mgr.get_peers().await.len(), 0);
-            
+
             // Non-existent peer
             let random_id = Uuid::new_v4();
             assert!(mgr.get_peer(&random_id).await.is_none());

@@ -103,7 +103,7 @@ impl BandwidthLimiter {
             let now = Instant::now();
             let elapsed = now.duration_since(bucket.last_refill).as_secs_f64();
             let new_tokens = elapsed * bucket.refill_rate;
-            
+
             bucket.tokens = (bucket.tokens + new_tokens).min(bucket.capacity);
             bucket.last_refill = now;
 
@@ -196,7 +196,10 @@ pub fn parse_bandwidth(s: &str) -> Result<u64, String> {
         let num_str = s.trim_end_matches("kb").trim_end_matches('k');
         (num_str, 1024u64)
     } else {
-        return Err(format!("Invalid bandwidth format: {}. Use K, M, or G suffix (e.g., '10M', '1G')", s));
+        return Err(format!(
+            "Invalid bandwidth format: {}. Use K, M, or G suffix (e.g., '10M', '1G')",
+            s
+        ));
     };
 
     let num = num_str
@@ -288,14 +291,18 @@ mod tests {
         assert!(limiter.is_enabled());
 
         let start = Instant::now();
-        
+
         // First 2 MB should be fast (burst capacity allows it)
         limiter.wait_for_tokens(1024 * 1024).await;
         limiter.wait_for_tokens(1024 * 1024).await;
-        
+
         let burst_time = start.elapsed();
         // Burst should be fast (within 200ms due to test overhead)
-        assert!(burst_time.as_millis() < 200, "Burst was too slow: {:?}", burst_time);
+        assert!(
+            burst_time.as_millis() < 200,
+            "Burst was too slow: {:?}",
+            burst_time
+        );
 
         // Next transfer after burst should wait
         let wait_start = Instant::now();
@@ -303,7 +310,11 @@ mod tests {
         let wait_time = wait_start.elapsed();
 
         // Should have waited at least 800ms (with tolerance for test overhead)
-        assert!(wait_time.as_millis() >= 800, "Didn't wait long enough: {:?}", wait_time);
+        assert!(
+            wait_time.as_millis() >= 800,
+            "Didn't wait long enough: {:?}",
+            wait_time
+        );
     }
 
     #[tokio::test]
@@ -312,15 +323,19 @@ mod tests {
         let limiter = BandwidthLimiter::new(1024 * 1024);
 
         let start = Instant::now();
-        
+
         // First burst should be immediate (up to 2 MB)
         limiter.wait_for_tokens(1024 * 1024).await;
         limiter.wait_for_tokens(1024 * 1024).await;
-        
+
         let burst_time = start.elapsed();
 
         // Burst should be fast
-        assert!(burst_time.as_millis() < 100, "Burst was too slow: {:?}", burst_time);
+        assert!(
+            burst_time.as_millis() < 100,
+            "Burst was too slow: {:?}",
+            burst_time
+        );
 
         // Next transfer should wait
         let wait_start = Instant::now();
@@ -328,6 +343,10 @@ mod tests {
         let wait_time = wait_start.elapsed();
 
         // Should have waited
-        assert!(wait_time.as_millis() >= 400, "Didn't wait enough: {:?}", wait_time);
+        assert!(
+            wait_time.as_millis() >= 400,
+            "Didn't wait enough: {:?}",
+            wait_time
+        );
     }
 }

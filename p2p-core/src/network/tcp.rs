@@ -1,13 +1,13 @@
 //! TCP connection management
 
 use crate::error::{Error, Result};
-use crate::protocol::Message;
 use crate::network::{read_message, write_message};
+use crate::protocol::Message;
+use log::{debug, info, warn};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
-use log::{debug, info, warn};
 
 /// TCP connection with keepalive support
 pub struct TcpConnection {
@@ -37,7 +37,7 @@ impl TcpConnection {
             .map_err(Error::Network)?;
 
         stream.set_nodelay(true)?;
-        
+
         info!("Connected to {}", addr);
         Ok(Self::new(stream, addr))
     }
@@ -55,7 +55,7 @@ impl TcpConnection {
         let msg = timeout(Duration::from_secs(30), read_message(&mut self.stream))
             .await
             .map_err(|_| Error::Timeout)??;
-        
+
         self.last_activity = Instant::now();
         debug!("Received message from {}: {:?}", self.peer_addr, msg);
         Ok(msg)
@@ -101,7 +101,7 @@ impl TcpServer {
         let listener = TcpListener::bind(addr).await?;
         let local_addr = listener.local_addr()?;
         info!("TCP server listening on {}", local_addr);
-        
+
         Ok(Self {
             listener,
             local_addr,
@@ -112,9 +112,9 @@ impl TcpServer {
     pub async fn accept(&self) -> Result<TcpConnection> {
         let (stream, peer_addr) = self.listener.accept().await?;
         info!("Accepted connection from {}", peer_addr);
-        
+
         stream.set_nodelay(true)?;
-        
+
         Ok(TcpConnection::new(stream, peer_addr))
     }
 
@@ -222,7 +222,7 @@ mod tests {
 
         // Connect client
         let mut client = TcpConnection::connect(server_addr).await.unwrap();
-        
+
         // Send hello message
         let hello = Message::Hello(HelloMessage {
             protocol_version: 1,
@@ -230,13 +230,13 @@ mod tests {
             device_id: Uuid::new_v4(),
             capabilities: Capabilities::all(),
         });
-        
+
         client.send_message(&hello).await.unwrap();
         let response = client.recv_message().await.unwrap();
-        
+
         // Verify echo
         match response {
-            Message::Hello(_) => {},
+            Message::Hello(_) => {}
             _ => panic!("Expected Hello message"),
         }
 
@@ -247,17 +247,15 @@ mod tests {
     async fn test_keepalive_check() {
         let addr = "127.0.0.1:0".parse().unwrap();
         let server = TcpServer::bind(addr).await.unwrap();
-        let mut conn = TcpConnection::connect(server.local_addr())
-            .await
-            .unwrap();
-        
+        let mut conn = TcpConnection::connect(server.local_addr()).await.unwrap();
+
         // Initially should not need keepalive
         assert!(!conn.should_send_keepalive());
-        
+
         // Set short interval for testing
         conn.set_keepalive_interval(Duration::from_millis(10));
         tokio::time::sleep(Duration::from_millis(20)).await;
-        
+
         // Now should need keepalive
         assert!(conn.should_send_keepalive());
     }

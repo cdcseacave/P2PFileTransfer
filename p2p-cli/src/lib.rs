@@ -8,12 +8,12 @@
 //! - `resume`: Resume interrupted transfers
 
 mod cli;
-mod send;
-mod receive;
 mod discover;
-mod resume;
-mod nat_test;
 mod history;
+mod nat_test;
+mod receive;
+mod resume;
+mod send;
 
 use anyhow::Result;
 use clap::Parser;
@@ -25,9 +25,11 @@ pub async fn run_cli() -> Result<()> {
 
     // Initialize logging (only if not already initialized)
     let _ = if cli.verbose {
-        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug")).try_init()
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug"))
+            .try_init()
     } else {
-        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).try_init()
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+            .try_init()
     };
 
     match cli.command {
@@ -42,8 +44,25 @@ pub async fn run_cli() -> Result<()> {
             window_size,
             max_speed,
             transfer_port,
+            auto_reconnect,
+            max_retries,
         } => {
-            send::handle_send(path, to, discover, compress, compress_level, adaptive, chunk_size, window_size, max_speed, transfer_port).await?;
+            send::handle_send(
+                path,
+                to,
+                discover,
+                compress,
+                compress_level,
+                adaptive,
+                chunk_size,
+                window_size,
+                max_speed,
+                transfer_port,
+                auto_reconnect,
+                max_retries,
+                cli.verbose,
+            )
+            .await?;
         }
         cli::Commands::Receive {
             output,
@@ -58,10 +77,19 @@ pub async fn run_cli() -> Result<()> {
         cli::Commands::NatTest { stun_server } => {
             nat_test::handle_nat_test(stun_server).await?;
         }
-        cli::Commands::Resume { transfer_id, to, path } => {
+        cli::Commands::Resume {
+            transfer_id,
+            to,
+            path,
+        } => {
             resume::handle_resume(transfer_id, to, path).await?;
         }
-        cli::Commands::History { limit, direction, completed, failed } => {
+        cli::Commands::History {
+            limit,
+            direction,
+            completed,
+            failed,
+        } => {
             history::handle_history(limit, direction, completed, failed).await?;
         }
     }

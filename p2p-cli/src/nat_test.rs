@@ -1,12 +1,12 @@
 //! NAT traversal test operations
 
 use anyhow::Result;
-use p2p_core::nat::{StunClient, NatType};
+use p2p_core::nat::{NatType, StunClient};
 
 pub async fn handle_nat_test(stun_server: Option<String>) -> Result<()> {
     println!("🔌 Testing NAT traversal...");
     println!();
-    
+
     // Create STUN client
     let client = if let Some(server) = stun_server {
         println!("  Using STUN server: {}", server);
@@ -15,7 +15,7 @@ pub async fn handle_nat_test(stun_server: Option<String>) -> Result<()> {
         println!("  Using default STUN servers (Google public STUN)");
         StunClient::new()
     };
-    
+
     // Discover public endpoint
     println!("  Querying STUN server...");
     match client.discover_public_endpoint() {
@@ -26,7 +26,7 @@ pub async fn handle_nat_test(stun_server: Option<String>) -> Result<()> {
             println!("  Public Port: {}", endpoint.port);
             println!("  NAT Type:    {:?}", endpoint.nat_type);
             println!();
-            
+
             match endpoint.nat_type {
                 NatType::Open => {
                     println!("📡 No NAT detected - you have a direct internet connection.");
@@ -45,7 +45,7 @@ pub async fn handle_nat_test(stun_server: Option<String>) -> Result<()> {
                     println!("   Try using --to <address> for direct connections.");
                 }
             }
-            
+
             Ok(())
         }
         Err(e) => {
@@ -61,7 +61,7 @@ pub async fn handle_nat_test(stun_server: Option<String>) -> Result<()> {
             println!("  • Check your internet connection");
             println!("  • Use a different STUN server with --stun-server <server:port>");
             println!("  • Check firewall settings");
-            
+
             Err(e.into())
         }
     }

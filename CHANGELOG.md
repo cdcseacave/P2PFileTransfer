@@ -48,6 +48,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Transfer history**: Track and view past transfers (2025-10-05)
   - New `history` module for tracking transfer records
   - Stores transfer ID, timestamps, peer, files, bytes, duration, and status
+  - CLI command: `p2p-transfer history` with filtering options
+  - Persistent JSON storage in `~/.p2p-transfer/history.json`
+- **Auto-reconnect & auto-resume**: Automatic recovery from network failures (2025-10-05)
+  - New `reconnect` module with exponential backoff logic
+  - Automatic retry on transient network errors (connection reset, timeout, broken pipe)
+  - Exponential backoff: 2s → 4s → 8s → 16s → 32s → 60s (capped at max)
+  - Smart error classification: transient vs permanent errors
+  - CLI flags: `--auto-reconnect` (default: true), `--max-retries` (default: 5, 0=unlimited)
+  - Sender: `send_folder_with_reconnect()` wraps transfers in retry loop
+  - Receiver: `receive_folder_with_state()` auto-detects and resumes known transfers
+  - State preservation: automatic save/load between retry attempts
+  - Zero user intervention for WiFi dropouts, router restarts, brief outages
   - New `p2p-transfer history` CLI command with filtering options
   - Filter by direction (send/receive), status (completed/failed), and limit
   - History stored in `~/.p2p-transfer/history.json`

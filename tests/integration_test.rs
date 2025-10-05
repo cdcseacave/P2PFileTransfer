@@ -62,7 +62,7 @@ async fn test_full_connection_flow() {
 
     let server_result = server_handle.await.expect("Server task failed");
 
-        // Verify both sides agree
+    // Verify both sides agree
     assert!(client_result.config.compression_enabled);
     assert!(server_result.config.compression_enabled);
     assert!(client_result.agreed_capabilities.has_compression());
@@ -104,13 +104,13 @@ async fn test_concurrent_connections() {
         for i in 0..3 {
             let mut conn = server.accept().await.expect("Failed to accept");
             println!("Server: Accepted connection {}", i);
-            
+
             let handshake = HandshakeServer::new(Uuid::new_v4(), Capabilities::all());
             handshake
                 .perform_handshake(&mut conn)
                 .await
                 .expect("Handshake failed");
-            
+
             connections.push(conn);
         }
         connections.len()
@@ -135,7 +135,7 @@ async fn test_concurrent_connections() {
                 .perform_handshake(&mut conn, config)
                 .await
                 .expect("Handshake failed");
-            
+
             println!("Client {}: Handshake complete", i);
         });
         client_handles.push(handle);
@@ -164,11 +164,11 @@ async fn test_capability_negotiation() {
     // Server with limited capabilities
     let server_handle = tokio::spawn(async move {
         let mut conn = server.accept().await.unwrap();
-        
+
         // Server only supports compression, not resume
         let capabilities = Capabilities::new().with_compression();
         let handshake = HandshakeServer::new(Uuid::new_v4(), capabilities);
-        
+
         handshake.perform_handshake(&mut conn).await.unwrap()
     });
 
@@ -183,7 +183,7 @@ async fn test_capability_negotiation() {
         .perform_handshake(&mut client_conn, config)
         .await
         .unwrap();
-    
+
     let server_result = server_handle.await.unwrap();
 
     // Both should agree on compression only
