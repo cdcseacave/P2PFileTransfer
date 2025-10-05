@@ -110,8 +110,10 @@ pub struct ConfigMessage {
     pub compression_level: i32,
     /// Chunk size in bytes
     pub chunk_size: u32,
-    /// Window size (1 = sequential, >1 = windowed/parallel chunks)
+    /// Window size (1 = sequential, 2+ = windowed/parallel chunks)
     pub window_size: usize,
+    /// Bandwidth limit in bytes per second (0 = unlimited)
+    pub bandwidth_limit: u64,
 }
 
 /// Transfer information and metadata

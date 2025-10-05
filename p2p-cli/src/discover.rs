@@ -55,12 +55,12 @@ pub async fn handle_discover(timeout_secs: u64) -> Result<()> {
     Ok(())
 }
 
-pub async fn discover_and_select_peer() -> Result<SocketAddr> {
+pub async fn discover_and_select_peer(transfer_port: u16) -> Result<SocketAddr> {
     let device_name = format!("cli-{}", &Uuid::new_v4().to_string()[..8]);
     let manager = Arc::new(
         DiscoveryManager::new(
             device_name,
-            7778,
+            transfer_port,
             Capabilities::all(),
             Duration::from_secs(10),
         )

@@ -37,9 +37,10 @@ pub async fn run_cli() -> Result<()> {
             compress_level,
             chunk_size,
             window_size,
-            port,
+            max_speed,
+            transfer_port,
         } => {
-            send::handle_send(path, to, discover, compress, compress_level, chunk_size, window_size, port).await?;
+            send::handle_send(path, to, discover, compress, compress_level, chunk_size, window_size, max_speed, transfer_port).await?;
         }
         cli::Commands::Receive {
             output,

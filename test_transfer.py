@@ -11,6 +11,7 @@ import sys
 import platform
 import shutil
 import filecmp
+import argparse
 from pathlib import Path
 
 
@@ -63,7 +64,15 @@ def format_size(size_bytes: int) -> str:
 
 
 def main():
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(description='Test P2P file transfer with optional bandwidth throttling')
+    parser.add_argument('--size', type=int, default=10, help='Test file size in MB (default: 10)')
+    parser.add_argument('--max-speed', type=str, help='Bandwidth limit (e.g., "2M", "5M", "1G")')
+    args = parser.parse_args()
+    
     print("=== P2P Transfer Test ===")
+    if args.max_speed:
+        print(f"Bandwidth limit: {args.max_speed}")
     print()
     
     # Setup paths
@@ -74,7 +83,7 @@ def main():
     binary_path = get_binary_path()
     
     # Create test file
-    create_test_file(test_file, size_mb=10)
+    create_test_file(test_file, size_mb=args.size)
     file_size = get_file_size(test_file)
     print(f"Test file size: {format_size(file_size)}")
     print()
@@ -121,6 +130,14 @@ def main():
         "--window-size", "16"
     ]
     
+    # Add bandwidth limit if specified
+    if args.max_speed:
+        sender_cmd.extend(["--max-speed", args.max_speed])
+        print(f"  Using bandwidth limit: {args.max_speed}")
+    
+    # Track transfer time
+    start_time = time.time()
+    
     try:
         result = subprocess.run(
             sender_cmd,
@@ -129,6 +146,7 @@ def main():
             timeout=30
         )
         sender_exit_code = result.returncode
+        elapsed_time = time.time() - start_time
         
         # Print sender output for debugging
         if result.stdout:
@@ -155,6 +173,12 @@ def main():
     print()
     print("=== Test Results ===")
     print(f"Sender exit code: {sender_exit_code}")
+    print(f"Transfer time: {elapsed_time:.2f} seconds")
+    
+    # Calculate and display transfer speed
+    if sender_exit_code == 0:
+        speed_mbps = (file_size / (1024 * 1024)) / elapsed_time
+        print(f"Average speed: {speed_mbps:.2f} MB/s")
     
     # Check results
     test_passed = False

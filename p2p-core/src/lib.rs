@@ -3,6 +3,7 @@
 //! This crate provides the core functionality for peer-to-peer file transfers
 //! with compression and resume capabilities.
 
+pub mod bandwidth;       // Bandwidth throttling
 pub mod compression;
 pub mod discovery;
 pub mod error;

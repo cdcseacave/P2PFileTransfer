@@ -55,6 +55,8 @@ pub struct TransferConfig {
     pub chunk_timeout_ms: u64,
     /// Maximum chunk retry attempts
     pub max_chunk_retries: u32,
+    /// Bandwidth limit in bytes per second (0 = unlimited)
+    pub bandwidth_limit: u64,
 }
 
 impl Default for TransferConfig {
@@ -66,6 +68,7 @@ impl Default for TransferConfig {
             max_chunks_in_flight: 16,
             chunk_timeout_ms: 5000,
             max_chunk_retries: 3,
+            bandwidth_limit: 0, // Unlimited by default
         }
     }
 }

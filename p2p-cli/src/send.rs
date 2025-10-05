@@ -25,11 +25,15 @@ pub async fn handle_send(
     compress_level: i32,
     chunk_size: u32,
     window_size: usize,
-    _port: u16,  // Reserved for future use
+    bandwidth_limit: u64,
+    transfer_port: u16,
 ) -> Result<()> {
     println!("📤 Starting send operation");
     println!("  Path: {}", path.display());
     println!("  Mode: {} (window size: {})", if window_size == 1 { "Sequential" } else { "Windowed" }, window_size);
+    if bandwidth_limit > 0 {
+        println!("  Speed limit: {}", p2p_core::bandwidth::format_bandwidth(bandwidth_limit));
+    }
     
     // Validate path exists
     if !path.exists() {
@@ -43,8 +47,8 @@ pub async fn handle_send(
         addr_str.parse::<SocketAddr>()?
     } else if discover {
         // Use discovery
-        println!("  Using peer discovery...");
-        let discovered_addr = discover_and_select_peer().await?;
+        println!("  Using peer discovery on port {}...", transfer_port);
+        let discovered_addr = discover_and_select_peer(transfer_port).await?;
         println!("  Selected peer: {}", discovered_addr);
         discovered_addr
     } else {
@@ -67,6 +71,7 @@ pub async fn handle_send(
         compression_level: compress_level,
         chunk_size: chunk_size * 1024, // Convert KB to bytes
         window_size,
+        bandwidth_limit,
     };
     
     let handshake_result = handshake.perform_handshake(&mut connection, config.clone()).await?;

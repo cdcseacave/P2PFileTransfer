@@ -3,6 +3,11 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
+/// Parse bandwidth string into bytes per second
+fn parse_bandwidth_arg(s: &str) -> Result<u64, String> {
+    p2p_core::bandwidth::parse_bandwidth(s)
+}
+
 #[derive(Parser)]
 #[command(name = "p2p-transfer")]
 #[command(about = "P2P file transfer with compression", long_about = None)]
@@ -47,9 +52,13 @@ pub enum Commands {
         #[arg(long, default_value = "16")]
         window_size: usize,
 
-        /// Listen port
+        /// Maximum transfer speed (e.g., "10M", "1G", "512K", "unlimited"). Default: unlimited
+        #[arg(long, value_parser = parse_bandwidth_arg, default_value = "0")]
+        max_speed: u64,
+
+        /// Transfer port (TCP port for file transfer connections)
         #[arg(short, long, default_value = "7778")]
-        port: u16,
+        transfer_port: u16,
     },
 
     /// Receive files from a peer

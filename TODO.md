@@ -168,43 +168,42 @@ p2p-transfer receive ./downloads --port 8080 --password mysecret
 
 **Time Estimate**: 3-4 hours  
 **Difficulty**: Medium  
-**Status**: Planned
+**Status**: In Progress
 
-### 1. Bandwidth Throttling (1 hour)
+### ✅ 1. Bandwidth Throttling (1 hour) - COMPLETE
+
+**Completed**: October 5, 2025
 
 **Purpose**: Limit transfer speed to avoid network congestion.
 
 **Implementation**:
-```rust
-pub struct BandwidthLimiter {
-    max_bytes_per_sec: u64,
-    token_bucket: Arc<Mutex<TokenBucket>>,
-}
-
-impl BandwidthLimiter {
-    pub async fn wait_for_tokens(&self, bytes: usize);
-}
-```
+- ✅ Token bucket algorithm with burst support
+- ✅ Rate limiter integrated into chunk sender
+- ✅ `--max-speed` CLI flag
+- ✅ Support units: K, M, G (kilobytes, megabytes, gigabytes/sec)
+- ✅ Comprehensive tests including burst behavior
 
 **CLI Integration**:
 ```bash
 # Limit to 10 MB/s
 p2p-transfer send file.zip --to 192.168.1.100:8080 --max-speed 10M
 
-# Limit to 1 Gb/s
+# Limit to 1 GB/s
 p2p-transfer send file.zip --to 192.168.1.100:8080 --max-speed 1G
+
+# Unlimited (default)
+p2p-transfer send file.zip --to 192.168.1.100:8080
 ```
 
-**Tasks**:
-- [ ] Implement token bucket algorithm
-- [ ] Add rate limiter to chunk sender
-- [ ] Add `--max-speed` CLI flag
-- [ ] Support units: K, M, G (kilobytes, megabytes, gigabytes/sec)
-
-**Files to Create/Modify**:
-- `p2p-core/src/bandwidth.rs` (NEW) - Rate limiter
-- `p2p-core/src/transfer_file.rs` (modify) - Apply throttling
-- `p2p-cli/src/lib.rs` (modify) - Add flag
+**Files Created/Modified**:
+- `p2p-core/src/bandwidth.rs` (NEW) - Token bucket rate limiter with 2s burst capacity
+- `p2p-core/src/transfer_file.rs` (modified) - Applied throttling to all chunk sends
+- `p2p-core/src/protocol.rs` (modified) - Added bandwidth_limit field to ConfigMessage
+- `p2p-core/src/config.rs` (modified) - Added bandwidth_limit to TransferConfig
+- `p2p-cli/src/cli.rs` (modified) - Added --max-speed flag
+- `p2p-cli/src/send.rs` (modified) - Parse and apply bandwidth limit
+- `p2p-cli/src/lib.rs` (modified) - Pass max_speed parameter
+- `demo_bandwidth.sh` (NEW) - Demo script for testing bandwidth throttling
 
 ### 2. Adaptive Compression (1 hour)
 

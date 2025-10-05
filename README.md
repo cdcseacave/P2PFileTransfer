@@ -13,12 +13,13 @@ A lightning-fast, resilient peer-to-peer file transfer system built in Rust with
 P2P File Transfer is a production-ready command-line tool for transferring files and folders between devices on a local network. It features automatic peer discovery, fault-tolerant transfers with resume capability, and optimized performance through parallel chunk transfers.
 
 **Key Highlights:**
-- � **Windowed Transfer Protocol**: Parallel chunk transfers for 5-15x speedup on high-latency networks
+- ⚡ **Windowed Transfer Protocol**: Parallel chunk transfers for 5-15x speedup on high-latency networks
 - 💾 **Automatic Resume**: Seamlessly continue interrupted transfers with state persistence
 - 📊 **Real-time Progress**: Two-tier progress bars showing overall and per-file progress
 - 🗜️ **Smart Compression**: Zstd compression with configurable levels (1-22)
 - 🔍 **Auto Discovery**: Find peers on local network via UDP broadcast
 - ✅ **Data Integrity**: CRC32 per-chunk + SHA256 per-file verification
+- 🚦 **Bandwidth Throttling**: Configurable speed limits to prevent network congestion
 
 ## Features
 
@@ -55,6 +56,7 @@ P2P File Transfer is a production-ready command-line tool for transferring files
 - ✅ **UDP Discovery**: Automatic peer detection on local network
 - ✅ **Handshake Protocol**: Version and capability negotiation
 - ✅ **TCP_NODELAY**: Low-latency optimizations
+- ✅ **Bandwidth Throttling**: Token bucket rate limiting with burst support
 
 ## Quick Start
 
@@ -148,6 +150,28 @@ p2p-transfer send file.zip --to 192.168.1.100:8080 --window-size 64
 - Window 16 = 16MB memory
 - Window 32 = 32MB memory
 - Window 64 = 64MB memory
+
+### Bandwidth Throttling
+
+```bash
+# Limit to 10 MB/s (useful for shared networks)
+p2p-transfer send largefile.zip --to 192.168.1.100:8080 --max-speed 10M
+
+# Limit to 1 GB/s (for very fast networks)
+p2p-transfer send largefile.zip --to 192.168.1.100:8080 --max-speed 1G
+
+# Limit to 512 KB/s (for slow connections)
+p2p-transfer send largefile.zip --to 192.168.1.100:8080 --max-speed 512K
+
+# Unlimited bandwidth (default)
+p2p-transfer send largefile.zip --to 192.168.1.100:8080
+```
+
+**How it works**:
+- Token bucket algorithm with 2-second burst capacity
+- Allows short bursts while maintaining average rate
+- Applied to all chunk sends including retries
+- Supported units: K (KB/s), M (MB/s), G (GB/s)
 
 ## Example Sessions
 

@@ -244,6 +244,8 @@ mod tests {
             compression_enabled: true,
             compression_level: 3,
             chunk_size: 65536,
+            window_size: 16,
+            bandwidth_limit: 0,
         };
 
         let client_result = handshake_client

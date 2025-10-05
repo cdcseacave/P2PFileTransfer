@@ -10,6 +10,7 @@
 //! It never manages connections directly, only borrows them.
 
 use crate::{
+    bandwidth::BandwidthLimiter,
     compression::{Compressor, Decompressor},
     error::{Error, Result},
     network::tcp::TcpConnection,
@@ -41,6 +42,8 @@ pub struct FileTransferSession<'a> {
     transfer_id: Uuid,
     /// File index
     file_index: u32,
+    /// Bandwidth limiter (only created if throttling is enabled)
+    bandwidth_limiter: Option<BandwidthLimiter>,
 }
 
 impl<'a> FileTransferSession<'a> {
@@ -51,11 +54,17 @@ impl<'a> FileTransferSession<'a> {
         transfer_id: Uuid,
         file_index: u32,
     ) -> Self {
+        let bandwidth_limiter = if config.bandwidth_limit > 0 {
+            Some(BandwidthLimiter::new(config.bandwidth_limit))
+        } else {
+            None
+        };
         Self {
             connection,
             config,
             transfer_id,
             file_index,
+            bandwidth_limiter,
         }
     }
 
@@ -89,6 +98,11 @@ impl<'a> FileTransferSession<'a> {
 
             // Calculate checksum
             let checksum = verification::crc32(&final_data);
+
+            // Apply bandwidth throttling if enabled
+            if let Some(limiter) = &self.bandwidth_limiter {
+                limiter.wait_for_tokens(final_data.len()).await;
+            }
 
             // Send chunk
             let chunk_msg = ChunkMessage {
@@ -170,6 +184,11 @@ impl<'a> FileTransferSession<'a> {
                     // Calculate checksum
                     let checksum = verification::crc32(&final_data);
 
+                    // Apply bandwidth throttling if enabled
+                    if let Some(limiter) = &self.bandwidth_limiter {
+                        limiter.wait_for_tokens(final_data.len()).await;
+                    }
+
                     // Send chunk
                     let chunk_msg = ChunkMessage {
                         transfer_id: self.transfer_id,
@@ -231,6 +250,11 @@ impl<'a> FileTransferSession<'a> {
                     chunk.chunk_index, 
                     chunk.retry_count
                 );
+
+                // Apply bandwidth throttling for retries if enabled
+                if let Some(limiter) = &self.bandwidth_limiter {
+                    limiter.wait_for_tokens(chunk.data.len()).await;
+                }
 
                 // Resend the chunk
                 let chunk_msg = ChunkMessage {

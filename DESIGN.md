@@ -749,7 +749,76 @@ pub fn calculate_sha256(path: &Path) -> Result<[u8; 32]> {
 
 ---
 
-### 8. Network Layer
+### 8. Bandwidth Throttling
+
+**Purpose**: Limit transfer speed to prevent network congestion and allow fair bandwidth sharing.
+
+**Implementation**: `p2p-core/src/bandwidth.rs`
+
+#### Token Bucket Algorithm
+
+The bandwidth limiter uses a token bucket algorithm that allows for burst traffic while maintaining an average rate:
+
+```rust
+pub struct BandwidthLimiter {
+    max_bytes_per_sec: u64,
+    bucket: Arc<Mutex<TokenBucket>>,
+}
+
+struct TokenBucket {
+    tokens: f64,              // Available tokens
+    capacity: f64,            // Max bucket size (2 seconds of data)
+    refill_rate: f64,         // Bytes per second
+    last_refill: Instant,
+}
+
+impl BandwidthLimiter {
+    pub async fn wait_for_tokens(&self, bytes: usize);
+}
+```
+
+**Key Features**:
+- **Burst Support**: Bucket capacity = 2 × max_bytes_per_sec allows short bursts
+- **Token Refill**: Continuous refill at configured rate
+- **Async Waiting**: Sleeps efficiently when tokens depleted
+- **Zero-cost Disabled**: When limit = 0, returns immediately without locking
+
+**Usage Example**:
+```rust
+// Create limiter for 10 MB/s
+let limiter = BandwidthLimiter::new(10 * 1024 * 1024);
+
+// Wait before sending data
+limiter.wait_for_tokens(chunk_data.len()).await;
+connection.send_message(&chunk_msg).await?;
+```
+
+**CLI Integration**:
+```bash
+# Limit to 10 MB/s
+p2p-transfer send file.zip --to 192.168.1.100:8080 --max-speed 10M
+
+# Limit to 1 GB/s  
+p2p-transfer send file.zip --to 192.168.1.100:8080 --max-speed 1G
+
+# Unlimited (default)
+p2p-transfer send file.zip --to 192.168.1.100:8080
+```
+
+**Format Parsing**:
+- Supports: `"10M"`, `"1G"`, `"512K"`, `"unlimited"`, or raw bytes
+- Case-insensitive: `"10MB"` = `"10mb"` = `"10M"`
+- Returns bytes per second: `parse_bandwidth("10M")` → `10485760`
+
+**Integration Points**:
+- Applied in `FileTransferSession` before every chunk send
+- Includes initial sends and retries
+- Configured via `ConfigMessage.bandwidth_limit`
+- Displayed in CLI startup message
+
+---
+
+### 9. Network Layer
 
 #### TCP Connection Management
 

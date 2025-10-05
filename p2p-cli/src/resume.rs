@@ -61,6 +61,7 @@ pub async fn handle_resume(transfer_id: String, to: String, path: PathBuf) -> Re
         compression_level: 6,
         chunk_size: 64 * 1024,
         window_size: 16,
+        bandwidth_limit: 0, // Unlimited by default (TODO: restore from state)
     };
     
     let handshake_result = handshake.perform_handshake(&mut connection, config.clone()).await?;

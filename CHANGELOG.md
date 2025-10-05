@@ -19,6 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Basic CLI scaffolding
 - Basic GUI scaffolding
 - Comprehensive design document
+- **Bandwidth throttling**: Token bucket algorithm with configurable speed limits (2025-10-05)
+  - New `--max-speed` CLI flag supporting K/M/G units
+  - Token bucket implementation with 2-second burst capacity
+  - Applied to all chunk sends and retries
+  - Comprehensive tests for throttling behavior
 
 ### Changed
 - Nothing yet
