@@ -11,7 +11,7 @@
 
 use crate::{
     bandwidth::BandwidthLimiter,
-    compression::{Compressor, Decompressor},
+    compression::{AdaptiveCompressor, Decompressor},
     error::{Error, Result},
     network::tcp::TcpConnection,
     protocol::{AckStatus, ChunkAck, ChunkMessage, ConfigMessage, Message},
@@ -19,9 +19,7 @@ use crate::{
     window::{InFlightChunk, SlidingWindow, WindowConfig},
 };
 use std::{
-    io::SeekFrom,
-    path::{Path, PathBuf},
-    time::{Duration, Instant},
+    default, io::SeekFrom, path::{Path, PathBuf}, time::{Duration, Instant}
 };
 use tokio::{
     fs::File,
@@ -78,8 +76,12 @@ impl<'a> FileTransferSession<'a> {
         info!("File has {} chunks", total_chunks);
 
         // Compression if enabled
-        let mut compressor: Option<Compressor> = if self.config.compression_enabled {
-            Some(Compressor::new(self.config.compression_level))
+        let mut compressor: Option<AdaptiveCompressor> = if self.config.compression_enabled {
+            let sample_size = if self.config.adaptive_compression { 3 } else { 0 };
+            Some(AdaptiveCompressor::new(
+                self.config.compression_level,
+                sample_size
+            ))
         } else {
             None
         };
@@ -91,7 +93,11 @@ impl<'a> FileTransferSession<'a> {
 
             // Compress if enabled
             let final_data = if let Some(comp) = &mut compressor {
-                comp.compress(&chunk_data)?
+                let (compressed, _was_compressed, decision_changed) = comp.compress(&chunk_data)?;
+                if decision_changed {
+                    info!("Adaptive compression: disabled compression after sampling (data is incompressible)");
+                }
+                compressed
             } else {
                 chunk_data
             };
@@ -157,8 +163,12 @@ impl<'a> FileTransferSession<'a> {
         );
 
         // Compression if enabled
-        let mut compressor: Option<Compressor> = if self.config.compression_enabled {
-            Some(Compressor::new(self.config.compression_level))
+        let mut compressor: Option<AdaptiveCompressor> = if self.config.compression_enabled {
+            let sample_size = if self.config.adaptive_compression { 3 } else { 0 };
+            Some(AdaptiveCompressor::new(
+                self.config.compression_level,
+                sample_size
+            ))
         } else {
             None
         };
@@ -176,7 +186,11 @@ impl<'a> FileTransferSession<'a> {
 
                     // Compress if enabled
                     let final_data = if let Some(comp) = &mut compressor {
-                        comp.compress(&chunk_data)?
+                        let (compressed, _was_compressed, decision_changed) = comp.compress(&chunk_data)?;
+                        if decision_changed {
+                            info!("Adaptive compression: disabled compression after sampling (data is incompressible)");
+                        }
+                        compressed
                     } else {
                         chunk_data
                     };

@@ -28,6 +28,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - STUN client implementation (RFC 5389)
   - Support for XOR-MAPPED-ADDRESS and MAPPED-ADDRESS attributes
   - NAT type detection (Open, Cone, Symmetric)
+- **Adaptive compression**: Intelligent compression that auto-disables for incompressible data (2025-10-05)
+  - Samples first 3 chunks to determine compression effectiveness
+  - Uses 1.05 ratio threshold to detect pre-compressed data
+  - Automatically disables compression if data doesn't benefit
+  - Saves CPU cycles on already-compressed files (ZIP, JPG, MP4, etc.)
+  - New `--adaptive` CLI flag (enabled by default)
+  - Added `ConfigMessage::new()` with sensible defaults
   - Default Google public STUN servers with fallback
   - IPv4 and IPv6 support
   - New `nat-test` CLI command for testing NAT traversal

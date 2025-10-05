@@ -747,9 +747,8 @@ mod tests {
         let config = ConfigMessage {
             compression_enabled: false,
             compression_level: 0,
-            chunk_size: 65536,
             window_size: 1,
-            bandwidth_limit: 0,
+            ..Default::default()
         };
 
         // We can't easily test without a real connection, so just test the state

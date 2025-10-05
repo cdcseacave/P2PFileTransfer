@@ -52,11 +52,7 @@ async fn test_full_connection_flow() {
     println!("Client: Connected");
 
     let handshake = HandshakeClient::new(Uuid::new_v4(), Capabilities::all());
-    let config = ConfigMessage {
-        compression_enabled: true,
-        compression_level: 3,
-        chunk_size: 65536,
-    };
+    let config = ConfigMessage::default();
 
     let client_result = handshake
         .perform_handshake(&mut client_conn, config)
@@ -133,11 +129,7 @@ async fn test_concurrent_connections() {
             println!("Client {}: Connected", i);
 
             let handshake = HandshakeClient::new(Uuid::new_v4(), Capabilities::all());
-            let config = ConfigMessage {
-                compression_enabled: true,
-                compression_level: 3,
-                chunk_size: 65536,
-            };
+            let config = ConfigMessage::default();
 
             handshake
                 .perform_handshake(&mut conn, config)
@@ -185,11 +177,7 @@ async fn test_capability_negotiation() {
     // Client with all capabilities
     let mut client_conn = TcpConnection::connect(server_addr).await.unwrap();
     let handshake = HandshakeClient::new(Uuid::new_v4(), Capabilities::all());
-    let config = ConfigMessage {
-        compression_enabled: true,
-        compression_level: 3,
-        chunk_size: 65536,
-    };
+    let config = ConfigMessage::default();
 
     let client_result = handshake
         .perform_handshake(&mut client_conn, config)

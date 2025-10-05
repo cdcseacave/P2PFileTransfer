@@ -56,13 +56,8 @@ pub async fn handle_resume(transfer_id: String, to: String, path: PathBuf) -> Re
     let handshake = HandshakeClient::new(device_id, capabilities);
     
     // Use default config for resume (should match original)
-    let config = ConfigMessage {
-        compression_enabled: true,
-        compression_level: 6,
-        chunk_size: 64 * 1024,
-        window_size: 16,
-        bandwidth_limit: 0, // Unlimited by default (TODO: restore from state)
-    };
+    // TODO: restore compression_level, window_size, bandwidth_limit from state
+    let config = ConfigMessage::default();
     
     let handshake_result = handshake.perform_handshake(&mut connection, config.clone()).await?;
     println!("  ✓ Handshake complete (capabilities: {:?})", handshake_result.agreed_capabilities);

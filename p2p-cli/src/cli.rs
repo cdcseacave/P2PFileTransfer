@@ -44,6 +44,10 @@ pub enum Commands {
         #[arg(long, default_value = "3")]
         compress_level: i32,
 
+        /// Use adaptive compression (auto-disable if data is incompressible)
+        #[arg(long, default_value = "true")]
+        adaptive: bool,
+
         /// Chunk size in KB
         #[arg(long, default_value = "64")]
         chunk_size: u32,

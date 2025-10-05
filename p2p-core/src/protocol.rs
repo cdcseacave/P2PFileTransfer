@@ -108,12 +108,27 @@ pub struct ConfigMessage {
     pub compression_enabled: bool,
     /// Zstd compression level (-7 to 22)
     pub compression_level: i32,
+    /// Use adaptive compression (auto-disable if data is incompressible)
+    pub adaptive_compression: bool,
     /// Chunk size in bytes
     pub chunk_size: u32,
     /// Window size (1 = sequential, 2+ = windowed/parallel chunks)
     pub window_size: usize,
     /// Bandwidth limit in bytes per second (0 = unlimited)
     pub bandwidth_limit: u64,
+}
+
+impl Default for ConfigMessage {
+    fn default() -> Self {
+        Self {
+            compression_enabled: true,
+            compression_level: 3,
+            adaptive_compression: true,
+            chunk_size: 65536, // 64 KB
+            window_size: 16,
+            bandwidth_limit: 0, // unlimited
+        }
+    }
 }
 
 /// Transfer information and metadata

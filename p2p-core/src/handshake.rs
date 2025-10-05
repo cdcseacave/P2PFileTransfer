@@ -240,13 +240,7 @@ mod tests {
         let mut client_conn = TcpConnection::connect(server_addr).await.unwrap();
         let handshake_client = HandshakeClient::new(Uuid::new_v4(), Capabilities::all());
         
-        let config = ConfigMessage {
-            compression_enabled: true,
-            compression_level: 3,
-            chunk_size: 65536,
-            window_size: 16,
-            bandwidth_limit: 0,
-        };
+        let config = ConfigMessage::default();
 
         let client_result = handshake_client
             .perform_handshake(&mut client_conn, config)

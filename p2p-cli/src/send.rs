@@ -23,6 +23,7 @@ pub async fn handle_send(
     discover: bool,
     compress: bool,
     compress_level: i32,
+    adaptive: bool,
     chunk_size: u32,
     window_size: usize,
     bandwidth_limit: u64,
@@ -69,9 +70,11 @@ pub async fn handle_send(
     let config = ConfigMessage {
         compression_enabled: compress,
         compression_level: compress_level,
+        adaptive_compression: adaptive,
         chunk_size: chunk_size * 1024, // Convert KB to bytes
         window_size,
         bandwidth_limit,
+        ..Default::default()
     };
     
     let handshake_result = handshake.perform_handshake(&mut connection, config.clone()).await?;

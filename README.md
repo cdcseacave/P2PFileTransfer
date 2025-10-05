@@ -16,7 +16,7 @@ P2P File Transfer is a production-ready command-line tool for transferring files
 - ⚡ **Windowed Transfer Protocol**: Parallel chunk transfers for 5-15x speedup on high-latency networks
 - 💾 **Automatic Resume**: Seamlessly continue interrupted transfers with state persistence
 - 📊 **Real-time Progress**: Two-tier progress bars showing overall and per-file progress
-- 🗜️ **Smart Compression**: Zstd compression with configurable levels (1-22)
+- 🗜️ **Smart Compression**: Adaptive Zstd compression auto-detects incompressible data
 - 🔍 **Auto Discovery**: Find peers on local network via UDP broadcast
 - ✅ **Data Integrity**: CRC32 per-chunk + SHA256 per-file verification
 - 🚦 **Bandwidth Throttling**: Configurable speed limits to prevent network congestion
@@ -27,8 +27,9 @@ P2P File Transfer is a production-ready command-line tool for transferring files
 ### Core Capabilities
 - ✅ **Single File & Folder Transfers**: Send individual files or entire directory trees
 - ✅ **Structure Preservation**: Maintains folder hierarchy and file metadata
-- ✅ **Chunked Streaming**: Efficient 1MB chunks with parallel processing
-- ✅ **Compression**: Zstd compression (levels 1-22) for bandwidth savings
+- ✅ **Chunked Streaming**: Efficient 64KB chunks with parallel processing
+- ✅ **Adaptive Compression**: Auto-detects incompressible data (already compressed files)
+- ✅ **Compression**: Zstd compression (levels -7 to 22) for bandwidth savings
 - ✅ **Verification**: Multi-layer integrity checks (CRC32 + SHA256)
 - ✅ **Cross-platform**: Runs on Windows, macOS, and Linux
 
@@ -96,8 +97,14 @@ p2p-transfer send myfile.zip --to 192.168.1.100:8080 --window-size 1
 # Transfer entire directory with structure
 p2p-transfer send ./my_project --to 192.168.1.100:8080
 
-# With compression
+# With compression (adaptive by default)
 p2p-transfer send ./documents --to 192.168.1.100:8080 --compress --compress-level 5
+
+# Adaptive compression auto-disables for incompressible data (default: enabled)
+p2p-transfer send ./mixed_content --to 192.168.1.100:8080 --adaptive true
+
+# Force compression even for incompressible data
+p2p-transfer send ./photos --to 192.168.1.100:8080 --adaptive false
 ```
 
 #### Receive Files/Folders
