@@ -1,0 +1,212 @@
+#!/usr/bin/env python3
+"""
+Test script for verifying P2P transfer send/receive functionality
+Cross-platform compatible (Windows, macOS, Linux)
+"""
+
+import subprocess
+import time
+import os
+import sys
+import platform
+import shutil
+import filecmp
+from pathlib import Path
+
+
+def create_test_file(file_path: Path, size_mb: int = 10):
+    """Create a test file with random data"""
+    if file_path.exists():
+        print(f"Test file already exists: {file_path}")
+        return
+    
+    print(f"Creating test file ({size_mb}MB)...")
+    chunk_size = 1024 * 1024  # 1MB chunks
+    
+    with open(file_path, 'wb') as f:
+        for _ in range(size_mb):
+            f.write(os.urandom(chunk_size))
+    
+    print(f"✓ Created test file: {file_path}")
+
+
+def get_binary_path() -> str:
+    """Get the path to the p2p-transfer binary based on the OS"""
+    system = platform.system()
+    
+    if system == "Windows":
+        binary = Path("target/release/p2p-transfer.exe")
+    else:
+        binary = Path("target/release/p2p-transfer")
+    
+    if not binary.exists():
+        print(f"❌ Binary not found: {binary}")
+        print("Please build the project first: cargo build --release")
+        sys.exit(1)
+    
+    return str(binary)
+
+
+def get_file_size(file_path: Path) -> int:
+    """Get file size in bytes"""
+    return file_path.stat().st_size
+
+
+def format_size(size_bytes: int) -> str:
+    """Format bytes to human-readable size"""
+    size = float(size_bytes)
+    for unit in ['B', 'KB', 'MB', 'GB']:
+        if size < 1024.0:
+            return f"{size:.2f} {unit}"
+        size /= 1024.0
+    return f"{size:.2f} TB"
+
+
+def main():
+    print("=== P2P Transfer Test ===")
+    print()
+    
+    # Setup paths
+    test_file = Path("test_file")
+    received_dir = Path("received")
+    # The received file will have the same name as the sent file
+    received_file = received_dir / test_file.name
+    binary_path = get_binary_path()
+    
+    # Create test file
+    create_test_file(test_file, size_mb=10)
+    file_size = get_file_size(test_file)
+    print(f"Test file size: {format_size(file_size)}")
+    print()
+    
+    # Cleanup previous received directory
+    if received_dir.exists():
+        shutil.rmtree(received_dir)
+    
+    # Start receiver in background
+    print("Starting receiver...")
+    receiver_cmd = [
+        binary_path, "receive",
+        "--output", str(received_dir),
+        "--port", "7778",
+        "--auto-accept"
+    ]
+    
+    receiver_process = subprocess.Popen(
+        receiver_cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True
+    )
+    
+    # Give receiver time to start
+    time.sleep(2)
+    
+    # Check if receiver is still running
+    if receiver_process.poll() is not None:
+        print("❌ Receiver failed to start")
+        stdout, stderr = receiver_process.communicate()
+        print("STDOUT:", stdout)
+        print("STDERR:", stderr)
+        sys.exit(1)
+    
+    print("✓ Receiver started")
+    print()
+    
+    # Start sender
+    print("Starting sender...")
+    sender_cmd = [
+        binary_path, "send", str(test_file),
+        "--to", "127.0.0.1:7778",
+        "--window-size", "16"
+    ]
+    
+    try:
+        result = subprocess.run(
+            sender_cmd,
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        sender_exit_code = result.returncode
+        
+        # Print sender output for debugging
+        if result.stdout:
+            print(result.stdout)
+        if result.stderr:
+            print(result.stderr, file=sys.stderr)
+        
+    except subprocess.TimeoutExpired:
+        print("❌ Sender timed out after 30 seconds")
+        receiver_process.terminate()
+        sys.exit(1)
+    
+    # Wait a moment for receiver to finish
+    time.sleep(1)
+    
+    # Terminate receiver if still running
+    if receiver_process.poll() is None:
+        receiver_process.terminate()
+        try:
+            receiver_process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            receiver_process.kill()
+    
+    print()
+    print("=== Test Results ===")
+    print(f"Sender exit code: {sender_exit_code}")
+    
+    # Check results
+    test_passed = False
+    
+    if sender_exit_code == 0:
+        if received_file.exists():
+            original_size = get_file_size(test_file)
+            received_size = get_file_size(received_file)
+            
+            print(f"Original file size: {original_size} bytes")
+            print(f"Received file size: {received_size} bytes")
+            
+            if original_size == received_size:
+                print("✅ File sizes match!")
+                
+                # Verify content
+                if filecmp.cmp(test_file, received_file, shallow=False):
+                    print("✅ File contents match!")
+                    print()
+                    print("🎉 TEST PASSED!")
+                    test_passed = True
+                else:
+                    print("❌ File contents differ!")
+                    print("TEST FAILED")
+            else:
+                print("❌ File sizes differ!")
+                print("TEST FAILED")
+        else:
+            print(f"❌ Received file not found: {received_file}")
+            print("TEST FAILED")
+    else:
+        print(f"❌ Sender failed with exit code {sender_exit_code}")
+        print("TEST FAILED")
+    
+    # Cleanup
+    print()
+    print("Cleaning up...")
+    if received_dir.exists():
+        shutil.rmtree(received_dir)
+    
+    # Exit with appropriate code
+    sys.exit(0 if test_passed else 1)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n\n⚠️  Test interrupted by user")
+        sys.exit(1)
+    except Exception as e:
+        print(f"\n❌ Unexpected error: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)

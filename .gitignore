@@ -1,0 +1,33 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local config
+config.local.toml
+*.log
+
+# Test files
+/test_files/
+/temp/
+/received/
+/test_received/
+test_file
+transfer_*.json
+
+# Benchmark data (auto-generated)
+/benchmark_data/
+/benchmark_received/
+benchmark_results.txt
