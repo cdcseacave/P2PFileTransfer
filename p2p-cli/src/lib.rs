@@ -17,20 +17,56 @@ mod send;
 
 use anyhow::Result;
 use clap::Parser;
+use tracing::level_filters::LevelFilter;
+use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 pub use cli::Cli;
+
+/// Initialize logging based on verbosity level
+fn init_logging(verbosity: &str) {
+    // Parse verbosity level from string
+    let level = match verbosity.to_lowercase().as_str() {
+        "off" => LevelFilter::OFF,
+        "error" => LevelFilter::ERROR,
+        "warn" => LevelFilter::WARN,
+        "info" => LevelFilter::INFO,
+        "debug" => LevelFilter::DEBUG,
+        "trace" => LevelFilter::TRACE,
+        _ => {
+            eprintln!("Invalid verbosity level '{}', using 'info'", verbosity);
+            LevelFilter::INFO
+        }
+    };
+
+    // Check if RUST_LOG environment variable is set
+    let env_filter = if std::env::var("RUST_LOG").is_ok() {
+        // If RUST_LOG is set, use it (allows fine-grained control)
+        EnvFilter::from_default_env()
+    } else {
+        // Otherwise use the command-line level
+        EnvFilter::default()
+            .add_directive(format!("p2p_core={}", level).parse().unwrap())
+            .add_directive(format!("p2p_cli={}", level).parse().unwrap())
+    };
+
+    // Initialize tracing subscriber with nice formatting
+    let _ = tracing_subscriber::registry()
+        .with(env_filter)
+        .with(
+            fmt::layer()
+                .with_target(false) // Don't show module names (cleaner output)
+                .with_level(true) // Show log level [INFO], [DEBUG], etc.
+                .with_ansi(true) // Use colors
+                .compact(), // Compact format
+        )
+        .try_init();
+}
 
 pub async fn run_cli() -> Result<()> {
     let cli = Cli::parse();
 
-    // Initialize logging (only if not already initialized)
-    let _ = if cli.verbose {
-        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug"))
-            .try_init()
-    } else {
-        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-            .try_init()
-    };
+    // Initialize logging
+    init_logging(&cli.verbosity);
 
     match cli.command {
         cli::Commands::Send {
@@ -60,7 +96,6 @@ pub async fn run_cli() -> Result<()> {
                 transfer_port,
                 auto_reconnect,
                 max_retries,
-                cli.verbose,
             )
             .await?;
         }

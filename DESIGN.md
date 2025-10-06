@@ -267,13 +267,19 @@ pub enum ProtocolMessage {
     
     // Data transfer
     Chunk {
-        chunk_id: u64,
-        data: Vec<u8>,
-        crc32: u32,
-        compressed: bool,
+        transfer_id: Uuid,
+        file_index: u32,
+        chunk_index: u64,
+        total_chunks: u64,
+        flags: u8,               // Compression and other flags
+        checksum: u32,           // CRC32 checksum
+        data: Vec<u8>,           // Chunk payload (compressed if flags indicate)
     },
     ChunkAck {
-        chunk_id: u64,
+        transfer_id: Uuid,
+        file_index: u32,
+        chunk_index: u64,
+        status: AckStatus,       // Success, ChecksumFailed, etc.
     },
     
     // Completion
@@ -311,7 +317,205 @@ let agreed_capabilities = client_caps & server_caps;  // Bitwise AND
 
 ---
 
-### 3. File Transfer System
+### 3. Session Management (Bidirectional Architecture)
+
+**Purpose**: Separate connection establishment from transfer operations, enabling persistent connections with multiple operations and bidirectional transfers.
+
+**Implementation**: `p2p-core/src/session.rs`
+
+#### Session Design Philosophy
+
+The session-based architecture introduces a **fundamental separation of concerns**:
+
+1. **Connection Establishment** (Asymmetric - one-time setup)
+   - One peer initiates (Initiator)
+   - One peer responds (Responder)
+   - Includes TCP connection + handshake + config negotiation
+
+2. **Transfer Operations** (Symmetric - repeatable)
+   - Either peer can send
+   - Either peer can receive
+   - Multiple operations on same connection
+   - No re-handshaking required
+
+#### P2PSession Structure
+
+```rust
+pub struct P2PSession {
+    connection: TcpConnection,
+    session_id: Uuid,
+    device_id: Uuid,
+    handshake: HandshakeResult,
+    connection_role: ConnectionRole,  // For logging only
+}
+
+pub enum ConnectionRole {
+    Initiator,   // Connected to peer
+    Responder,   // Accepted connection
+}
+```
+
+**Key Point**: `ConnectionRole` is preserved for logging/debugging but does NOT restrict functionality. After session establishment, both peers are functionally identical.
+
+#### Session Establishment
+
+**Initiator Side (connects)**:
+```rust
+let session = P2PSession::connect(
+    peer_addr,
+    device_id,
+    capabilities,
+    config
+).await?;
+```
+
+**Responder Side (accepts)**:
+```rust
+let session = P2PSession::accept(
+    bind_addr,
+    device_id,
+    capabilities
+).await?;
+```
+
+Both calls return the same `P2PSession` type with identical capabilities.
+
+#### Session Operations (Symmetric)
+
+Once established, both peers can call:
+
+```rust
+// Send operations (either peer)
+session.send_path(path, progress_callback).await?;
+session.send_path_with_reconnect(...).await?;
+
+// Receive operations (either peer)
+session.receive_to(output_dir, progress_callback).await?;
+session.receive_to_with_state(...).await?;
+
+// Event loop (automatic receive mode)
+session.run_event_loop(output_dir, auto_accept).await?;
+```
+
+#### Bidirectional Communication Flow
+
+```
+Peer A (Initiator)              Peer B (Responder)
+     |                                 |
+     |-- Connect + Handshake --------->|
+     |<------ Accept + Config ---------|
+     |                                 |
+[Both now have P2PSession objects]    |
+     |                                 |
+     |-- send_path("file1.zip") ------>|
+     |                                 |
+     |<----- send_path("doc.pdf") -----|  (B sends to A!)
+     |                                 |
+     |-- send_path("video.mp4") ------>|
+     |                                 |
+     |  (All on same TCP connection)   |
+```
+
+#### Auto-Receive Event Loop
+
+For server/passive mode, sessions can run an event loop that automatically handles incoming transfers:
+
+```rust
+// CLI receive mode now uses event loop
+session.run_event_loop(&output_dir, auto_accept).await?;
+```
+
+**How it works**:
+1. Session waits for incoming TransferInfo message
+2. Optionally prompts user (if auto_accept=false)
+3. Receives the transfer
+4. Returns to step 1 (ready for next transfer)
+5. Exits cleanly when connection closes
+
+#### Benefits of Session Architecture
+
+**Performance:**
+- ✅ No redundant handshakes between operations
+- ✅ Connection reuse reduces latency
+- ✅ Persistent connection with keepalive
+
+**Flexibility:**
+- ✅ Either peer can initiate operations
+- ✅ Multiple transfers without reconnecting
+- ✅ Enables request/response protocols (future)
+
+**User Experience:**
+- ✅ CLI maintains same simple interface
+- ✅ GUI can show persistent connection status
+- ✅ Natural fit for interactive applications
+
+**Future-Proof:**
+- ✅ Easy to add new operation types
+- ✅ Supports session multiplexing (future)
+- ✅ Foundation for file browsing protocol (future)
+
+#### CLI Integration
+
+**External interface unchanged:**
+```bash
+# Send (establishes session, sends, closes)
+p2p-transfer send file.zip --to host:port
+
+# Receive (establishes session, auto-receives until closed)
+p2p-transfer receive --output ./downloads --port 7778
+```
+
+**Internal flow (new)**:
+```rust
+// Send command
+let mut session = P2PSession::connect(...).await?;
+session.send_path(&path, progress_callback).await?;
+
+// Receive command
+let mut session = P2PSession::accept(...).await?;
+session.run_event_loop(&output, auto_accept).await?;  // Auto-receive loop
+```
+
+#### Future Enhancements
+
+With session foundation in place:
+
+1. **Multiple Operations** (CLI):
+   ```bash
+   # Future: Interactive mode
+   p2p-transfer interactive --to host:port
+   > send file1.zip
+   > send file2.pdf
+   > receive
+   > exit
+   ```
+
+2. **GUI Applications**:
+   ```rust
+   // Establish session once
+   let mut session = P2PSession::connect(...).await?;
+   
+   // User performs multiple operations
+   loop {
+       match gui_event {
+           Event::SendFile(path) => session.send_path(&path, cb).await?,
+           Event::ReceiveFile => session.receive_to(&dir, cb).await?,
+           Event::RequestList => session.list_files().await?,  // Future
+           Event::Disconnect => break,
+       }
+   }
+   ```
+
+3. **Bidirectional Sync** (Future):
+   ```rust
+   // Both peers can sync bidirectionally
+   session_a.sync_folder(&local, &remote).await?;
+   session_b.sync_folder(&local, &remote).await?;
+   ```
+
+---
+
+### 4. File Transfer System
 
 **Purpose**: Transfer single files with chunking, compression, verification, and windowed protocol.
 
@@ -402,16 +606,16 @@ Sender                                Receiver
 ```rust
 pub struct SlidingWindow {
     window_size: usize,                    // Max chunks in-flight (default 16)
-    in_flight: HashMap<u64, InFlightChunk>,  // Chunks awaiting ACK
-    next_chunk_id: u64,                    // Next chunk to send
+    in_flight: HashMap<u32, InFlightChunk>,  // Chunks awaiting ACK
+    next_to_send: u32,                     // Next chunk to send
     timeout: Duration,                     // Per-chunk timeout (10 seconds)
-    max_retries: usize,                    // Max retry attempts (3)
+    max_retries: u32,                      // Max retry attempts (3)
 }
 
 pub struct InFlightChunk {
-    pub chunk_id: u64,
-    pub sent_at: Instant,
-    pub retries: usize,
+    pub message: ChunkMessage,             // Complete network message for retransmission
+    pub sent_at: Instant,                  // Timestamp for timeout detection
+    pub retry_count: u32,                  // Number of transmission attempts (0 = first)
 }
 
 impl SlidingWindow {

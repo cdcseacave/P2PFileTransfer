@@ -3,10 +3,9 @@
 use anyhow::Result;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use p2p_core::{
-    handshake::HandshakeClient,
-    network::tcp::TcpConnection,
     protocol::{Capabilities, ConfigMessage},
-    transfer_folder::{FolderProgress, FolderTransferSession, FolderTransferState},
+    session::P2PSession,
+    transfer_folder::{FolderProgress, FolderTransferState},
     Uuid,
 };
 use std::{
@@ -31,7 +30,6 @@ pub async fn handle_send(
     transfer_port: u16,
     auto_reconnect: bool,
     max_retries: u32,
-    verbose: bool,
 ) -> Result<()> {
     println!("📤 Starting send operation");
     println!("  Path: {}", path.display());
@@ -71,16 +69,10 @@ pub async fn handle_send(
         anyhow::bail!("Either --to <address> or --discover must be specified");
     };
 
-    // Connect to peer
-    println!("  Establishing connection...");
-    let mut connection = TcpConnection::connect(peer_addr).await?;
-    println!("  ✓ Connected");
-
-    // Perform handshake
-    println!("  Performing handshake...");
+    // Establish session (connection + handshake)
+    println!("  Establishing session...");
     let device_id = Uuid::new_v4();
     let capabilities = Capabilities::all();
-    let handshake = HandshakeClient::new(device_id, capabilities);
 
     let config = ConfigMessage {
         compression_enabled: compress,
@@ -91,17 +83,15 @@ pub async fn handle_send(
         bandwidth_limit,
     };
 
-    let handshake_result = handshake
-        .perform_handshake(&mut connection, config.clone())
-        .await?;
-    println!(
-        "  ✓ Handshake complete (capabilities: {:?})",
-        handshake_result.agreed_capabilities
-    );
+    let mut session =
+        P2PSession::connect(peer_addr, device_id, capabilities, config.clone()).await?;
+    println!("  ✓ Session established");
+    println!("    Peer: {}", session.peer_device_id());
+    println!("    Capabilities: {:?}", session.capabilities());
 
     // Send file or folder with signal handling (unified)
     let result = tokio::select! {
-        result = send(&mut connection, &path, config, auto_reconnect, max_retries, verbose) => {
+        result = send(&mut session, &path, config, auto_reconnect, max_retries) => {
             result
         }
         _ = signal::ctrl_c() => {
@@ -123,14 +113,12 @@ pub async fn handle_send(
 }
 
 async fn send(
-    connection: &mut TcpConnection,
+    session: &mut P2PSession,
     path: &Path,
-    config: ConfigMessage,
+    _config: ConfigMessage,
     auto_reconnect: bool,
     max_retries: u32,
-    verbose: bool,
 ) -> Result<()> {
-    let transfer_id = Uuid::new_v4();
     let base_name = path.file_name().unwrap().to_string_lossy().to_string();
 
     if path.is_file() {
@@ -139,6 +127,7 @@ async fn send(
         println!("\n📁 Sending folder: {}", base_name);
     }
 
+    let config = session.config();
     if config.window_size == 1 {
         println!("   Using sequential transfer (window size: 1)");
     } else {
@@ -159,24 +148,14 @@ async fn send(
         );
     }
 
-    let mut session = FolderTransferSession::new(connection, config.clone(), transfer_id);
+    // Generate transfer ID for this operation
+    let transfer_id = Uuid::new_v4();
 
     // Create state file path
     let state_file = PathBuf::from(format!("transfer_{}.json", transfer_id));
 
     // Keep state in memory using Arc<Mutex> for thread-safe access
     let current_state = std::sync::Arc::new(std::sync::Mutex::new(None::<FolderTransferState>));
-
-    // Set up state callback to update in-memory state (not saved to disk yet)
-    session.set_state_callback({
-        let current_state = current_state.clone();
-        Box::new(move |state: &FolderTransferState| {
-            // Update in-memory state only
-            if let Ok(mut guard) = current_state.lock() {
-                *guard = Some(state.clone());
-            }
-        })
-    });
 
     // Create multi-progress for overall and per-file progress
     let multi = MultiProgress::new();
@@ -197,8 +176,8 @@ async fn send(
             .progress_chars("=>-"),
     );
 
-    // Set up progress callback
-    session.set_progress_callback(Box::new(move |progress: FolderProgress| {
+    // Create progress callback
+    let progress_callback = Box::new(move |progress: FolderProgress| {
         // Update overall progress
         overall_pb.set_length(progress.total_files as u64);
         overall_pb.set_position(progress.completed_files as u64);
@@ -214,15 +193,23 @@ async fn send(
             overall_pb.finish_with_message("Complete!");
             current_pb.finish_and_clear();
         }
-    }));
+    });
 
     // Send file or folder with state tracking (unified method)
     let result = if auto_reconnect {
+        // Create state callback to update in-memory state
+        let current_state_for_callback = current_state.clone();
+        let state_callback = Box::new(move |state: &FolderTransferState| {
+            if let Ok(mut guard) = current_state_for_callback.lock() {
+                *guard = Some(state.clone());
+            }
+        });
+
         // Use auto-reconnect wrapper with in-memory state
         let reconnect_config = p2p_core::reconnect::ReconnectConfig {
             max_attempts: max_retries,
-            initial_backoff_secs: 2,
-            max_backoff_secs: 60,
+            initial_backoff_secs: 3,
+            max_backoff_secs: 180,
             exponential: true,
         };
 
@@ -236,9 +223,10 @@ async fn send(
         });
 
         session
-            .send_folder_with_reconnect(
+            .send_path_with_reconnect(
                 path,
-                &base_name,
+                Some(progress_callback),
+                Some(state_callback),
                 &reconnect_config,
                 Some(&state_file),
                 Some(state_provider),
@@ -246,22 +234,19 @@ async fn send(
             .await
     } else {
         // Regular send without auto-reconnect - state stays in memory only
-        session.send(path, &base_name).await
+        session.send_path(path, Some(progress_callback)).await
     };
 
     match result {
         Ok(_) => {
-            // Success - save state if verbose mode is enabled (for debugging/analysis)
-            if verbose {
+            // Success - save state if debug/trace mode is enabled (for debugging/analysis)
+            if tracing::level_enabled!(tracing::Level::DEBUG) {
                 let state_to_save = current_state.lock().ok().and_then(|guard| guard.clone());
                 if let Some(state) = state_to_save {
                     if let Err(save_err) = state.save_to_file(&state_file).await {
-                        eprintln!("  ⚠️  Failed to save state (verbose): {}", save_err);
+                        eprintln!("  ⚠️  Failed to save state (debug): {}", save_err);
                     } else {
-                        println!(
-                            "  📝 State saved to: {} (verbose mode)",
-                            state_file.display()
-                        );
+                        println!("  📝 State saved to: {} (debug mode)", state_file.display());
                     }
                 }
             } else {

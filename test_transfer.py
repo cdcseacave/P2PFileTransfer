@@ -15,20 +15,29 @@ import argparse
 from pathlib import Path
 
 
-def create_test_file(file_path: Path, size_mb: int = 10):
-    """Create a test file with random data"""
+def create_test_file(file_path: Path, size_mb: int = 10, compressible: bool = False):
+    """Create a test file with random or compressible data"""
     if file_path.exists():
         print(f"Test file already exists: {file_path}")
         return
     
-    print(f"Creating test file ({size_mb}MB)...")
-    chunk_size = 1024 * 1024  # 1MB chunks
-    
-    with open(file_path, 'wb') as f:
-        for _ in range(size_mb):
-            f.write(os.urandom(chunk_size))
-    
-    print(f"✓ Created test file: {file_path}")
+    if compressible:
+        print(f"Creating compressible test file ({size_mb}MB)...")
+        chunk_size = 1024 * 1024  # 1MB chunks
+        # Create highly compressible data (zeros)
+        with open(file_path, 'wb') as f:
+            for _ in range(size_mb):
+                f.write(b'\x00' * chunk_size)
+        print(f"✓ Created compressible test file: {file_path}")
+    else:
+        print(f"Creating test file ({size_mb}MB)...")
+        chunk_size = 1024 * 1024  # 1MB chunks
+        
+        with open(file_path, 'wb') as f:
+            for _ in range(size_mb):
+                f.write(os.urandom(chunk_size))
+        
+        print(f"✓ Created test file: {file_path}")
 
 
 def get_binary_path() -> str:
@@ -68,11 +77,18 @@ def main():
     parser = argparse.ArgumentParser(description='Test P2P file transfer with optional bandwidth throttling')
     parser.add_argument('--size', type=int, default=10, help='Test file size in MB (default: 10)')
     parser.add_argument('--max-speed', type=str, help='Bandwidth limit (e.g., "2M", "5M", "1G")')
+    parser.add_argument('--compressible', action='store_true', help='Create highly compressible test file (zeros)')
+    parser.add_argument('--verbosity', type=str, default='info', help='Verbosity level: off, error, warn, info, debug, trace (default: warn)')
     args = parser.parse_args()
     
     print("=== P2P Transfer Test ===")
+    if args.compressible:
+        print("File type: Highly compressible (zeros)")
+    else:
+        print("File type: Random data (incompressible)")
     if args.max_speed:
         print(f"Bandwidth limit: {args.max_speed}")
+    print(f"Verbosity level: {args.verbosity}")
     print()
     
     # Setup paths
@@ -83,7 +99,7 @@ def main():
     binary_path = get_binary_path()
     
     # Create test file
-    create_test_file(test_file, size_mb=args.size)
+    create_test_file(test_file, size_mb=args.size, compressible=args.compressible)
     file_size = get_file_size(test_file)
     print(f"Test file size: {format_size(file_size)}")
     print()
@@ -98,7 +114,8 @@ def main():
         binary_path, "receive",
         "--output", str(received_dir),
         "--port", "7778",
-        "--auto-accept"
+        "--auto-accept",
+        "--verbosity", args.verbosity
     ]
     
     receiver_process = subprocess.Popen(
@@ -127,7 +144,8 @@ def main():
     sender_cmd = [
         binary_path, "send", str(test_file),
         "--to", "127.0.0.1:7778",
-        "--window-size", "16"
+        "--window-size", "16",
+        "--verbosity", args.verbosity
     ]
     
     # Add bandwidth limit if specified

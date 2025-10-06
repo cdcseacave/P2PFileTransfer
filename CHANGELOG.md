@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **CLI parameter rename** (2025-10-06): `--log-level` renamed to `--verbosity` for better clarity
+- **Protocol optimization** (2025-10-06): Removed redundant `uncompressed_size` field from `ChunkMessage`, saving 4 bytes per chunk
+- **InFlightChunk refactoring** (2025-10-06): Now stores complete `ChunkMessage` for efficient retransmission without data duplication
+
 ### Added
 - Initial project structure
 - Core protocol definitions

@@ -205,14 +205,33 @@ pub struct ChunkMessage {
     pub chunk_index: u64,
     /// Total chunks in this file
     pub total_chunks: u64,
-    /// Compressed data size
-    pub compressed_size: u32,
-    /// Uncompressed data size
-    pub uncompressed_size: u32,
-    /// CRC32 checksum of compressed data
+    /// Flags field for encoding chunk properties
+    pub flags: u8,
+    /// CRC32 checksum of data
     pub checksum: u32,
     /// Compressed chunk data
     pub data: Vec<u8>,
+}
+
+impl ChunkMessage {
+    /// Flag bit indicating the data payload is compressed
+    pub const FLAG_COMPRESSED: u8 = 0b0000_0001;
+
+    /// Returns true if the chunk data is compressed
+    pub fn is_compressed(&self) -> bool {
+        (self.flags & Self::FLAG_COMPRESSED) != 0
+    }
+
+    /// Set a flag bit and return the new flags value
+    ///
+    /// # Arguments
+    /// * `flag` - The flag bit to set (e.g., `FLAG_COMPRESSED`)
+    ///
+    /// # Returns
+    /// The updated flags value with the specified flag set
+    pub fn set_flag(flags: u8, flag: u8) -> u8 {
+        flags | flag
+    }
 }
 
 // Custom Debug implementation to avoid printing large data payloads
@@ -235,8 +254,7 @@ impl std::fmt::Debug for ChunkMessage {
             .field("file_index", &self.file_index)
             .field("chunk_index", &self.chunk_index)
             .field("total_chunks", &self.total_chunks)
-            .field("compressed_size", &self.compressed_size)
-            .field("uncompressed_size", &self.uncompressed_size)
+            .field("flags", &format_args!("0x{:02x}", self.flags))
             .field("checksum", &self.checksum)
             .field("data", &data_display)
             .finish()

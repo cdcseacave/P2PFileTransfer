@@ -44,6 +44,10 @@ pub struct FileTransferSession<'a> {
     file_index: u32,
     /// Bandwidth limiter (only created if throttling is enabled)
     bandwidth_limiter: Option<BandwidthLimiter>,
+    /// Total compressed bytes sent (for statistics)
+    pub compressed_bytes_sent: u64,
+    /// Total uncompressed bytes sent (for statistics)
+    pub uncompressed_bytes_sent: u64,
 }
 
 impl<'a> FileTransferSession<'a> {
@@ -65,6 +69,8 @@ impl<'a> FileTransferSession<'a> {
             transfer_id,
             file_index,
             bandwidth_limiter,
+            compressed_bytes_sent: 0,
+            uncompressed_bytes_sent: 0,
         }
     }
 
@@ -119,18 +125,21 @@ impl<'a> FileTransferSession<'a> {
             }
             // Read chunk
             let chunk_data = reader.read_chunk(chunk_index).await?;
-            let uncompressed_size = chunk_data.len() as u32;
+            let uncompressed_size = chunk_data.len() as u64;
 
             // Compress if enabled
-            let final_data = if let Some(comp) = &mut compressor {
-                let (compressed, _was_compressed, decision_changed) = comp.compress(&chunk_data)?;
-                if decision_changed {
-                    info!("Adaptive compression: disabled compression after sampling (data is incompressible)");
-                }
-                compressed
+            let (final_data, is_compressed) = if let Some(comp) = &mut compressor {
+                let (compressed, was_compressed, _decision_changed) = comp.compress(&chunk_data)?;
+                (compressed, was_compressed)
             } else {
-                chunk_data
+                (chunk_data, false)
             };
+
+            // Set flags based on compression
+            let mut flags = 0u8;
+            if is_compressed {
+                flags = ChunkMessage::set_flag(flags, ChunkMessage::FLAG_COMPRESSED);
+            }
 
             // Calculate checksum
             let checksum = verification::crc32(&final_data);
@@ -146,11 +155,14 @@ impl<'a> FileTransferSession<'a> {
                 file_index: self.file_index,
                 chunk_index: chunk_index as u64,
                 total_chunks: total_chunks as u64,
-                compressed_size: final_data.len() as u32,
-                uncompressed_size,
+                flags,
                 checksum,
                 data: final_data,
             };
+
+            // Track compression statistics
+            self.compressed_bytes_sent += chunk_msg.data.len() as u64;
+            self.uncompressed_bytes_sent += uncompressed_size;
 
             self.connection
                 .send_message(&Message::Chunk(chunk_msg))
@@ -214,12 +226,7 @@ impl<'a> FileTransferSession<'a> {
         );
 
         // Create sliding window
-        let mut window = SlidingWindow::new(
-            window_config.clone(),
-            self.transfer_id,
-            self.file_index,
-            total_chunks,
-        );
+        let mut window = SlidingWindow::new(window_config.clone(), total_chunks);
 
         // Mark completed chunks in the window
         for &chunk_index in completed_chunks {
@@ -253,19 +260,22 @@ impl<'a> FileTransferSession<'a> {
                 if let Some(chunk_index) = window.next_chunk_to_send() {
                     // Read chunk
                     let chunk_data = reader.read_chunk(chunk_index).await?;
-                    let uncompressed_size = chunk_data.len() as u32;
+                    let uncompressed_size = chunk_data.len() as u64;
 
                     // Compress if enabled
-                    let final_data = if let Some(comp) = &mut compressor {
-                        let (compressed, _was_compressed, decision_changed) =
+                    let (final_data, is_compressed) = if let Some(comp) = &mut compressor {
+                        let (compressed, was_compressed, _decision_changed) =
                             comp.compress(&chunk_data)?;
-                        if decision_changed {
-                            info!("Adaptive compression: disabled compression after sampling (data is incompressible)");
-                        }
-                        compressed
+                        (compressed, was_compressed)
                     } else {
-                        chunk_data
+                        (chunk_data, false)
                     };
+
+                    // Set flags based on compression
+                    let mut flags = 0u8;
+                    if is_compressed {
+                        flags = ChunkMessage::set_flag(flags, ChunkMessage::FLAG_COMPRESSED);
+                    }
 
                     // Calculate checksum
                     let checksum = verification::crc32(&final_data);
@@ -281,24 +291,24 @@ impl<'a> FileTransferSession<'a> {
                         file_index: self.file_index,
                         chunk_index: chunk_index as u64,
                         total_chunks: total_chunks as u64,
-                        compressed_size: final_data.len() as u32,
-                        uncompressed_size,
+                        flags,
                         checksum,
                         data: final_data.clone(),
                     };
 
+                    // Track compression statistics
+                    self.compressed_bytes_sent += chunk_msg.data.len() as u64;
+                    self.uncompressed_bytes_sent += uncompressed_size;
+
                     self.connection
-                        .send_message(&Message::Chunk(chunk_msg))
+                        .send_message(&Message::Chunk(chunk_msg.clone()))
                         .await?;
 
-                    // Mark as in-flight
+                    // Mark as in-flight (store the actual message for potential retransmission)
                     let in_flight = InFlightChunk {
-                        chunk_index,
+                        message: chunk_msg,
                         sent_at: Instant::now(),
                         retry_count: 0,
-                        data: final_data,
-                        uncompressed_size,
-                        checksum,
                     };
                     window.mark_sent(in_flight);
 
@@ -335,25 +345,19 @@ impl<'a> FileTransferSession<'a> {
             for chunk in timed_out {
                 warn!(
                     "Chunk {} timed out, retrying (attempt {})",
-                    chunk.chunk_index, chunk.retry_count
+                    chunk.message.chunk_index, chunk.retry_count
                 );
 
                 // Apply bandwidth throttling for retries if enabled
                 if let Some(limiter) = &self.bandwidth_limiter {
-                    limiter.wait_for_tokens(chunk.data.len()).await;
+                    limiter.wait_for_tokens(chunk.message.data.len()).await;
                 }
 
-                // Resend the chunk
-                let chunk_msg = ChunkMessage {
-                    transfer_id: self.transfer_id,
-                    file_index: self.file_index,
-                    chunk_index: chunk.chunk_index as u64,
-                    total_chunks: total_chunks as u64,
-                    compressed_size: chunk.data.len() as u32,
-                    uncompressed_size: chunk.uncompressed_size,
-                    checksum: chunk.checksum,
-                    data: chunk.data.clone(),
-                };
+                // Resend the chunk (we already have the complete message)
+                let chunk_msg = chunk.message.clone();
+
+                // Note: We don't re-count retries in statistics since the data was already counted
+                // in the initial send. Only the network bytes are being resent.
 
                 self.connection
                     .send_message(&Message::Chunk(chunk_msg))

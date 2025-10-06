@@ -48,6 +48,25 @@ pub struct FolderProgress {
     pub overall_progress: f64,
 }
 
+/// Transfer statistics
+#[derive(Debug, Clone)]
+pub struct TransferStats {
+    /// Total uncompressed bytes
+    pub uncompressed_bytes: u64,
+    /// Total compressed bytes
+    pub compressed_bytes: u64,
+    /// Transfer duration in seconds
+    pub duration_secs: f64,
+    /// Compression ratio (uncompressed / compressed)
+    pub compression_ratio: f64,
+    /// Percentage saved by compression
+    pub compression_percent: f64,
+    /// Network speed (compressed data rate) in MB/s
+    pub network_speed_mbps: f64,
+    /// Felt speed (uncompressed data rate) in MB/s
+    pub felt_speed_mbps: f64,
+}
+
 /// State callback for auto-saving transfer state
 pub type StateCallback = Box<dyn Fn(&FolderTransferState) + Send + Sync>;
 
@@ -63,6 +82,10 @@ pub struct FolderTransferSession<'a> {
     progress_callback: Option<ProgressCallback>,
     /// State callback for auto-save
     state_callback: Option<StateCallback>,
+    /// Total compressed bytes transferred over network (for network speed calculation)
+    total_compressed_bytes: u64,
+    /// Transfer start time
+    transfer_start: Option<std::time::Instant>,
 }
 
 impl<'a> FolderTransferSession<'a> {
@@ -78,6 +101,8 @@ impl<'a> FolderTransferSession<'a> {
             transfer_id,
             progress_callback: None,
             state_callback: None,
+            total_compressed_bytes: 0,
+            transfer_start: None,
         }
     }
 
@@ -91,9 +116,102 @@ impl<'a> FolderTransferSession<'a> {
         self.state_callback = Some(callback);
     }
 
+    /// Calculate compression statistics
+    fn calc_compression_stats(&self, total_bytes: u64) -> (f64, f64) {
+        let compression_ratio = if total_bytes > 0 {
+            total_bytes as f64 / self.total_compressed_bytes as f64
+        } else {
+            1.0
+        };
+
+        let compression_percent = if total_bytes >= self.total_compressed_bytes {
+            (total_bytes - self.total_compressed_bytes) as f64 / total_bytes as f64 * 100.0
+        } else {
+            // Compression expanded the data (incompressible) - show negative percentage
+            -((self.total_compressed_bytes - total_bytes) as f64 / total_bytes as f64 * 100.0)
+        };
+
+        (compression_ratio, compression_percent)
+    }
+
+    /// Display compression and transfer statistics
+    fn display_transfer_stats(
+        &self,
+        total_files: usize,
+        total_bytes: u64,
+        duration_secs: f64,
+        is_sender: bool,
+    ) {
+        println!("\n📊 Transfer Statistics:");
+        let action = if is_sender { "sent" } else { "received" };
+        if self.config.compression_enabled && self.total_compressed_bytes > 0 {
+            let (compression_ratio, compression_percent) = self.calc_compression_stats(total_bytes);
+
+            let network_speed = if duration_secs > 0.0 {
+                self.total_compressed_bytes as f64 / duration_secs / 1_048_576.0
+            // MB/s
+            } else {
+                0.0
+            };
+            let felt_speed = if duration_secs > 0.0 {
+                total_bytes as f64 / duration_secs / 1_048_576.0 // MB/s
+            } else {
+                0.0
+            };
+
+            let direction = if is_sender { "→" } else { "←" };
+            if compression_percent >= 0.0 {
+                println!(
+                    "   Data: {} bytes {} {} bytes ({:.1}% saved, {:.2}x compression)",
+                    total_bytes,
+                    direction,
+                    self.total_compressed_bytes,
+                    compression_percent,
+                    compression_ratio
+                );
+            } else {
+                println!(
+                    "   Data: {} bytes {} {} bytes ({:.1}% overhead, adaptive compression disabled)",
+                    total_bytes,
+                    direction,
+                    self.total_compressed_bytes,
+                    -compression_percent
+                );
+            }
+            println!(
+                "   Speed: {:.2} MB/s network, {:.2} MB/s throughput",
+                network_speed, felt_speed
+            );
+
+            info!(
+                "Folder transfer complete: {} files, {} bytes {} ({} compressed, {:.1}% saved, {:.2}x ratio)",
+                total_files,
+                total_bytes,
+                action,
+                self.total_compressed_bytes,
+                compression_percent.abs(),
+                compression_ratio
+            );
+        } else {
+            // No compression or adaptive compression disabled all chunks
+            if duration_secs > 0.0 {
+                let speed = total_bytes as f64 / duration_secs / 1_048_576.0;
+                println!("   Speed: {:.2} MB/s", speed);
+            }
+            info!(
+                "Folder transfer complete: {} files, {} bytes {}",
+                total_files, total_bytes, action
+            );
+        }
+    }
+
     /// Send a file or folder to the peer (unified method)
     pub async fn send(&mut self, path: &Path, base_name: &str) -> Result<()> {
         info!("Starting send: {:?}", path);
+
+        // Start timing the transfer
+        self.transfer_start = Some(std::time::Instant::now());
+        self.total_compressed_bytes = 0;
 
         // Check if path is a file or folder and collect metadata accordingly
         let files = if path.is_file() {
@@ -222,20 +340,22 @@ impl<'a> FolderTransferSession<'a> {
             debug!("File {} complete", relative_path.display());
         }
 
+        // Calculate transfer duration and speeds
+        let duration = self.transfer_start.map(|s| s.elapsed()).unwrap_or_default();
+        let duration_secs = duration.as_secs_f64();
+
         // Send completion message
         let complete_msg = CompleteMessage {
             transfer_id: self.transfer_id,
             total_bytes,
-            duration_ms: 0, // TODO: track actual duration
+            duration_ms: duration.as_millis() as u64,
         };
         self.connection
             .send_message(&Message::Complete(complete_msg))
             .await?;
 
-        info!(
-            "Transfer complete: {} files, {} bytes",
-            total_files, total_bytes
-        );
+        // Display transfer statistics
+        self.display_transfer_stats(total_files, total_bytes, duration_secs, true);
         Ok(())
     }
 
@@ -340,20 +460,22 @@ impl<'a> FolderTransferSession<'a> {
             debug!("File {} complete", relative_path.display());
         }
 
+        // Calculate transfer duration and speeds
+        let duration = self.transfer_start.map(|s| s.elapsed()).unwrap_or_default();
+        let duration_secs = duration.as_secs_f64();
+
         // Send completion message
         let complete_msg = CompleteMessage {
             transfer_id: self.transfer_id,
             total_bytes,
-            duration_ms: 0,
+            duration_ms: duration.as_millis() as u64,
         };
         self.connection
             .send_message(&Message::Complete(complete_msg))
             .await?;
 
-        info!(
-            "Folder transfer complete: {} files, {} bytes",
-            total_files, total_bytes
-        );
+        // Display transfer statistics
+        self.display_transfer_stats(total_files, total_bytes, duration_secs, true);
         Ok(())
     }
 
@@ -563,6 +685,13 @@ impl<'a> FolderTransferSession<'a> {
             }
         }
 
+        // Update the session's transfer_id to match the incoming transfer
+        self.transfer_id = transfer_info.transfer_id;
+
+        // Start timing the transfer
+        self.transfer_start = Some(std::time::Instant::now());
+        self.total_compressed_bytes = 0;
+
         if is_resume {
             info!(
                 "Receiving resumed transfer with {} files",
@@ -663,10 +792,12 @@ impl<'a> FolderTransferSession<'a> {
             warn!("Expected Complete message, got {:?}", msg);
         }
 
-        info!(
-            "Folder transfer complete: {} files, {} bytes",
-            total_files, total_bytes
-        );
+        // Calculate transfer duration and speeds
+        let duration = self.transfer_start.map(|s| s.elapsed()).unwrap_or_default();
+        let duration_secs = duration.as_secs_f64();
+
+        // Display transfer statistics
+        self.display_transfer_stats(total_files, total_bytes, duration_secs, false);
         Ok(())
     }
 
@@ -693,7 +824,7 @@ impl<'a> FolderTransferSession<'a> {
         );
 
         // Use windowed mode if window_size > 1, otherwise sequential
-        if self.config.window_size > 1 {
+        let result = if self.config.window_size > 1 {
             // Create window config from settings
             let window_config = WindowConfig {
                 max_window_size: self.config.window_size,
@@ -707,7 +838,12 @@ impl<'a> FolderTransferSession<'a> {
             file_session
                 .send_file_with_resume(path, completed_chunks)
                 .await
-        }
+        };
+
+        // Aggregate compression statistics
+        self.total_compressed_bytes += file_session.compressed_bytes_sent;
+
+        result
     }
 
     /// Receive a single file (internal helper)
@@ -743,12 +879,17 @@ impl<'a> FolderTransferSession<'a> {
                 Message::Chunk(chunk_msg) => {
                     let chunk_index = chunk_msg.chunk_index as u32;
 
+                    // Track compression statistics (network bytes only)
+                    self.total_compressed_bytes += chunk_msg.data.len() as u64;
+
                     // Verify checksum
                     verification::verify_crc32(&chunk_msg.data, chunk_msg.checksum)?;
 
                     // Decompress if needed
-                    let final_data = if let Some(decomp) = &mut decompressor {
-                        decomp.decompress(&chunk_msg.data)?
+                    // Check if chunk is actually compressed by comparing sizes
+                    let is_compressed = chunk_msg.is_compressed();
+                    let final_data = if is_compressed && decompressor.is_some() {
+                        decompressor.as_mut().unwrap().decompress(&chunk_msg.data)?
                     } else {
                         chunk_msg.data
                     };
@@ -873,15 +1014,9 @@ pub struct FolderTransferState {
     pub transferred_bytes: u64,
     /// Completed chunks per file (file_index -> Vec<chunk_index>)
     /// Used for chunk-level resume
-    #[serde(default)]
     pub file_chunks: std::collections::HashMap<usize, Vec<u64>>,
     /// Chunk size used for the transfer
-    #[serde(default = "default_chunk_size")]
     pub chunk_size: u32,
-}
-
-fn default_chunk_size() -> u32 {
-    65536
 }
 
 impl FolderTransferState {

@@ -16,9 +16,9 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
 
-    /// Enable verbose logging
-    #[arg(short, long, global = true)]
-    pub verbose: bool,
+    /// Set logging level: off, error, warn, info, debug, trace
+    #[arg(short = 'v', long = "verbosity", default_value = "warn", global = true)]
+    pub verbosity: String,
 }
 
 #[derive(Subcommand)]

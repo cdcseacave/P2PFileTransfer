@@ -115,7 +115,8 @@ impl AdaptiveCompressor {
                     false
                 };
 
-                return Ok((compressed, self.compression_enabled, decision_changed));
+                // Note: Current chunk is always compressed during sampling phase
+                return Ok((compressed, true, decision_changed));
             }
         }
 

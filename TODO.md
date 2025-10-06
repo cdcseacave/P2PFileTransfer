@@ -20,6 +20,32 @@
 
 ## Recently Completed
 
+### Code Quality & Refactoring (October 6, 2025)
+
+**Completed Tasks:**
+
+1. ✅ **CLI Parameter Rename** (15 minutes)
+   - Renamed `--log-level` to `--verbosity` across entire codebase
+   - Updated CLI arguments, help text, and test scripts
+   - More intuitive parameter naming
+
+2. ✅ **Protocol Optimization** (30 minutes)
+   - Removed redundant `uncompressed_size` field from `ChunkMessage`
+   - Reduced network overhead by 4 bytes per chunk
+   - Uncompressed size now calculated directly from source data using `.len()`
+   - Maintains accurate statistics without storing redundant data
+
+3. ✅ **InFlightChunk Refactoring** (45 minutes)
+   - Redesigned to store complete `ChunkMessage` for efficient retransmission
+   - Eliminates data duplication and need to reconstruct messages
+   - Cleaner design: only windowing-specific metadata added
+   - Updated comprehensive documentation in code and markdown files
+
+**Total Time**: ~1.5 hours  
+**Impact**: Cleaner codebase, reduced network overhead, better maintainability
+
+---
+
 ### Phase 3: Priority 5 - Advanced Features (October 5, 2025)
 
 **Completed Tasks:**

@@ -12,8 +12,8 @@ tokio = { version = "1.40", features = ["full", "signal"] }
 clap = { version = "4.5", features = ["derive", "cargo"] }
 indicatif = "0.17"
 anyhow = "1.0"
-log = "0.4"
-env_logger = "0.11"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 console = "0.15"
 dialoguer = "0.11"
 chrono = "0.4"

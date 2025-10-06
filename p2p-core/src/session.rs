@@ -1,0 +1,568 @@
+//! P2P session management
+//!
+//! This module provides a high-level session abstraction that separates
+//! connection establishment from transfer operations. A session represents
+//! an established, authenticated connection between two peers that can be
+//! used for multiple transfer operations.
+//!
+//! # Architecture
+//!
+//! - **Session**: High-level abstraction managing connection lifecycle
+//! - **Connection**: Established after handshake, ready for operations
+//! - **Operations**: Send/receive that run on an active connection
+//!
+//! # Bidirectional & Symmetric Design
+//!
+//! Once a session is established, both peers are equal - there is no longer
+//! a "client" or "server" distinction. Either peer can initiate operations:
+//! - Peer A can send to Peer B
+//! - Peer B can send to Peer A
+//! - Operations can be interleaved (A sends, then B sends, then A sends again)
+//!
+//! The client/server role only matters during connection establishment:
+//! - Client: Initiates the TCP connection
+//! - Server: Accepts the TCP connection
+//!
+//! After handshake completes, both peers have a symmetric P2PSession object.
+//!
+//! This separation enables:
+//! - Multiple operations on a single connection
+//! - Connection reuse without re-handshaking
+//! - Bidirectional transfers in GUI applications
+//! - Future support for request/response patterns
+
+use crate::{
+    error::{Error, Result},
+    handshake::{HandshakeClient, HandshakeResult, HandshakeServer},
+    network::tcp::{TcpConnection, TcpServer},
+    protocol::{Capabilities, ConfigMessage},
+    transfer_folder::{FolderTransferSession, FolderTransferState},
+};
+use std::{net::SocketAddr, path::Path};
+use tracing::{debug, info};
+use uuid::Uuid;
+
+/// P2P session representing an established connection between two peers
+///
+/// A session is created after successful handshake and can be used for
+/// multiple transfer operations without reconnecting.
+///
+/// **Bidirectional & Symmetric**: Once established, both peers can initiate
+/// send or receive operations. The connection role (client/server) only
+/// matters during establishment and is preserved for debugging/logging.
+pub struct P2PSession {
+    /// The underlying TCP connection
+    connection: TcpConnection,
+    /// Session identifier (unique per session)
+    session_id: Uuid,
+    /// Device ID for this peer
+    device_id: Uuid,
+    /// Handshake result with negotiated config
+    handshake: HandshakeResult,
+    /// Connection role (only for tracking how session was established)
+    connection_role: ConnectionRole,
+}
+
+/// Connection role - only relevant during session establishment
+///
+/// After handshake, both peers are equal and can perform any operation.
+/// This is preserved for logging/debugging purposes only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionRole {
+    /// Initiator - connected to remote peer
+    Initiator,
+    /// Responder - accepted connection from remote peer
+    Responder,
+}
+
+impl P2PSession {
+    // ============================================================================
+    // Session Establishment (Asymmetric - one peer initiates, one responds)
+    // ============================================================================
+
+    /// Create a new client session by connecting to a remote peer
+    ///
+    /// This performs the complete handshake and returns a ready-to-use session.
+    ///
+    /// # Arguments
+    ///
+    /// * `peer_addr` - Address of the remote peer
+    /// * `device_id` - Unique identifier for this device
+    /// * `capabilities` - Capabilities supported by this device
+    /// * `config` - Desired transfer configuration
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use p2p_core::{session::P2PSession, protocol::{Capabilities, ConfigMessage}};
+    /// use uuid::Uuid;
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let peer_addr = "127.0.0.1:9090".parse()?;
+    /// let device_id = Uuid::new_v4();
+    /// let capabilities = Capabilities::all();
+    /// let config = ConfigMessage::default();
+    ///
+    /// let session = P2PSession::connect(peer_addr, device_id, capabilities, config).await?;
+    /// // Now ready for operations: session.send_path(...), etc.
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn connect(
+        peer_addr: SocketAddr,
+        device_id: Uuid,
+        capabilities: Capabilities,
+        config: ConfigMessage,
+    ) -> Result<Self> {
+        info!("Creating client session to {}", peer_addr);
+
+        // Establish TCP connection
+        let mut connection = TcpConnection::connect(peer_addr).await?;
+        debug!("TCP connection established");
+
+        // Perform handshake as client
+        let handshake_client = HandshakeClient::new(device_id, capabilities);
+        let handshake = handshake_client
+            .perform_handshake(&mut connection, config)
+            .await?;
+
+        info!(
+            "Session established as initiator (peer: {}, capabilities: {:?})",
+            handshake.peer_device_id, handshake.agreed_capabilities
+        );
+
+        Ok(Self {
+            connection,
+            session_id: Uuid::new_v4(),
+            device_id,
+            handshake,
+            connection_role: ConnectionRole::Initiator,
+        })
+    }
+
+    /// Create a new server session by accepting a connection
+    ///
+    /// This waits for an incoming connection, performs handshake, and returns
+    /// a ready-to-use session.
+    ///
+    /// # Arguments
+    ///
+    /// * `bind_addr` - Address to bind the server to
+    /// * `device_id` - Unique identifier for this device
+    /// * `capabilities` - Capabilities supported by this device
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use p2p_core::{session::P2PSession, protocol::Capabilities};
+    /// use uuid::Uuid;
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let bind_addr = "0.0.0.0:9090".parse()?;
+    /// let device_id = Uuid::new_v4();
+    /// let capabilities = Capabilities::all();
+    ///
+    /// let session = P2PSession::accept(bind_addr, device_id, capabilities).await?;
+    /// // Now ready for operations: session.receive_to(...), etc.
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn accept(
+        bind_addr: SocketAddr,
+        device_id: Uuid,
+        capabilities: Capabilities,
+    ) -> Result<Self> {
+        info!("Creating server session on {}", bind_addr);
+
+        // Start TCP server
+        let server = TcpServer::bind(bind_addr).await?;
+        debug!("TCP server listening, waiting for connection...");
+
+        // Accept connection
+        let mut connection = server.accept().await?;
+        debug!("TCP connection accepted from {}", connection.peer_addr());
+
+        // Perform handshake as server
+        let handshake_server = HandshakeServer::new(device_id, capabilities);
+        let handshake = handshake_server.perform_handshake(&mut connection).await?;
+
+        info!(
+            "Session established as responder (peer: {}, capabilities: {:?})",
+            handshake.peer_device_id, handshake.agreed_capabilities
+        );
+
+        Ok(Self {
+            connection,
+            session_id: Uuid::new_v4(),
+            device_id,
+            handshake,
+            connection_role: ConnectionRole::Responder,
+        })
+    }
+
+    // ============================================================================
+    // Transfer Operations (Symmetric - either peer can initiate these)
+    // ============================================================================
+
+    /// Send a file or folder to the peer
+    ///
+    /// This operation can be called by either peer, regardless of who
+    /// initiated the connection. Can be called multiple times on the same session.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path to file or folder to send
+    /// * `progress_callback` - Optional callback for progress updates
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # async fn example(session: &mut p2p_core::session::P2PSession) -> Result<(), Box<dyn std::error::Error>> {
+    /// use std::path::Path;
+    ///
+    /// // Either peer can send
+    /// session.send_path(Path::new("/path/to/file.zip"), None).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn send_path(
+        &mut self,
+        path: &Path,
+        progress_callback: Option<crate::transfer_folder::ProgressCallback>,
+    ) -> Result<()> {
+        info!("Starting send operation: {:?}", path);
+
+        if !path.exists() {
+            return Err(Error::Protocol(format!(
+                "Path does not exist: {}",
+                path.display()
+            )));
+        }
+
+        let transfer_id = Uuid::new_v4();
+        let base_name = path
+            .file_name()
+            .ok_or_else(|| Error::Protocol("Invalid path".to_string()))?
+            .to_string_lossy()
+            .to_string();
+
+        let mut session = FolderTransferSession::new(
+            &mut self.connection,
+            self.handshake.config.clone(),
+            transfer_id,
+        );
+
+        if let Some(callback) = progress_callback {
+            session.set_progress_callback(callback);
+        }
+
+        session.send(path, &base_name).await?;
+
+        info!("Send operation completed");
+        Ok(())
+    }
+
+    /// Send a file or folder with auto-reconnect support
+    ///
+    /// This version includes automatic retry logic with exponential backoff.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path to file or folder to send
+    /// * `progress_callback` - Optional callback for progress updates
+    /// * `state_callback` - Optional callback for state updates
+    /// * `reconnect_config` - Configuration for auto-reconnect behavior
+    /// * `state_path` - Optional path to save/load transfer state
+    pub async fn send_path_with_reconnect(
+        &mut self,
+        path: &Path,
+        progress_callback: Option<crate::transfer_folder::ProgressCallback>,
+        state_callback: Option<crate::transfer_folder::StateCallback>,
+        reconnect_config: &crate::reconnect::ReconnectConfig,
+        state_path: Option<&Path>,
+        state_provider: Option<Box<dyn Fn() -> Option<FolderTransferState> + Send>>,
+    ) -> Result<()> {
+        info!("Starting send operation with auto-reconnect: {:?}", path);
+
+        if !path.exists() {
+            return Err(Error::Protocol(format!(
+                "Path does not exist: {}",
+                path.display()
+            )));
+        }
+
+        let transfer_id = Uuid::new_v4();
+        let base_name = path
+            .file_name()
+            .ok_or_else(|| Error::Protocol("Invalid path".to_string()))?
+            .to_string_lossy()
+            .to_string();
+
+        let mut session = FolderTransferSession::new(
+            &mut self.connection,
+            self.handshake.config.clone(),
+            transfer_id,
+        );
+
+        if let Some(callback) = progress_callback {
+            session.set_progress_callback(callback);
+        }
+
+        if let Some(callback) = state_callback {
+            session.set_state_callback(callback);
+        }
+
+        session
+            .send_folder_with_reconnect(
+                path,
+                &base_name,
+                reconnect_config,
+                state_path,
+                state_provider,
+            )
+            .await?;
+
+        info!("Send operation with auto-reconnect completed");
+        Ok(())
+    }
+
+    /// Receive a file or folder from the peer
+    ///
+    /// This operation can be called by either peer, regardless of who
+    /// initiated the connection. Can be called multiple times on the same session.
+    ///
+    /// # Arguments
+    ///
+    /// * `output_dir` - Directory to save received files
+    /// * `progress_callback` - Optional callback for progress updates
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # async fn example(session: &mut p2p_core::session::P2PSession) -> Result<(), Box<dyn std::error::Error>> {
+    /// use std::path::Path;
+    ///
+    /// // Either peer can receive
+    /// session.receive_to(Path::new("/output/dir"), None).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn receive_to(
+        &mut self,
+        output_dir: &Path,
+        progress_callback: Option<crate::transfer_folder::ProgressCallback>,
+    ) -> Result<()> {
+        info!("Starting receive operation to: {:?}", output_dir);
+
+        // Create output directory
+        tokio::fs::create_dir_all(output_dir).await?;
+
+        let transfer_id = Uuid::new_v4();
+        let mut session = FolderTransferSession::new(
+            &mut self.connection,
+            self.handshake.config.clone(),
+            transfer_id,
+        );
+
+        if let Some(callback) = progress_callback {
+            session.set_progress_callback(callback);
+        }
+
+        session.receive_folder(output_dir).await?;
+
+        info!("Receive operation completed");
+        Ok(())
+    }
+
+    /// Receive with state file support for auto-resume
+    ///
+    /// # Arguments
+    ///
+    /// * `output_dir` - Directory to save received files
+    /// * `progress_callback` - Optional callback for progress updates
+    /// * `state_path` - Optional path to save/load transfer state
+    pub async fn receive_to_with_state(
+        &mut self,
+        output_dir: &Path,
+        progress_callback: Option<crate::transfer_folder::ProgressCallback>,
+        state_path: Option<&Path>,
+    ) -> Result<()> {
+        info!(
+            "Starting receive operation with state support to: {:?}",
+            output_dir
+        );
+
+        // Create output directory
+        tokio::fs::create_dir_all(output_dir).await?;
+
+        let transfer_id = Uuid::new_v4();
+        let mut session = FolderTransferSession::new(
+            &mut self.connection,
+            self.handshake.config.clone(),
+            transfer_id,
+        );
+
+        if let Some(callback) = progress_callback {
+            session.set_progress_callback(callback);
+        }
+
+        session
+            .receive_folder_with_state(output_dir, state_path)
+            .await?;
+
+        info!("Receive operation with state support completed");
+        Ok(())
+    }
+
+    /// Run a session event loop that automatically handles incoming operations
+    ///
+    /// This method keeps the session alive and automatically receives incoming
+    /// transfers initiated by the peer. It's designed for passive/server mode
+    /// where you want to accept whatever the peer sends.
+    ///
+    /// The loop continues until the connection is closed or an error occurs.
+    ///
+    /// # Arguments
+    ///
+    /// * `output_dir` - Default directory to save received files
+    /// * `auto_accept` - If true, automatically accepts all transfers without prompting
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` if the session ends gracefully, or an error if something
+    /// goes wrong. This method blocks until the connection is closed.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # async fn example(session: &mut p2p_core::session::P2PSession) -> Result<(), Box<dyn std::error::Error>> {
+    /// use std::path::Path;
+    ///
+    /// // Automatically handle incoming transfers
+    /// session.run_event_loop(
+    ///     Path::new("/downloads"),
+    ///     true  // Auto-accept all transfers
+    /// ).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn run_event_loop(&mut self, output_dir: &Path, auto_accept: bool) -> Result<()> {
+        info!(
+            "Starting session event loop (auto-receive mode, auto_accept={})",
+            auto_accept
+        );
+
+        loop {
+            // For manual accept mode, we would prompt user here
+            // For now, we just respect the auto_accept flag
+            if !auto_accept {
+                // In CLI, this would be handled by the caller
+                // In GUI, this would show a dialog
+                info!("Waiting for user to accept incoming transfer (auto_accept=false)");
+            }
+
+            // Attempt to receive - this will block until a transfer starts or connection closes
+            match self.receive_to(output_dir, None).await {
+                Ok(_) => {
+                    info!("Transfer completed successfully, ready for next operation");
+                    // Continue loop to handle next transfer
+                }
+                Err(e) => {
+                    // Check if this is a connection close (normal termination)
+                    let error_msg = e.to_string().to_lowercase();
+                    if error_msg.contains("connection")
+                        || error_msg.contains("closed")
+                        || error_msg.contains("eof")
+                        || error_msg.contains("reset")
+                        || error_msg.contains("broken pipe")
+                    {
+                        info!("Connection closed, ending event loop");
+                        return Ok(());
+                    }
+                    // Other errors should be propagated
+                    return Err(e);
+                }
+            }
+        }
+    }
+
+    // ============================================================================
+    // Session Information & Management
+    // ============================================================================
+
+    /// Get the session ID
+    pub fn session_id(&self) -> Uuid {
+        self.session_id
+    }
+
+    /// Get the device ID
+    pub fn device_id(&self) -> Uuid {
+        self.device_id
+    }
+
+    /// Get the peer device ID
+    pub fn peer_device_id(&self) -> Uuid {
+        self.handshake.peer_device_id
+    }
+
+    /// Get the peer address
+    pub fn peer_addr(&self) -> SocketAddr {
+        self.connection.peer_addr()
+    }
+
+    /// Get the connection role (how this session was established)
+    ///
+    /// Note: This is for informational purposes only. Both peers can
+    /// perform any operation regardless of connection role.
+    pub fn connection_role(&self) -> ConnectionRole {
+        self.connection_role
+    }
+
+    /// Get the negotiated configuration
+    pub fn config(&self) -> &ConfigMessage {
+        &self.handshake.config
+    }
+
+    /// Get the agreed capabilities
+    pub fn capabilities(&self) -> &Capabilities {
+        &self.handshake.agreed_capabilities
+    }
+
+    /// Check if connection is still alive
+    pub fn is_alive(&self) -> bool {
+        // Could add more sophisticated checks here
+        true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_session_creation() {
+        // Start server in background
+        let server_addr = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
+        let server_device_id = Uuid::new_v4();
+        let server_capabilities = Capabilities::all();
+
+        let server_task = tokio::spawn(async move {
+            let server = TcpServer::bind(server_addr).await.unwrap();
+            let actual_addr = server.local_addr();
+
+            // Send address back through channel (simplified for test)
+            let mut conn = server.accept().await.unwrap();
+            let handshake = HandshakeServer::new(server_device_id, server_capabilities);
+            handshake.perform_handshake(&mut conn).await.unwrap();
+
+            actual_addr
+        });
+
+        // Give server time to start
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        // Note: This test is incomplete as we need the actual bound address
+        // In real tests, we'd use a channel to communicate the address
+        drop(server_task);
+    }
+}

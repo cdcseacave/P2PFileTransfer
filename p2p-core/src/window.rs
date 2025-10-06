@@ -3,12 +3,26 @@
 //! This module implements a sliding window flow control mechanism that allows
 //! multiple chunks to be in-flight simultaneously, significantly improving
 //! transfer speed on high-latency networks.
+//!
+//! ## Design
+//!
+//! The sliding window allows sending multiple chunks before waiting for acknowledgments,
+//! with configurable window size, timeout, and retry limits. Each in-flight chunk stores
+//! the complete network message to enable efficient retransmission on timeout without
+//! needing to re-read, re-compress, or reconstruct the chunk data.
+//!
+//! ## Key Features
+//!
+//! - **Parallel transmission**: Multiple chunks can be in-flight simultaneously
+//! - **Automatic retry**: Chunks are retransmitted on timeout with exponential backoff
+//! - **Out-of-order ACKs**: Handles acknowledgments arriving in any order
+//! - **Resume support**: Can mark chunks as already completed for transfer resumption
 
+use crate::protocol::ChunkMessage;
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::HashMap,
     time::{Duration, Instant},
 };
-use uuid::Uuid;
 
 /// Configuration for the sliding window
 #[derive(Debug, Clone)]
@@ -32,31 +46,49 @@ impl Default for WindowConfig {
 }
 
 /// Information about a chunk that has been sent but not yet acknowledged
+///
+/// This structure wraps a network chunk message with windowing-specific metadata
+/// for retry logic and timeout tracking. The chunk message is stored directly to
+/// enable efficient retransmission without needing to reconstruct the message.
 #[derive(Debug, Clone)]
 pub struct InFlightChunk {
-    /// Chunk index
-    pub chunk_index: u32,
-    /// When the chunk was sent
+    /// The actual chunk message sent over the network (stored for retransmission)
+    pub message: ChunkMessage,
+    /// Timestamp when the chunk was sent (for timeout detection)
     pub sent_at: Instant,
-    /// Number of times this chunk has been sent
+    /// Number of times this chunk has been transmitted (0 = first attempt)
     pub retry_count: u32,
-    /// The compressed/final chunk data (for retransmission)
-    pub data: Vec<u8>,
-    /// Uncompressed size
-    pub uncompressed_size: u32,
-    /// Checksum
-    pub checksum: u32,
 }
 
 /// Sliding window state for managing parallel chunk transfers
-#[allow(dead_code)] // Fields will be used when fully integrated
+///
+/// Manages the flow control for sending chunks in parallel, tracking which chunks
+/// are in-flight, which have been acknowledged, and which need retransmission.
+///
+/// ## Current Usage
+///
+/// Currently used for single-file transfers - one window instance per file.
+/// Each `FileTransferSession` creates its own independent window, and files
+/// are transferred sequentially (one completes before the next begins).
+///
+/// ## Future Extensibility
+///
+/// This design can be extended to support:
+/// - **Connection pooling**: Multiple TCP connections transferring different files in parallel
+/// - **Concurrent transfers**: Multiple windows operating simultaneously across a connection pool
+/// - **Batch processing**: Queueing chunks for preparation/ACK handling to optimize throughput
+///
+/// See TODO.md Phase 4 "Connection Pooling" for planned implementation details.
+///
+/// ## Window State
+///
+/// The window maintains:
+/// - A set of in-flight chunks with their complete message data for retransmission
+/// - Acknowledgment tracking to handle out-of-order ACKs
+/// - Timeout detection and automatic retry with configurable limits
 pub struct SlidingWindow {
     /// Configuration
     config: WindowConfig,
-    /// Transfer ID
-    transfer_id: Uuid,
-    /// File index
-    file_index: u32,
     /// Total number of chunks
     total_chunks: u32,
     /// Next chunk index to send
@@ -67,33 +99,20 @@ pub struct SlidingWindow {
     in_flight: HashMap<u32, InFlightChunk>,
     /// Set of chunks that have been acknowledged
     acked_chunks: std::collections::HashSet<u32>,
-    /// Queue of chunks ready to send
-    send_queue: VecDeque<InFlightChunk>,
-    /// Received ACKs that we haven't processed yet
-    ack_queue: VecDeque<u32>,
     /// Number of chunks successfully acknowledged
     acked_count: u32,
 }
 
 impl SlidingWindow {
     /// Create a new sliding window
-    pub fn new(
-        config: WindowConfig,
-        transfer_id: Uuid,
-        file_index: u32,
-        total_chunks: u32,
-    ) -> Self {
+    pub fn new(config: WindowConfig, total_chunks: u32) -> Self {
         Self {
             config,
-            transfer_id,
-            file_index,
             total_chunks,
             next_to_send: 0,
             next_expected_ack: 0,
             in_flight: HashMap::new(),
             acked_chunks: std::collections::HashSet::new(),
-            send_queue: VecDeque::new(),
-            ack_queue: VecDeque::new(),
             acked_count: 0,
         }
     }
@@ -114,7 +133,7 @@ impl SlidingWindow {
 
     /// Mark a chunk as sent
     pub fn mark_sent(&mut self, chunk: InFlightChunk) {
-        let chunk_index = chunk.chunk_index;
+        let chunk_index = chunk.message.chunk_index as u32;
         self.in_flight.insert(chunk_index, chunk);
         if chunk_index == self.next_to_send {
             self.next_to_send += 1;
@@ -277,6 +296,29 @@ pub struct WindowStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uuid::Uuid;
+
+    /// Helper to create a test chunk message
+    fn create_test_chunk(
+        transfer_id: Uuid,
+        file_index: u32,
+        chunk_index: u64,
+        total_chunks: u64,
+    ) -> InFlightChunk {
+        InFlightChunk {
+            message: ChunkMessage {
+                transfer_id,
+                file_index,
+                chunk_index,
+                total_chunks,
+                flags: 0,
+                checksum: 0,
+                data: vec![],
+            },
+            sent_at: Instant::now(),
+            retry_count: 0,
+        }
+    }
 
     #[test]
     fn test_window_can_send() {
@@ -284,7 +326,8 @@ mod tests {
             max_window_size: 4,
             ..Default::default()
         };
-        let mut window = SlidingWindow::new(config, Uuid::new_v4(), 0, 10);
+        let transfer_id = Uuid::new_v4();
+        let mut window = SlidingWindow::new(config, 10);
 
         // Should be able to send up to window size
         assert!(window.can_send());
@@ -292,14 +335,7 @@ mod tests {
 
         // Fill the window
         for i in 0..4 {
-            let chunk = InFlightChunk {
-                chunk_index: i,
-                sent_at: Instant::now(),
-                retry_count: 0,
-                data: vec![],
-                uncompressed_size: 0,
-                checksum: 0,
-            };
+            let chunk = create_test_chunk(transfer_id, 0, i as u64, 10);
             window.mark_sent(chunk);
         }
 
@@ -311,18 +347,12 @@ mod tests {
     #[test]
     fn test_window_process_ack() {
         let config = WindowConfig::default();
-        let mut window = SlidingWindow::new(config, Uuid::new_v4(), 0, 10);
+        let transfer_id = Uuid::new_v4();
+        let mut window = SlidingWindow::new(config, 10);
 
         // Send chunks 0, 1, 2
         for i in 0..3 {
-            let chunk = InFlightChunk {
-                chunk_index: i,
-                sent_at: Instant::now(),
-                retry_count: 0,
-                data: vec![],
-                uncompressed_size: 0,
-                checksum: 0,
-            };
+            let chunk = create_test_chunk(transfer_id, 0, i as u64, 10);
             window.mark_sent(chunk);
         }
 
@@ -342,20 +372,14 @@ mod tests {
     #[test]
     fn test_window_completion() {
         let config = WindowConfig::default();
-        let mut window = SlidingWindow::new(config, Uuid::new_v4(), 0, 3);
+        let transfer_id = Uuid::new_v4();
+        let mut window = SlidingWindow::new(config, 3);
 
         assert!(!window.is_complete());
 
         // Send and ack all chunks
         for i in 0..3 {
-            let chunk = InFlightChunk {
-                chunk_index: i,
-                sent_at: Instant::now(),
-                retry_count: 0,
-                data: vec![],
-                uncompressed_size: 0,
-                checksum: 0,
-            };
+            let chunk = create_test_chunk(transfer_id, 0, i as u64, 3);
             window.mark_sent(chunk);
             window.process_ack(i);
         }
@@ -370,23 +394,20 @@ mod tests {
             ack_timeout: Duration::from_millis(10),
             ..Default::default()
         };
-        let mut window = SlidingWindow::new(config, Uuid::new_v4(), 0, 10);
+        let transfer_id = Uuid::new_v4();
+        let mut window = SlidingWindow::new(config, 10);
 
         // Send a chunk
-        let chunk = InFlightChunk {
-            chunk_index: 0,
-            sent_at: Instant::now() - Duration::from_millis(20), // Already timed out
-            retry_count: 0,
-            data: vec![1, 2, 3],
-            uncompressed_size: 3,
-            checksum: 123,
-        };
+        let mut chunk = create_test_chunk(transfer_id, 0, 0, 10);
+        chunk.message.data = vec![1, 2, 3];
+        chunk.message.checksum = 123;
+        chunk.sent_at = Instant::now() - Duration::from_millis(20); // Already timed out
         window.mark_sent(chunk);
 
         // Check timeouts
         let timed_out = window.check_timeouts();
         assert_eq!(timed_out.len(), 1);
-        assert_eq!(timed_out[0].chunk_index, 0);
+        assert_eq!(timed_out[0].message.chunk_index, 0);
         assert_eq!(timed_out[0].retry_count, 1);
     }
 }

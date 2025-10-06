@@ -55,6 +55,13 @@ P2P File Transfer is a production-ready command-line tool for transferring files
 - ✅ **Transfer Mode Display**: See whether using windowed or sequential mode
 - ✅ **Verbose Logging**: Detailed diagnostics with `-v` flag
 
+### Architecture
+- ✅ **Session-Based Design**: Connection establishment separated from transfer operations
+- ✅ **Bidirectional Transfers**: Either peer can send or receive after session setup
+- ✅ **Multiple Operations**: Perform multiple transfers on same connection without re-handshaking
+- ✅ **Auto-Receive Mode**: Receiver automatically accepts incoming transfers in event loop
+- ✅ **GUI-Ready**: Foundation for interactive applications with persistent connections
+
 ### Networking
 - ✅ **TCP with Keepalive**: Reliable connections with automatic ping/pong
 - ✅ **UDP Discovery**: Automatic peer detection on local network
@@ -111,7 +118,7 @@ p2p-transfer send ./photos --to 192.168.1.100:8080 --adaptive false
 
 #### Receive Files/Folders
 ```bash
-# Start receiver on port 8080
+# Start receiver on port 8080 (automatically receives when peer sends)
 p2p-transfer receive ./downloads --port 8080
 
 # Auto-accept incoming transfers (no prompts)
@@ -120,6 +127,8 @@ p2p-transfer receive ./received --port 7778 --auto-accept
 # Short form
 p2p-transfer receive ./received -p 7778 -a
 ```
+
+**Note**: The receiver now runs in an event loop that automatically handles incoming transfers. When a peer initiates a send, the receiver will automatically start receiving - no manual action needed. The session stays alive for multiple transfers until the connection is closed.
 
 #### Discover Peers
 ```bash

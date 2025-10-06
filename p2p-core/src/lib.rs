@@ -14,6 +14,7 @@ pub mod nat; // NAT traversal and hole punching
 pub mod network;
 pub mod protocol;
 pub mod reconnect; // Auto-reconnect with exponential backoff
+pub mod session; // High-level session management
 pub mod state;
 pub mod transfer;
 pub mod transfer_file; // Single-file transfer
