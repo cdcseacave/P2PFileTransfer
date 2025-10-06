@@ -133,10 +133,10 @@ p2p-transfer receive --output ./downloads --port 8080
 p2p-transfer receive --output ./downloads --role client --peer 192.168.1.100:8080
 
 # Auto-accept incoming transfers (no prompts)
-p2p-transfer receive --output ./received --port 7778 --auto-accept
+p2p-transfer receive --output ./received --port 14567 --auto-accept
 
 # Short form
-p2p-transfer receive -o ./received -p 7778 -a
+p2p-transfer receive -o ./received -p 14567 -a
 ```
 
 **Note**: The receiver now runs in an event loop that automatically handles incoming transfers. When a peer initiates a send, the receiver will automatically start receiving - no manual action needed. The session stays alive for multiple transfers until the connection is closed.
@@ -186,17 +186,17 @@ Currently, when both machines are behind NAT, you need to manually use the disco
    p2p-transfer nat-test
    # Output: Public IP: 203.0.113.5
    
-   # Configure router to forward port 7778 to Machine A's local IP
-   # (Done via router web interface, e.g., 192.168.1.100:7778 → Internet:7778)
+  # Configure router to forward port 14567 to Machine A's local IP
+  # (Done via router web interface, e.g., 192.168.1.100 → Internet:14567)
    
    # Start receiver
-   p2p-transfer receive ./downloads --port 7778
+  p2p-transfer receive ./downloads --port 14567
    ```
 
 2. **On Machine B (sender)** - Connect using Machine A's public IP:
    ```bash
    # Send to Machine A's public IP and forwarded port
-   p2p-transfer send myfile.zip --peer 203.0.113.5:7778
+  p2p-transfer send myfile.zip --peer 203.0.113.5
    ```
 
 #### Resume Interrupted Transfer
@@ -452,10 +452,10 @@ python3 benchmark.py --mode sender
 
 # Remote benchmarking (two machines on same network)
 # On receiver machine:
-python3 benchmark.py --mode receiver --port 7779
+python3 benchmark.py --mode receiver --port 14568
 
 # On sender machine:
-python3 benchmark.py --mode sender --receiver-ip 192.168.1.100 --port 7779
+python3 benchmark.py --mode sender --receiver-ip 192.168.1.100 --port 14568
 ```
 
 The Python benchmark script works on Windows, macOS, and Linux, and properly coordinates sender/receiver for accurate network testing.

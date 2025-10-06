@@ -3,16 +3,17 @@
 use anyhow::Result;
 use p2p_core::{discovery::DiscoveryManager, protocol::Capabilities, Uuid};
 use std::{sync::Arc, time::Duration};
+use tracing::info;
 
-pub async fn handle_discover(timeout_secs: u64) -> Result<()> {
-    println!("🔍 Discovering peers on network...");
-    println!("  Timeout: {} seconds", timeout_secs);
+pub async fn handle_discover(timeout_secs: u64, port: u16) -> Result<()> {
+    info!("🔍 Discovering peers on network...");
+    info!("  Timeout: {} seconds", timeout_secs);
 
     let device_name = format!("cli-{}", &Uuid::new_v4().to_string()[..8]);
     let manager = Arc::new(
         DiscoveryManager::new(
             device_name,
-            7778,
+            port,
             Capabilities::all(),
             Duration::from_secs(10),
         )
@@ -31,9 +32,9 @@ pub async fn handle_discover(timeout_secs: u64) -> Result<()> {
     // Get discovered peers
     let peers = manager.get_peers().await;
 
-    println!("\n📡 Discovered {} peer(s):", peers.len());
+    info!("\n📡 Discovered {} peer(s):", peers.len());
     for (idx, peer) in peers.iter().enumerate() {
-        println!(
+        info!(
             "  [{}] {} - {} ({})",
             idx + 1,
             peer.device_name,

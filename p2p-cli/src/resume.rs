@@ -11,12 +11,13 @@ use p2p_core::{
 };
 use std::{net::SocketAddr, path::PathBuf};
 use tokio::signal;
+use tracing::{debug, info, warn};
 
 pub async fn handle_resume(transfer_id: String, to: String, path: PathBuf) -> Result<()> {
-    println!("🔄 Resuming transfer");
-    println!("  Transfer ID: {}", transfer_id);
-    println!("  Folder path: {}", path.display());
-    println!("  Peer address: {}", to);
+    info!("🔄 Resuming transfer");
+    info!("  Transfer ID: {}", transfer_id);
+    info!("  Folder path: {}", path.display());
+    info!("  Peer address: {}", to);
 
     // Validate folder exists
     if !path.exists() || !path.is_dir() {
@@ -35,10 +36,10 @@ pub async fn handle_resume(transfer_id: String, to: String, path: PathBuf) -> Re
         );
     }
 
-    println!("  Loading transfer state...");
+    info!("  Loading transfer state...");
     let state = FolderTransferState::load_from_file(&state_path).await?;
 
-    println!(
+    debug!(
         "  Progress: {}/{} files ({:.1}%)",
         state.completed_files.len(),
         state.files.len(),
@@ -49,12 +50,11 @@ pub async fn handle_resume(transfer_id: String, to: String, path: PathBuf) -> Re
     let peer_addr = to.parse::<SocketAddr>()?;
 
     // Connect to peer
-    println!("  Reconnecting to peer...");
+    info!("  Reconnecting to peer...");
     let mut connection = TcpConnection::connect(peer_addr).await?;
-    println!("  ✓ Connected");
 
     // Perform handshake (use same config as original transfer)
-    println!("  Performing handshake...");
+    info!("  Performing handshake...");
     let device_id = Uuid::new_v4();
     let capabilities = Capabilities::all();
     let handshake = HandshakeClient::new(device_id, capabilities);
@@ -66,7 +66,7 @@ pub async fn handle_resume(transfer_id: String, to: String, path: PathBuf) -> Re
     let handshake_result = handshake
         .perform_handshake(&mut connection, config.clone())
         .await?;
-    println!(
+    info!(
         "  ✓ Handshake complete (capabilities: {:?})",
         handshake_result.agreed_capabilities
     );
@@ -82,7 +82,7 @@ pub async fn handle_resume(transfer_id: String, to: String, path: PathBuf) -> Re
         let path_clone = state_file_clone.clone();
         tokio::spawn(async move {
             if let Err(e) = state_clone.save_to_file(&path_clone).await {
-                eprintln!("⚠️  Failed to save state: {}", e);
+                warn!("⚠️  Failed to save state: {}", e);
             }
         });
     }));
@@ -122,17 +122,17 @@ pub async fn handle_resume(transfer_id: String, to: String, path: PathBuf) -> Re
     }));
 
     // Resume transfer with signal handling
-    println!("\n📁 Resuming folder transfer...");
+    info!("\n📁 Resuming folder transfer...");
     tokio::select! {
         result = session.resume_send_folder(&path, &state) => {
             result?;
             let _ = tokio::fs::remove_file(&state_path).await;
-            println!("\n✅ Transfer resumed and completed!");
-            println!("  State file removed");
+            info!("\n✅ Transfer resumed and completed!");
+            info!("  State file removed");
         }
         _ = signal::ctrl_c() => {
-            println!("\n⚠️  Transfer interrupted again. State has been saved.");
-            println!("  Use 'p2p-transfer resume {} --to {} --path {}' to continue",
+            warn!("\n⚠️  Transfer interrupted again. State has been saved.");
+            info!("  Use 'p2p-transfer resume {} --to {} --path {}' to continue",
                 transfer_id, to, path.display());
             return Ok(());
         }

@@ -83,8 +83,8 @@ pub async fn run_cli() -> Result<()> {
         } => {
             receive::handle_receive(output, auto_accept, session).await?;
         }
-        cli::Commands::Discover { timeout } => {
-            discover::handle_discover(timeout).await?;
+        cli::Commands::Discover { timeout, port } => {
+            discover::handle_discover(timeout, port).await?;
         }
         cli::Commands::NatTest { stun_server } => {
             nat_test::handle_nat_test(stun_server).await?;

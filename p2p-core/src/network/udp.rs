@@ -3,10 +3,10 @@
 use crate::error::{Error, Result};
 use crate::protocol::{Capabilities, DiscoveryBeacon};
 use crate::{DEFAULT_DISCOVERY_PORT, PROTOCOL_VERSION};
-use log::{debug, info, warn};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Duration, SystemTime};
 use tokio::net::UdpSocket;
+use tracing::{trace, warn};
 use uuid::Uuid;
 
 /// Maximum UDP packet size
@@ -32,7 +32,7 @@ impl DiscoveryService {
         let discovery_port = DEFAULT_DISCOVERY_PORT;
         let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), discovery_port);
 
-        info!("Creating discovery service on port {}", discovery_port);
+        trace!("Creating discovery service on port {}", discovery_port);
         let socket = UdpSocket::bind(bind_addr).await?;
         socket.set_broadcast(true)?;
 
@@ -71,7 +71,7 @@ impl DiscoveryService {
             )));
         }
 
-        debug!("Broadcasting beacon to {}", self.broadcast_addr);
+        trace!("Broadcasting beacon to {}", self.broadcast_addr);
         self.socket.send_to(&data, self.broadcast_addr).await?;
         Ok(())
     }
@@ -99,7 +99,7 @@ impl DiscoveryService {
             });
         }
 
-        debug!("Received beacon from {} ({})", beacon.device_name, src_addr);
+        trace!("Received beacon from {} ({})", beacon.device_name, src_addr);
         Ok((beacon, src_addr))
     }
 
@@ -165,8 +165,12 @@ mod tests {
     #[tokio::test]
     async fn test_create_discovery_service() {
         // Use a random high port for testing to avoid conflicts
-        let service =
-            DiscoveryService::new("Test Device".to_string(), 7778, Capabilities::all()).await;
+        let service = DiscoveryService::new(
+            "Test Device".to_string(),
+            crate::DEFAULT_TRANSFER_PORT,
+            Capabilities::all(),
+        )
+        .await;
 
         // May fail if port is in use, which is okay for this test
         if let Ok(svc) = service {
@@ -180,7 +184,7 @@ mod tests {
             version: 1,
             device_id: Uuid::new_v4(),
             device_name: "Test".to_string(),
-            port: 7778,
+            port: crate::DEFAULT_TRANSFER_PORT,
             capabilities: Capabilities::all(),
         };
 
@@ -200,14 +204,14 @@ mod tests {
             version: 1,
             device_id: Uuid::new_v4(),
             device_name: "Test".to_string(),
-            port: 7778,
+            port: crate::DEFAULT_TRANSFER_PORT,
             capabilities: Capabilities::all(),
         };
 
         let peer = PeerInfo::from((beacon, IpAddr::V4(Ipv4Addr::LOCALHOST)));
         let addr = peer.socket_addr();
 
-        assert_eq!(addr.port(), 7778);
+        assert_eq!(addr.port(), crate::DEFAULT_TRANSFER_PORT);
         assert_eq!(addr.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
     }
 }

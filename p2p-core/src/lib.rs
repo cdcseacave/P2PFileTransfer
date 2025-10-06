@@ -38,10 +38,10 @@ pub const MIN_PROTOCOL_VERSION: u8 = 1;
 pub const DEFAULT_CHUNK_SIZE: u32 = 65536;
 
 /// Default discovery port
-pub const DEFAULT_DISCOVERY_PORT: u16 = 7777;
+pub const DEFAULT_DISCOVERY_PORT: u16 = 14566;
 
 /// Default transfer port
-pub const DEFAULT_TRANSFER_PORT: u16 = 7778;
+pub const DEFAULT_TRANSFER_PORT: u16 = 14567;
 
 /// Magic bytes for protocol framing
 pub const PROTOCOL_MAGIC: [u8; 4] = *b"P2PF";

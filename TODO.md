@@ -325,10 +325,10 @@ p2p-transfer nat-test --stun-server stun.example.com:3478
 **Workaround Example**:
 ```bash
 # Machine A (receiver): Configure router port forward, then:
-p2p-transfer receive ./downloads --port 7778
+p2p-transfer receive ./downloads --port 14567
 
 # Machine B (sender): Use Machine A's public IP from nat-test:
-p2p-transfer send file.zip --to 203.0.113.5:7778
+p2p-transfer send file.zip --to 203.0.113.5
 ```
 
 **Next Steps** (for full automatic hole punching):

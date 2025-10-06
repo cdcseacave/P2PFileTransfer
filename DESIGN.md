@@ -156,7 +156,7 @@ impl DiscoveryManager {
 ```
 Device A                           Device B
    |                                  |
-   |--- Beacon (UDP broadcast) ------>|  Port 7777
+   |--- Beacon (UDP broadcast) ------>|  Port 14566
    |    {id, name, addr, version}     |
    |                                  |
    |<---- Beacon (response) ----------|
@@ -462,10 +462,10 @@ session.run_event_loop(&output_dir, auto_accept).await?;
 p2p-transfer send file.zip --peer host:port
 
 # Send as server - listen for peer to connect, then send
-p2p-transfer send file.zip --role server --port 7778
+p2p-transfer send file.zip --role server --port 14567
 
 # Receive as server (default) - listen for peer and receive
-p2p-transfer receive --output ./downloads --port 7778
+p2p-transfer receive --output ./downloads --port 14567
 
 # Receive as client - connect to peer and receive
 p2p-transfer receive --output ./downloads --role client --peer host:port
@@ -1194,10 +1194,10 @@ python3 benchmark.py --mode sender
 
 # Remote mode (tests between two machines on same network)
 # On receiver machine:
-python3 benchmark.py --mode receiver --port 7779
+python3 benchmark.py --mode receiver --port 14568
 
 # On sender machine:
-python3 benchmark.py --mode sender --receiver-ip 192.168.1.100 --port 7779
+python3 benchmark.py --mode sender --receiver-ip 192.168.1.100 --port 14568
 ```
 
 **Features:**
@@ -1486,7 +1486,7 @@ pub enum RendezvousMessage {
 **Example Future Usage**:
 ```bash
 # Machine A (receiver) - auto hole punching
-p2p-transfer receive ./downloads --port 7778 \
+p2p-transfer receive ./downloads --port 14567 \
     --enable-hole-punching \
     --rendezvous wss://rendezvous.example.com
 

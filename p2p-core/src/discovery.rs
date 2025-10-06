@@ -3,12 +3,12 @@
 use crate::error::Result;
 use crate::network::udp::{DiscoveryService, PeerInfo};
 use crate::protocol::Capabilities;
-use log::{debug, info, warn};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio::time::interval;
+use tracing::{debug, info, trace, warn};
 use uuid::Uuid;
 
 /// Peer discovery manager
@@ -37,7 +37,7 @@ impl DiscoveryManager {
 
     /// Start the discovery service
     pub async fn start(self: Arc<Self>) -> Result<()> {
-        info!("Starting discovery manager");
+        debug!("Starting discovery manager");
 
         // Spawn beacon broadcaster
         let broadcaster = {
@@ -75,14 +75,14 @@ impl DiscoveryManager {
 
                             if let Some(existing) = peers_lock.get_mut(&beacon.device_id) {
                                 existing.update_last_seen();
-                                debug!("Updated peer: {}", existing.device_name);
+                                trace!("Updated peer: {}", existing.device_name);
                             } else {
                                 info!("Discovered new peer: {} at {}", peer_info.device_name, ip);
                                 peers_lock.insert(beacon.device_id, peer_info);
                             }
                         }
                         Err(e) => {
-                            debug!("Error receiving beacon: {}", e);
+                            warn!("Error receiving beacon: {}", e);
                         }
                     }
                 }
@@ -112,7 +112,7 @@ impl DiscoveryManager {
 
                     let after_count = peers_lock.len();
                     if before_count != after_count {
-                        debug!("Cleaned up {} stale peers", before_count - after_count);
+                        trace!("Cleaned up {} stale peers", before_count - after_count);
                     }
                 }
             })
@@ -174,7 +174,7 @@ mod tests {
     async fn test_discovery_manager_creation() {
         let manager = DiscoveryManager::new(
             "Test Device".to_string(),
-            7778,
+            crate::DEFAULT_TRANSFER_PORT,
             Capabilities::all(),
             Duration::from_secs(10),
         )
@@ -190,7 +190,7 @@ mod tests {
     async fn test_peer_operations() {
         let manager = DiscoveryManager::new(
             "Test".to_string(),
-            7778,
+            crate::DEFAULT_TRANSFER_PORT,
             Capabilities::all(),
             Duration::from_secs(10),
         )

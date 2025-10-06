@@ -206,7 +206,7 @@ mod tests {
         let record = TransferRecord::new(
             Uuid::new_v4(),
             TransferDirection::Send,
-            "127.0.0.1:7778".to_string(),
+            "127.0.0.1".to_string(),
         );
 
         assert_eq!(record.direction, TransferDirection::Send);
@@ -219,7 +219,7 @@ mod tests {
         let mut record = TransferRecord::new(
             Uuid::new_v4(),
             TransferDirection::Send,
-            "127.0.0.1:7778".to_string(),
+            "127.0.0.1".to_string(),
         );
 
         let files = vec!["file1.txt".to_string(), "file2.txt".to_string()];
@@ -239,13 +239,13 @@ mod tests {
         let record1 = TransferRecord::new(
             Uuid::new_v4(),
             TransferDirection::Send,
-            "127.0.0.1:7778".to_string(),
+            "127.0.0.1".to_string(),
         );
 
         let record2 = TransferRecord::new(
             Uuid::new_v4(),
             TransferDirection::Receive,
-            "127.0.0.1:7779".to_string(),
+            "127.0.0.1".to_string(),
         );
 
         history.add_record(record1.clone());
@@ -273,7 +273,7 @@ mod tests {
         let record = TransferRecord::new(
             Uuid::new_v4(),
             TransferDirection::Send,
-            "127.0.0.1:7778".to_string(),
+            "127.0.0.1".to_string(),
         );
         history.add_record(record);
 

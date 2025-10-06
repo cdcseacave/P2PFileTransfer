@@ -28,7 +28,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
     time::timeout,
 };
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 use uuid::Uuid;
 
 /// File transfer session for single-file transfers
@@ -89,7 +89,7 @@ impl<'a> FileTransferSession<'a> {
         path: &Path,
         completed_chunks: &[u64],
     ) -> Result<()> {
-        info!("Starting file send: {:?}", path);
+        debug!("Starting file send: {:?}", path);
 
         let mut reader = ChunkReader::new(path, self.config.chunk_size as usize).await?;
         let total_chunks = reader.total_chunks();
@@ -100,7 +100,7 @@ impl<'a> FileTransferSession<'a> {
                 completed_chunks.len()
             );
         }
-        info!("File has {} total chunks", total_chunks);
+        debug!("File has {} total chunks", total_chunks);
 
         // Compression if enabled
         let mut compressor: Option<AdaptiveCompressor> = if self.config.compression_enabled {
@@ -120,7 +120,7 @@ impl<'a> FileTransferSession<'a> {
         for chunk_index in 0..total_chunks {
             // Skip already completed chunks
             if completed_chunks.contains(&(chunk_index as u64)) {
-                debug!("Skipping already completed chunk {}", chunk_index);
+                trace!("Skipping already completed chunk {}", chunk_index);
                 continue;
             }
             // Read chunk
@@ -180,10 +180,10 @@ impl<'a> FileTransferSession<'a> {
                 )));
             }
 
-            debug!("Sent chunk {}/{}", chunk_index + 1, total_chunks);
+            trace!("Sent chunk {}/{}", chunk_index + 1, total_chunks);
         }
 
-        info!("File transfer complete");
+        debug!("File transfer complete");
         Ok(())
     }
 
@@ -209,7 +209,7 @@ impl<'a> FileTransferSession<'a> {
         window_config: &WindowConfig,
         completed_chunks: &[u64],
     ) -> Result<()> {
-        info!("Starting windowed file send: {:?}", path);
+        debug!("Starting windowed file send: {:?}", path);
 
         let mut reader = ChunkReader::new(path, self.config.chunk_size as usize).await?;
         let total_chunks = reader.total_chunks();
@@ -220,7 +220,7 @@ impl<'a> FileTransferSession<'a> {
                 completed_chunks.len()
             );
         }
-        info!(
+        debug!(
             "File has {} total chunks, using sliding window protocol",
             total_chunks
         );
@@ -232,7 +232,7 @@ impl<'a> FileTransferSession<'a> {
         for &chunk_index in completed_chunks {
             if chunk_index < total_chunks as u64 {
                 window.mark_completed(chunk_index as u32);
-                debug!("Marked chunk {} as already completed", chunk_index);
+                trace!("Marked chunk {} as already completed", chunk_index);
             }
         }
 
@@ -327,7 +327,7 @@ impl<'a> FileTransferSession<'a> {
             match timeout(Duration::from_millis(50), self.connection.recv_message()).await {
                 Ok(Ok(Message::ChunkAck(ack))) if ack.status == AckStatus::Success => {
                     window.process_ack(ack.chunk_index as u32);
-                    debug!("ACK received for chunk {}", ack.chunk_index);
+                    trace!("ACK received for chunk {}", ack.chunk_index);
                 }
                 Ok(Ok(_)) => {
                     // Other message type, ignore
@@ -379,7 +379,7 @@ impl<'a> FileTransferSession<'a> {
             // Log progress periodically
             let stats = window.stats();
             if stats.acked != last_progress && stats.acked % 10 == 0 {
-                info!(
+                debug!(
                     "Progress: {}/{} chunks ({:.1}% complete, {} in-flight)",
                     stats.acked,
                     stats.total,
@@ -391,7 +391,7 @@ impl<'a> FileTransferSession<'a> {
 
             // Check if complete
             if window.is_complete() {
-                info!("File transfer complete!");
+                debug!("File transfer complete!");
                 break;
             }
 
@@ -408,7 +408,7 @@ impl<'a> FileTransferSession<'a> {
     ///
     /// The total number of chunks is determined from the first chunk message received.
     pub async fn receive_file(&mut self, output_path: &Path) -> Result<()> {
-        info!("Starting file receive: {:?}", output_path);
+        debug!("Starting file receive: {:?}", output_path);
 
         let mut writer = ChunkWriter::new(output_path, self.config.chunk_size as usize).await?;
 
@@ -458,7 +458,7 @@ impl<'a> FileTransferSession<'a> {
 
                     // Check if transfer is complete
                     if let Some(total) = total_chunks {
-                        debug!("Received chunk {}/{}", received, total);
+                        trace!("Received chunk {}/{}", received, total);
                         if received >= total {
                             info!("All chunks received, transfer complete");
                             break;
@@ -474,7 +474,7 @@ impl<'a> FileTransferSession<'a> {
         // Finalize file
         writer.finalize().await?;
 
-        info!("File receive complete");
+        debug!("File receive complete");
         Ok(())
     }
 

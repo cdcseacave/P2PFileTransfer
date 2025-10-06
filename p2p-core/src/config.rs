@@ -31,8 +31,8 @@ pub struct NetworkConfig {
 impl Default for NetworkConfig {
     fn default() -> Self {
         Self {
-            listen_port: 7778,
-            discovery_port: 7777,
+            listen_port: crate::DEFAULT_TRANSFER_PORT,
+            discovery_port: crate::DEFAULT_DISCOVERY_PORT,
             discovery_interval_ms: 2000,
             keepalive_interval_ms: 5000,
             max_reconnect_attempts: 10,

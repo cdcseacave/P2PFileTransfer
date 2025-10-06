@@ -47,7 +47,7 @@ use crate::{
     transfer_folder::{FolderTransferSession, FolderTransferState},
 };
 use std::{net::SocketAddr, path::Path};
-use tracing::{debug, info};
+use tracing::{debug, info, trace};
 use uuid::Uuid;
 
 /// P2P session representing an established connection between two peers
@@ -122,11 +122,11 @@ impl P2PSession {
         capabilities: Capabilities,
         config: ConfigMessage,
     ) -> Result<Self> {
-        info!("Creating client session to {}", peer_addr);
+        debug!("Creating client session to {}", peer_addr);
 
         // Establish TCP connection
         let mut connection = TcpConnection::connect(peer_addr).await?;
-        debug!("TCP connection established");
+        trace!("TCP connection established");
 
         // Perform handshake as client
         let handshake_client = HandshakeClient::new(device_id, capabilities);
@@ -134,7 +134,7 @@ impl P2PSession {
             .perform_handshake(&mut connection, config)
             .await?;
 
-        info!(
+        debug!(
             "Session established as initiator (peer: {}, capabilities: {:?})",
             handshake.peer_device_id, handshake.agreed_capabilities
         );
@@ -180,21 +180,19 @@ impl P2PSession {
         device_id: Uuid,
         capabilities: Capabilities,
     ) -> Result<Self> {
-        info!("Creating server session on {}", bind_addr);
-
         // Start TCP server
         let server = TcpServer::bind(bind_addr).await?;
-        debug!("TCP server listening, waiting for connection...");
+        trace!("TCP server listening, waiting for connection...");
 
         // Accept connection
         let mut connection = server.accept().await?;
-        debug!("TCP connection accepted from {}", connection.peer_addr());
+        trace!("TCP connection accepted from {}", connection.peer_addr());
 
         // Perform handshake as server
         let handshake_server = HandshakeServer::new(device_id, capabilities);
         let handshake = handshake_server.perform_handshake(&mut connection).await?;
 
-        info!(
+        debug!(
             "Session established as responder (peer: {}, capabilities: {:?})",
             handshake.peer_device_id, handshake.agreed_capabilities
         );
@@ -217,7 +215,7 @@ impl P2PSession {
     /// # Arguments
     ///
     /// * `role` - "client" to connect, "server" to accept
-    /// * `peer_addr` - Optional peer address string (e.g., "192.168.1.100:7778") for client role direct connection
+    /// * `peer_addr` - Optional peer address string (e.g., "192.168.1.100") for client role direct connection
     /// * `use_discovery` - Whether to use peer discovery (client role only)
     /// * `port` - Port number for bind address (server) or discovery (client)
     /// * `device_id` - Unique identifier for this device
@@ -239,13 +237,13 @@ impl P2PSession {
     /// let capabilities = Capabilities::all();
     ///
     /// // As client with direct connection
-    /// let peer_addr = Some("192.168.1.100:7778".to_string());
+    /// let peer_addr = Some("192.168.1.100".to_string());
     /// let config = Some(ConfigMessage::default());
     /// let session = P2PSession::establish(
     ///     "client",
     ///     peer_addr,
     ///     false,  // use_discovery
-    ///     7778,   // port
+    ///     14567,  // port
     ///     device_id,
     ///     capabilities,
     ///     config
@@ -256,7 +254,7 @@ impl P2PSession {
     ///     "client",
     ///     None,
     ///     true,   // use_discovery
-    ///     7778,   // port
+    ///     14567,  // port
     ///     device_id,
     ///     capabilities,
     ///     Some(ConfigMessage::default())
@@ -267,7 +265,7 @@ impl P2PSession {
     ///     "server",
     ///     None,
     ///     false,  // use_discovery (ignored)
-    ///     7778,   // port
+    ///     14567,  // port
     ///     device_id,
     ///     capabilities,
     ///     None
@@ -289,19 +287,26 @@ impl P2PSession {
 
         if role == "client" {
             // Client mode: connect to peer
-            let has_peer_addr = peer_addr.is_some();
-
             let peer = if let Some(addr_str) = peer_addr {
-                // Direct connection - parse the address string
-                info!("Connecting to: {}", addr_str);
-                let parsed_addr: SocketAddr = addr_str.parse().map_err(|e| {
-                    Error::Protocol(format!("Invalid peer address '{}': {}", addr_str, e))
-                })?;
+                // Direct connection - parse the address string. Accept either
+                // a full socket address (ip:port) or a bare IP (no port).
+                // If a bare IP is provided, use the `port` parameter as the port.
+                let parsed_addr: SocketAddr = match addr_str.parse() {
+                    Ok(sa) => sa,
+                    Err(_) => match addr_str.parse::<std::net::IpAddr>() {
+                        Ok(ip) => SocketAddr::new(ip, port),
+                        Err(e) => {
+                            return Err(Error::Protocol(format!(
+                                "Invalid peer address '{}': {}",
+                                addr_str, e
+                            )))
+                        }
+                    },
+                };
                 parsed_addr
             } else if use_discovery {
                 // Use peer discovery
                 info!("Using peer discovery on port {}...", port);
-                info!("Establishing session as client...");
 
                 let device_name = format!("p2p-{}", &device_id.to_string()[..8]);
                 let manager = Arc::new(
@@ -340,11 +345,6 @@ impl P2PSession {
                 ));
             };
 
-            // Only show this message for direct connections (not discovery, which shows above)
-            if has_peer_addr {
-                info!("Establishing session as client...");
-            }
-
             let cfg = config
                 .ok_or_else(|| Error::Protocol("Config required for client role".to_string()))?;
             Self::connect(peer, device_id, capabilities, cfg).await
@@ -353,7 +353,6 @@ impl P2PSession {
             let bind_addr: SocketAddr = format!("0.0.0.0:{}", port)
                 .parse()
                 .map_err(|e| Error::Protocol(format!("Invalid port {}: {}", port, e)))?;
-            info!("Waiting for connection on {} (server mode)...", bind_addr);
             Self::accept(bind_addr, device_id, capabilities).await
         }
     }
@@ -388,8 +387,6 @@ impl P2PSession {
         path: &Path,
         progress_callback: Option<crate::transfer_folder::ProgressCallback>,
     ) -> Result<()> {
-        info!("Starting send operation: {:?}", path);
-
         if !path.exists() {
             return Err(Error::Protocol(format!(
                 "Path does not exist: {}",
@@ -416,7 +413,6 @@ impl P2PSession {
 
         session.send(path, &base_name).await?;
 
-        info!("Send operation completed");
         Ok(())
     }
 
@@ -440,8 +436,6 @@ impl P2PSession {
         state_path: Option<&Path>,
         state_provider: Option<Box<dyn Fn() -> Option<FolderTransferState> + Send>>,
     ) -> Result<()> {
-        info!("Starting send operation with auto-reconnect: {:?}", path);
-
         if !path.exists() {
             return Err(Error::Protocol(format!(
                 "Path does not exist: {}",
@@ -480,7 +474,6 @@ impl P2PSession {
             )
             .await?;
 
-        info!("Send operation with auto-reconnect completed");
         Ok(())
     }
 
@@ -605,7 +598,7 @@ impl P2PSession {
     /// # }
     /// ```
     pub async fn run_event_loop(&mut self, output_dir: &Path, auto_accept: bool) -> Result<()> {
-        info!(
+        debug!(
             "Starting session event loop (auto-receive mode, auto_accept={})",
             auto_accept
         );
@@ -616,13 +609,13 @@ impl P2PSession {
             if !auto_accept {
                 // In CLI, this would be handled by the caller
                 // In GUI, this would show a dialog
-                info!("Waiting for user to accept incoming transfer (auto_accept=false)");
+                debug!("Waiting for user to accept incoming transfer (auto_accept=false)");
             }
 
             // Attempt to receive - this will block until a transfer starts or connection closes
             match self.receive_to(output_dir, None).await {
                 Ok(_) => {
-                    info!("Transfer completed successfully, ready for next operation");
+                    debug!("Transfer completed successfully, ready for next operation");
                     // Continue loop to handle next transfer
                 }
                 Err(e) => {
@@ -634,7 +627,7 @@ impl P2PSession {
                         || error_msg.contains("reset")
                         || error_msg.contains("broken pipe")
                     {
-                        info!("Connection closed, ending event loop");
+                        debug!("Connection closed, ending event loop");
                         return Ok(());
                     }
                     // Other errors should be propagated

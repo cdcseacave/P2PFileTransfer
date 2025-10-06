@@ -149,12 +149,8 @@ mod tests {
             checksum: [0; 32],
         };
 
-        let state = TransferState::new(
-            Uuid::new_v4(),
-            "127.0.0.1:7778".to_string(),
-            vec![metadata],
-            100,
-        );
+        let state =
+            TransferState::new(Uuid::new_v4(), "127.0.0.1".to_string(), vec![metadata], 100);
 
         assert_eq!(state.files.len(), 1);
         assert_eq!(state.files[0].total_chunks, 10);
@@ -170,12 +166,8 @@ mod tests {
             checksum: [0; 32],
         };
 
-        let mut state = TransferState::new(
-            Uuid::new_v4(),
-            "127.0.0.1:7778".to_string(),
-            vec![metadata],
-            100,
-        );
+        let mut state =
+            TransferState::new(Uuid::new_v4(), "127.0.0.1".to_string(), vec![metadata], 100);
 
         state.mark_chunk_complete(0, 0, 100);
         assert_eq!(state.progress(), 100.0 / 300.0);
@@ -195,12 +187,8 @@ mod tests {
             checksum: [0; 32],
         };
 
-        let mut state = TransferState::new(
-            Uuid::new_v4(),
-            "127.0.0.1:7778".to_string(),
-            vec![metadata],
-            100,
-        );
+        let mut state =
+            TransferState::new(Uuid::new_v4(), "127.0.0.1".to_string(), vec![metadata], 100);
 
         assert_eq!(state.next_chunk(), Some((0, 0)));
 

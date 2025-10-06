@@ -1,6 +1,7 @@
 //! Compression utilities using Zstandard
 
 use crate::error::{Error, Result};
+use tracing::info;
 
 /// Compress data using Zstandard
 pub fn compress(data: &[u8], level: i32) -> Result<Vec<u8>> {
@@ -99,18 +100,16 @@ impl AdaptiveCompressor {
                 let decision_changed = if ratio < self.threshold {
                     // Compression not beneficial, disable it
                     self.compression_enabled = false;
-                    tracing::info!(
+                    info!(
                         "Adaptive compression: DISABLED (ratio: {:.2}, threshold: {:.2})",
-                        ratio,
-                        self.threshold
+                        ratio, self.threshold
                     );
                     true
                 } else {
                     // Compression is beneficial, keep it enabled
-                    tracing::info!(
+                    info!(
                         "Adaptive compression: ENABLED (ratio: {:.2}, threshold: {:.2})",
-                        ratio,
-                        self.threshold
+                        ratio, self.threshold
                     );
                     false
                 };

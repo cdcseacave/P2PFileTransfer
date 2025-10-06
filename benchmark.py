@@ -6,13 +6,13 @@ Cross-platform benchmark script for testing sequential vs windowed transfer perf
 
 Usage:
     # Run as receiver (listens for incoming transfers)
-    python benchmark.py --mode receiver --port 7779
+    python benchmark.py --mode receiver --port 14568
 
     # Run as sender to localhost (auto-starts receiver)
     python benchmark.py --mode sender
 
     # Run as sender to remote machine
-    python benchmark.py --mode sender --receiver-ip 192.168.1.100 --port 7779
+    python benchmark.py --mode sender --receiver-ip 192.168.1.100 --port 14568
 """
 
 import argparse
@@ -394,8 +394,8 @@ Examples:
     parser.add_argument(
         "--port",
         type=int,
-        default=7779,
-        help="Port number (default: 7779)"
+    default=14568,
+    help="Port number (default: 14568)"
     )
     
     parser.add_argument(

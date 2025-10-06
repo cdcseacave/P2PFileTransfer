@@ -3,11 +3,11 @@
 use crate::error::{Error, Result};
 use crate::network::{read_message, write_message};
 use crate::protocol::Message;
-use log::{debug, info, warn};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
+use tracing::{debug, info, trace, warn};
 
 /// TCP connection with keepalive support
 pub struct TcpConnection {
@@ -44,7 +44,7 @@ impl TcpConnection {
 
     /// Send a message to the peer
     pub async fn send_message(&mut self, message: &Message) -> Result<()> {
-        debug!("Sending message to {}: {:?}", self.peer_addr, message);
+        trace!("Sending message to {}: {:?}", self.peer_addr, message);
         write_message(&mut self.stream, message).await?;
         self.last_activity = Instant::now();
         Ok(())
@@ -57,13 +57,13 @@ impl TcpConnection {
             .map_err(|_| Error::Timeout)??;
 
         self.last_activity = Instant::now();
-        debug!("Received message from {}: {:?}", self.peer_addr, msg);
+        trace!("Received message from {}: {:?}", self.peer_addr, msg);
         Ok(msg)
     }
 
     /// Send a keepalive ping
     pub async fn send_ping(&mut self) -> Result<()> {
-        debug!("Sending ping to {}", self.peer_addr);
+        trace!("Sending ping to {}", self.peer_addr);
         self.send_message(&Message::Ping).await
     }
 
@@ -97,15 +97,21 @@ pub struct TcpServer {
 impl TcpServer {
     /// Create a new TCP server
     pub async fn bind(addr: SocketAddr) -> Result<Self> {
-        info!("Binding TCP server to {}", addr);
+        debug!("Binding TCP server to {}", addr);
         let listener = TcpListener::bind(addr).await?;
         let local_addr = listener.local_addr()?;
-        info!("TCP server listening on {}", local_addr);
 
-        Ok(Self {
+        let server = Self {
             listener,
             local_addr,
-        })
+        };
+
+        // Log all reachable addresses if bound to wildcard
+        let reachable_addrs = server.reachable_addrs();
+        let addr_strings: Vec<String> = reachable_addrs.iter().map(|a| a.to_string()).collect();
+        info!("TCP server listening on {} (reachable via: {})", local_addr, addr_strings.join(", "));
+
+        Ok(server)
     }
 
     /// Accept a new connection
@@ -121,6 +127,66 @@ impl TcpServer {
     /// Get the local address
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
+    }
+
+    /// Get all reachable addresses for this server
+    /// 
+    /// If the server is bound to 0.0.0.0 (all interfaces), this returns a list
+    /// of all local IP addresses where the server can be reached.
+    /// Otherwise, returns just the bound address.
+    pub fn reachable_addrs(&self) -> Vec<SocketAddr> {
+        let port = self.local_addr.port();
+        
+        // If not bound to wildcard address, just return the local address
+        if !self.local_addr.ip().is_unspecified() {
+            return vec![self.local_addr];
+        }
+
+        // Get all network interfaces
+        Self::list_local_addrs(port)
+    }
+
+    /// List all local IP addresses with the given port
+    /// 
+    /// This is useful when binding to 0.0.0.0 to discover all addresses
+    /// where the server is reachable.
+    pub fn list_local_addrs(port: u16) -> Vec<SocketAddr> {
+        use std::net::IpAddr;
+        
+        let mut addrs = Vec::new();
+
+        // Try to get network interfaces
+        if let Ok(interfaces) = local_ip_address::list_afinet_netifas() {
+            for (name, ip) in interfaces {
+                // Skip loopback unless it's the only interface
+                if ip.is_loopback() {
+                    continue;
+                }
+
+                // Filter out link-local IPv6 addresses (fe80::/10)
+                if let IpAddr::V6(ipv6) = ip {
+                    if (ipv6.segments()[0] & 0xffc0) == 0xfe80 {
+                        continue;
+                    }
+                }
+
+                debug!("Found network interface '{}' with IP: {}", name, ip);
+                addrs.push(SocketAddr::new(ip, port));
+            }
+        }
+
+        // Always include localhost as fallback
+        if addrs.is_empty() {
+            addrs.push(SocketAddr::new(IpAddr::from([127, 0, 0, 1]), port));
+        }
+
+        // Sort addresses: IPv4 first, then IPv6
+        addrs.sort_by_key(|addr| match addr {
+            SocketAddr::V4(_) => 0,
+            SocketAddr::V6(_) => 1,
+        });
+
+        addrs
     }
 }
 

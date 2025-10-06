@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 use p2p_core::history::{TransferDirection, TransferHistory, TransferStatus};
+use tracing::info;
 
 pub async fn handle_history(
     limit: usize,
@@ -9,14 +10,14 @@ pub async fn handle_history(
     completed: bool,
     failed: bool,
 ) -> Result<()> {
-    println!("📜 Transfer History\n");
+    info!("📜 Transfer History\n");
 
     // Load history
     let history_path = TransferHistory::default_path();
     let history = if history_path.exists() {
         TransferHistory::load_from_file(&history_path).await?
     } else {
-        println!("No transfer history found.");
+        info!("No transfer history found.");
         return Ok(());
     };
 
@@ -49,12 +50,12 @@ pub async fn handle_history(
     let records: Vec<_> = records.into_iter().take(limit).collect();
 
     if records.is_empty() {
-        println!("No transfers found matching the filters.");
+        info!("No transfers found matching the filters.");
         return Ok(());
     }
 
     // Display records
-    println!("Found {} transfer(s):\n", records.len());
+    info!("Found {} transfer(s):\n", records.len());
 
     for record in records {
         let direction_icon = match record.direction {
@@ -77,30 +78,30 @@ pub async fn handle_history(
         // Format duration
         let duration_str = format_duration(record.duration_secs);
 
-        println!(
+        info!(
             "{} {} Transfer {}",
             direction_icon, status_icon, record.transfer_id
         );
-        println!("  Started:   {}", datetime);
-        println!("  Peer:      {}", record.peer_address);
-        println!("  Files:     {} file(s)", record.files.len());
-        println!("  Size:      {}", size_str);
-        println!("  Duration:  {}", duration_str);
-        println!("  Status:    {:?}", record.status);
+        info!("  Started:   {}", datetime);
+        info!("  Peer:      {}", record.peer_address);
+        info!("  Files:     {} file(s)", record.files.len());
+        info!("  Size:      {}", size_str);
+        info!("  Duration:  {}", duration_str);
+        info!("  Status:    {:?}", record.status);
 
         if !record.files.is_empty() && record.files.len() <= 5 {
-            println!("  Files:");
+            info!("  Files:");
             for file in &record.files {
-                println!("    - {}", file);
+                info!("    - {}", file);
             }
         } else if record.files.len() > 5 {
-            println!(
+            info!(
                 "  Files: {} files (use details command to see all)",
                 record.files.len()
             );
         }
 
-        println!();
+        info!("");
     }
 
     Ok(())

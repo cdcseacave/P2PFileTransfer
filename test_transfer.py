@@ -78,8 +78,9 @@ def main():
     parser.add_argument('--size', type=int, default=10, help='Test file size in MB (default: 10)')
     parser.add_argument('--max-speed', type=str, help='Bandwidth limit (e.g., "2M", "5M", "1G")')
     parser.add_argument('--compressible', action='store_true', help='Create highly compressible test file (zeros)')
-    parser.add_argument('--verbosity', type=str, default='info', help='Verbosity level: off, error, warn, info, debug, trace (default: warn)')
     parser.add_argument('--window-size', type=int, default=8, help='Window size for parallel transfers (1 = sequential, default: 8)')
+    parser.add_argument('--port', type=int, default=14567, help='Port to use for receiver and sender (default: 14567)')
+    parser.add_argument('--verbosity', type=str, default='debug', help='Verbosity level: off, error, warn, info, debug, trace (default: debug)')
     args = parser.parse_args()
     
     print("=== P2P Transfer Test ===")
@@ -115,7 +116,7 @@ def main():
     receiver_cmd = [
         binary_path, "receive",
         "--output", str(received_dir),
-        "--port", "7778",
+        "--port", str(args.port),
         "--auto-accept",
         "--verbosity", args.verbosity
     ]
@@ -124,7 +125,8 @@ def main():
         receiver_cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        text=True
+        encoding='utf-8',
+        errors='replace'
     )
     
     # Give receiver time to start
@@ -145,7 +147,7 @@ def main():
     print("Starting sender...")
     sender_cmd = [
         binary_path, "send", str(test_file),
-        "--peer", "127.0.0.1:7778",
+        "--peer", f"127.0.0.1:{args.port}",
         "--window-size", str(args.window_size),
         "--verbosity", args.verbosity
     ]
@@ -164,7 +166,8 @@ def main():
         result = subprocess.run(
             sender_cmd,
             capture_output=True,
-            text=True,
+            encoding='utf-8',
+            errors='replace',
             timeout=30
         )
         sender_exit_code = result.returncode

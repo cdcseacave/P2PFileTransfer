@@ -23,7 +23,7 @@ use std::{
     time::SystemTime,
 };
 use tokio::fs;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 use uuid::Uuid;
 
 /// Progress callback for folder transfers
@@ -142,8 +142,10 @@ impl<'a> FolderTransferSession<'a> {
         duration_secs: f64,
         is_sender: bool,
     ) {
-        println!("\n📊 Transfer Statistics:");
+        // Nicely formatted transfer statistics for the CLI
+        info!("\n📊 Transfer Statistics:");
         let action = if is_sender { "sent" } else { "received" };
+
         if self.config.compression_enabled && self.total_compressed_bytes > 0 {
             let (compression_ratio, compression_percent) = self.calc_compression_stats(total_bytes);
 
@@ -153,6 +155,7 @@ impl<'a> FolderTransferSession<'a> {
             } else {
                 0.0
             };
+
             let felt_speed = if duration_secs > 0.0 {
                 total_bytes as f64 / duration_secs / 1_048_576.0 // MB/s
             } else {
@@ -160,8 +163,9 @@ impl<'a> FolderTransferSession<'a> {
             };
 
             let direction = if is_sender { "→" } else { "←" };
+
             if compression_percent >= 0.0 {
-                println!(
+                info!(
                     "   Data: {} bytes {} {} bytes ({:.1}% saved, {:.2}x compression)",
                     total_bytes,
                     direction,
@@ -170,7 +174,7 @@ impl<'a> FolderTransferSession<'a> {
                     compression_ratio
                 );
             } else {
-                println!(
+                info!(
                     "   Data: {} bytes {} {} bytes ({:.1}% overhead, adaptive compression disabled)",
                     total_bytes,
                     direction,
@@ -178,7 +182,8 @@ impl<'a> FolderTransferSession<'a> {
                     -compression_percent
                 );
             }
-            println!(
+
+            info!(
                 "   Speed: {:.2} MB/s network, {:.2} MB/s throughput",
                 network_speed, felt_speed
             );
@@ -196,8 +201,9 @@ impl<'a> FolderTransferSession<'a> {
             // No compression or adaptive compression disabled all chunks
             if duration_secs > 0.0 {
                 let speed = total_bytes as f64 / duration_secs / 1_048_576.0;
-                println!("   Speed: {:.2} MB/s", speed);
+                info!("   Speed: {:.2} MB/s", speed);
             }
+
             info!(
                 "Folder transfer complete: {} files, {} bytes {}",
                 total_files, total_bytes, action
@@ -207,8 +213,6 @@ impl<'a> FolderTransferSession<'a> {
 
     /// Send a file or folder to the peer (unified method)
     pub async fn send(&mut self, path: &Path, base_name: &str) -> Result<()> {
-        info!("Starting send: {:?}", path);
-
         // Start timing the transfer
         self.transfer_start = Some(std::time::Instant::now());
         self.total_compressed_bytes = 0;
@@ -235,7 +239,6 @@ impl<'a> FolderTransferSession<'a> {
                 modified,
             };
 
-            info!("Sending single file: {}", file_name);
             vec![(PathBuf::from(file_name), file_meta)]
         } else if path.is_dir() {
             // Folder: scan recursively
@@ -243,7 +246,6 @@ impl<'a> FolderTransferSession<'a> {
             if files.is_empty() {
                 return Err(Error::Protocol("Folder is empty".to_string()));
             }
-            info!("Found {} files to transfer", files.len());
             files
         } else {
             return Err(Error::Protocol(
@@ -276,7 +278,7 @@ impl<'a> FolderTransferSession<'a> {
             return Err(Error::Protocol(format!("Expected Ready, got {:?}", msg)));
         }
 
-        info!("Receiver ready, starting file transfers");
+        debug!("Receiver ready, starting file transfers");
 
         // Transfer each file
         let mut transferred_bytes = 0u64;
@@ -337,7 +339,7 @@ impl<'a> FolderTransferSession<'a> {
                 });
             }
 
-            debug!("File {} complete", relative_path.display());
+            trace!("File {} complete", relative_path.display());
         }
 
         // Calculate transfer duration and speeds
@@ -399,7 +401,7 @@ impl<'a> FolderTransferSession<'a> {
             return Err(Error::Protocol(format!("Expected Ready, got {:?}", msg)));
         }
 
-        info!(
+        debug!(
             "Receiver ready, resuming from file {}",
             state.completed_files.len()
         );
@@ -457,7 +459,7 @@ impl<'a> FolderTransferSession<'a> {
                 });
             }
 
-            debug!("File {} complete", relative_path.display());
+            trace!("File {} complete", relative_path.display());
         }
 
         // Calculate transfer duration and speeds
@@ -528,7 +530,7 @@ impl<'a> FolderTransferSession<'a> {
                 self.resume_send_folder(folder_path, state).await
             } else {
                 // Fresh transfer
-                info!(
+                debug!(
                     "Attempting send (attempt {}/{})",
                     attempt + 1,
                     if reconnect_config.max_attempts == 0 {
@@ -542,7 +544,6 @@ impl<'a> FolderTransferSession<'a> {
 
             match result {
                 Ok(_) => {
-                    info!("Transfer completed successfully");
                     // Clean up state file on success
                     if let Some(state_file) = state_path {
                         if state_file.exists() {
@@ -783,7 +784,7 @@ impl<'a> FolderTransferSession<'a> {
                 });
             }
 
-            debug!("File {} complete", relative_path.display());
+            trace!("File {} complete", relative_path.display());
         }
 
         // Wait for completion message
@@ -983,7 +984,7 @@ impl<'a> FolderTransferSession<'a> {
                     };
 
                     files.push((relative_path, file_meta));
-                    debug!("Found file: {} ({} bytes)", path.display(), size);
+                    trace!("Found file: {} ({} bytes)", path.display(), size);
                 } else if metadata.is_dir() {
                     // Recurse into subdirectory
                     Self::scan_folder_recursive(base_path, &path, files).await?;

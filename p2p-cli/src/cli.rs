@@ -25,7 +25,7 @@ pub struct SessionParams {
     pub peer: Option<String>,
 
     /// Port to use - for 'client' role, this is the destination port; for 'server' role, this is the listen port
-    #[arg(short = 'p', long, default_value = "7778")]
+    #[arg(short = 'p', long, default_value = "14567")]
     pub port: u16,
 
     /// Use peer discovery to find the peer address (only for 'client' role)
@@ -64,7 +64,7 @@ pub struct TransferParams {
     #[arg(long, default_value = "3")]
     pub compress_level: i32,
 
-    /// Use adaptive compression (auto-disable if data is incompressible, default: enabled, use --adaptive=false to disable)
+    /// Auto-disable compression if data is incompressible (default: enabled, use --adaptive=false to disable)
     #[arg(long, default_value = "true", action = clap::ArgAction::Set)]
     pub adaptive: bool,
 
@@ -98,7 +98,7 @@ pub struct Cli {
     pub command: Commands,
 
     /// Set logging level: off, error, warn, info, debug, trace
-    #[arg(short = 'v', long = "verbosity", default_value = "warn", global = true)]
+    #[arg(short = 'v', long = "verbosity", default_value = "info", global = true)]
     pub verbosity: String,
 }
 
@@ -143,6 +143,10 @@ pub enum Commands {
         /// Discovery timeout in seconds
         #[arg(short, long, default_value = "10")]
         timeout: u64,
+
+        /// Port to use for discovery
+        #[arg(short = 'p', long, default_value = "14567")]
+        port: u16,
     },
 
     /// Test NAT traversal - discover public IP and port

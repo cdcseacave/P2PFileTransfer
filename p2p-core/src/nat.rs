@@ -41,7 +41,7 @@
 use crate::error::{Error, Result};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::time::Duration;
-use tracing::{debug, info, warn};
+use tracing::{info, trace, warn};
 
 /// Default STUN servers (Google's public STUN servers)
 pub const DEFAULT_STUN_SERVERS: &[&str] = &[
@@ -158,14 +158,14 @@ impl StunClient {
         socket.set_read_timeout(Some(self.timeout))?;
 
         let local_addr = socket.local_addr()?;
-        debug!("Local socket bound to: {}", local_addr);
+        trace!("Local socket bound to: {}", local_addr);
 
         // Build STUN BINDING request
         let request = self.build_binding_request();
 
         // Send request to STUN server
         socket.send_to(&request, server)?;
-        debug!("Sent BINDING request to {}", server);
+        trace!("Sent BINDING request to {}", server);
 
         // Receive response
         let mut buffer = vec![0u8; 1024];
@@ -269,7 +269,7 @@ impl StunClient {
                 }
                 _ => {
                     // Unknown attribute, skip
-                    debug!("Skipping unknown STUN attribute: 0x{:04x}", attr_type);
+                    trace!("Skipping unknown STUN attribute: 0x{:04x}", attr_type);
                 }
             }
 

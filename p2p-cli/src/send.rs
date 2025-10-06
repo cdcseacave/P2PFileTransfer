@@ -12,20 +12,21 @@ use std::path::{Path, PathBuf};
 use tokio::signal;
 
 use crate::cli::{SessionParams, TransferParams};
+use tracing::{info, warn};
 
 pub async fn handle_send(
     path: PathBuf,
     session_params: SessionParams,
     transfer_params: TransferParams,
 ) -> Result<()> {
-    println!("📤 Starting send operation");
-    println!("  Path: {}", path.display());
+    info!("📤 Starting send operation");
+    info!("  Path: {}", path.display());
 
     // Determine role (default to client for send)
     let role = session_params.get_role("client");
-    println!("  Session role: {}", role);
+    info!("  Session role: {}", role);
 
-    println!(
+    info!(
         "  Mode: {} (window size: {})",
         if transfer_params.window_size == 1 {
             "Sequential"
@@ -35,7 +36,7 @@ pub async fn handle_send(
         transfer_params.window_size
     );
     if transfer_params.max_speed > 0 {
-        println!(
+        info!(
             "  Speed limit: {}",
             p2p_core::bandwidth::format_bandwidth(transfer_params.max_speed)
         );
@@ -72,9 +73,9 @@ pub async fn handle_send(
     )
     .await?;
 
-    println!("  ✓ Session established");
-    println!("    Peer: {}", session.peer_device_id());
-    println!("    Capabilities: {:?}", session.capabilities());
+    info!("  ✓ Session established");
+    info!("    Peer: {}", session.peer_device_id());
+    info!("    Capabilities: {:?}", session.capabilities());
 
     // Send file or folder with signal handling (unified)
     let result = tokio::select! {
@@ -88,12 +89,12 @@ pub async fn handle_send(
 
     match result {
         Ok(_) => {
-            println!("\n✅ Transfer complete!");
+            info!("\n✅ Transfer complete!");
             Ok(())
         }
         Err(e) => {
-            println!("\n⚠️  Transfer interrupted: {}", e);
-            println!("  State has been saved. Use 'p2p-transfer resume <transfer-id>' to continue");
+            warn!("\n⚠️  Transfer interrupted: {}", e);
+            info!("  State has been saved. Use 'p2p-transfer resume <transfer-id>' to continue");
             Err(e)
         }
     }
@@ -109,23 +110,23 @@ async fn send(
     let base_name = path.file_name().unwrap().to_string_lossy().to_string();
 
     if path.is_file() {
-        println!("\n📄 Sending file: {}", base_name);
+        info!("\n📄 Sending file: {}", base_name);
     } else {
-        println!("\n📁 Sending folder: {}", base_name);
+        info!("\n📁 Sending folder: {}", base_name);
     }
 
     let config = session.config();
     if config.window_size == 1 {
-        println!("   Using sequential transfer (window size: 1)");
+        info!("   Using sequential transfer (window size: 1)");
     } else {
-        println!(
+        info!(
             "   Using windowed transfer protocol (window size: {})",
             config.window_size
         );
     }
 
     if auto_reconnect {
-        println!(
+        info!(
             "   Auto-reconnect enabled (max retries: {})",
             if max_retries == 0 {
                 "∞".to_string()
@@ -231,9 +232,9 @@ async fn send(
                 let state_to_save = current_state.lock().ok().and_then(|guard| guard.clone());
                 if let Some(state) = state_to_save {
                     if let Err(save_err) = state.save_to_file(&state_file).await {
-                        eprintln!("  ⚠️  Failed to save state (debug): {}", save_err);
+                        warn!("  ⚠️  Failed to save state (debug): {}", save_err);
                     } else {
-                        println!("  📝 State saved to: {} (debug mode)", state_file.display());
+                        info!("  📝 State saved to: {} (debug mode)", state_file.display());
                     }
                 }
             } else {
@@ -242,7 +243,7 @@ async fn send(
                     let _ = tokio::fs::remove_file(&state_file).await;
                 }
             }
-            println!("  ✓ Transfer complete");
+            info!("  ✓ Transfer complete");
             Ok(())
         }
         Err(e) => {
@@ -252,9 +253,9 @@ async fn send(
 
             if let Some(state) = state_to_save {
                 if let Err(save_err) = state.save_to_file(&state_file).await {
-                    eprintln!("  ⚠️  Failed to save state: {}", save_err);
+                    warn!("  ⚠️  Failed to save state: {}", save_err);
                 } else {
-                    println!(
+                    info!(
                         "  ⚠️  Transfer interrupted, state saved to: {}",
                         state_file.display()
                     );
