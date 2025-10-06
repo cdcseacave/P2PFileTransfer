@@ -7,8 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Bidirectional session support** (2025-10-06): CLI can now act as both client and server
+  - Added `SessionParams` struct with `--role`, `--peer`, `--port`, and `--discover` parameters
+  - Added `TransferParams` struct for common transfer configuration
+  - Send command can operate as client (default) or server (`--role server`)
+  - Receive command can operate as server (default) or client (`--role client`)
+  - Both peers can send or receive after session establishment
+  - Session documentation updated to clarify bidirectional capabilities
+  - Added `P2PSession::establish()` convenience method for role-based connection (eliminates code duplication)
+
 ### Changed
 - **CLI parameter rename** (2025-10-06): `--log-level` renamed to `--verbosity` for better clarity
+- **CLI parameter rename** (2025-10-06): `--to` renamed to `--peer` for consistency with session role model
 - **Protocol optimization** (2025-10-06): Removed redundant `uncompressed_size` field from `ChunkMessage`, saving 4 bytes per chunk
 - **InFlightChunk refactoring** (2025-10-06): Now stores complete `ChunkMessage` for efficient retransmission without data duplication
 

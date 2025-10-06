@@ -1,0 +1,15 @@
+# Auto detect text files and perform LF normalization
+* text=auto
+
+# Rust source files should always use LF
+*.rs text eol=lf
+*.toml text eol=lf
+*.md text eol=lf
+
+# Scripts should use LF
+*.sh text eol=lf
+*.py text eol=lf
+
+# Windows scripts should use CRLF
+*.bat text eol=crlf
+*.ps1 text eol=crlf

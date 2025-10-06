@@ -1,11 +1,92 @@
 //! Command-line interface definitions
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 
 /// Parse bandwidth string into bytes per second
 fn parse_bandwidth_arg(s: &str) -> Result<u64, String> {
     p2p_core::bandwidth::parse_bandwidth(s)
+}
+
+/// Common session parameters for connection establishment
+///
+/// These parameters control how the P2P session is established and what role
+/// this peer takes (client/server). After the session is established, both
+/// peers are equal and can perform any operation.
+#[derive(Args, Clone)]
+pub struct SessionParams {
+    /// Session role: 'client' (connect to peer) or 'server' (listen for peer)
+    /// If not specified, defaults based on command: 'client' for send, 'server' for receive
+    #[arg(long, value_parser = ["client", "server"])]
+    pub role: Option<String>,
+
+    /// Peer address (IP:PORT) - required when role is 'client'
+    #[arg(long)]
+    pub peer: Option<String>,
+
+    /// Port to use - for 'client' role, this is the destination port; for 'server' role, this is the listen port
+    #[arg(short = 'p', long, default_value = "7778")]
+    pub port: u16,
+
+    /// Use peer discovery to find the peer address (only for 'client' role)
+    #[arg(short = 'd', long)]
+    pub discover: bool,
+}
+
+impl SessionParams {
+    /// Get the role, using the provided default if not specified
+    pub fn get_role(&self, default: &str) -> String {
+        self.role.clone().unwrap_or_else(|| default.to_string())
+    }
+
+    /// Check if this is a client role (with default fallback)
+    pub fn is_client(&self, default: &str) -> bool {
+        self.get_role(default) == "client"
+    }
+
+    /// Check if this is a server role (with default fallback)
+    pub fn is_server(&self, default: &str) -> bool {
+        self.get_role(default) == "server"
+    }
+}
+
+/// Common transfer configuration parameters
+///
+/// These parameters control the transfer behavior (compression, windowing, etc.)
+/// and apply regardless of whether this peer is acting as sender or receiver.
+#[derive(Args, Clone)]
+pub struct TransferParams {
+    /// Enable compression (default: enabled, use --compress=false to disable)
+    #[arg(long, default_value = "true", action = clap::ArgAction::Set)]
+    pub compress: bool,
+
+    /// Compression level (-7 to 22)
+    #[arg(long, default_value = "3")]
+    pub compress_level: i32,
+
+    /// Use adaptive compression (auto-disable if data is incompressible, default: enabled, use --adaptive=false to disable)
+    #[arg(long, default_value = "true", action = clap::ArgAction::Set)]
+    pub adaptive: bool,
+
+    /// Chunk size in KB
+    #[arg(long, default_value = "64")]
+    pub chunk_size: u32,
+
+    /// Window size (number of chunks in-flight). Use 1 for sequential mode, 2+ for windowed mode
+    #[arg(long, default_value = "16")]
+    pub window_size: usize,
+
+    /// Maximum transfer speed (e.g., "10M", "1G", "512K", "unlimited"). Default: unlimited
+    #[arg(long, value_parser = parse_bandwidth_arg, default_value = "0")]
+    pub max_speed: u64,
+
+    /// Enable automatic reconnection on network failures (default: enabled, use --auto-reconnect=false to disable)
+    #[arg(long, default_value = "true", action = clap::ArgAction::Set)]
+    pub auto_reconnect: bool,
+
+    /// Maximum reconnection attempts (0 = unlimited)
+    #[arg(long, default_value = "5")]
+    pub max_retries: u32,
 }
 
 #[derive(Parser)]
@@ -24,68 +105,37 @@ pub struct Cli {
 #[derive(Subcommand)]
 pub enum Commands {
     /// Send files to a peer
+    ///
+    /// Can operate in two modes:
+    /// - Client mode (default): Connect to a peer and send files
+    /// - Server mode: Listen for a peer to connect, then send files
     Send {
         /// File or folder to send
         path: PathBuf,
 
-        /// Peer address (IP:PORT)
-        #[arg(short, long)]
-        to: Option<String>,
+        #[command(flatten)]
+        session: SessionParams,
 
-        /// Use auto-discovery
-        #[arg(short, long)]
-        discover: bool,
-
-        /// Enable compression
-        #[arg(long, default_value = "true")]
-        compress: bool,
-
-        /// Compression level (-7 to 22)
-        #[arg(long, default_value = "3")]
-        compress_level: i32,
-
-        /// Use adaptive compression (auto-disable if data is incompressible)
-        #[arg(long, default_value = "true")]
-        adaptive: bool,
-
-        /// Chunk size in KB
-        #[arg(long, default_value = "64")]
-        chunk_size: u32,
-
-        /// Window size (number of chunks in-flight). Use 1 for sequential mode, 2+ for windowed mode
-        #[arg(long, default_value = "16")]
-        window_size: usize,
-
-        /// Maximum transfer speed (e.g., "10M", "1G", "512K", "unlimited"). Default: unlimited
-        #[arg(long, value_parser = parse_bandwidth_arg, default_value = "0")]
-        max_speed: u64,
-
-        /// Transfer port (TCP port for file transfer connections)
-        #[arg(short, long, default_value = "7778")]
-        transfer_port: u16,
-
-        /// Enable automatic reconnection on network failures
-        #[arg(long, default_value = "true")]
-        auto_reconnect: bool,
-
-        /// Maximum reconnection attempts (0 = unlimited)
-        #[arg(long, default_value = "5")]
-        max_retries: u32,
+        #[command(flatten)]
+        transfer: TransferParams,
     },
 
     /// Receive files from a peer
+    ///
+    /// Can operate in two modes:
+    /// - Server mode (default): Listen for a peer to connect and receive files
+    /// - Client mode: Connect to a peer and receive files
     Receive {
         /// Output directory
         #[arg(short, long, default_value = "./received")]
         output: PathBuf,
 
-        /// Listen port
-        #[arg(short, long, default_value = "7778")]
-        port: u16,
-
         /// Auto-accept transfers without prompting
         #[arg(short = 'a', long)]
         auto_accept: bool,
+
+        #[command(flatten)]
+        session: SessionParams,
     },
 
     /// Discover peers on the network

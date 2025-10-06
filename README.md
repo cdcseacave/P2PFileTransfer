@@ -89,43 +89,54 @@ cargo build --release
 
 ### Basic Usage
 
+#### Bidirectional Sessions
+After a session is established, **both peers are equal** and can send or receive files. The `--role` parameter only determines who initiates the connection:
+- **Client role** (default for send): Connects to a peer
+- **Server role** (default for receive): Listens for incoming connections
+
 #### Send a File
 ```bash
-# Direct connection (windowed mode is default)
-p2p-transfer send myfile.zip --to 192.168.1.100:8080
+# Send as client (default) - connect to peer and send
+p2p-transfer send myfile.zip --peer 192.168.1.100:8080
 
-# With auto-discovery
+# Send as server - listen for peer to connect, then send
+p2p-transfer send myfile.zip --role server --port 8080
+
+# With auto-discovery (client mode)
 p2p-transfer send myfile.zip --discover
 
 # Sequential mode (one chunk at a time)
-p2p-transfer send myfile.zip --to 192.168.1.100:8080 --window-size 1
+p2p-transfer send myfile.zip --peer 192.168.1.100:8080 --window-size 1
 ```
 
 #### Send a Folder
 ```bash
 # Transfer entire directory with structure
-p2p-transfer send ./my_project --to 192.168.1.100:8080
+p2p-transfer send ./my_project --peer 192.168.1.100:8080
 
 # With compression (adaptive by default)
-p2p-transfer send ./documents --to 192.168.1.100:8080 --compress --compress-level 5
+p2p-transfer send ./documents --peer 192.168.1.100:8080 --compress --compress-level 5
 
 # Adaptive compression auto-disables for incompressible data (default: enabled)
-p2p-transfer send ./mixed_content --to 192.168.1.100:8080 --adaptive true
+p2p-transfer send ./mixed_content --peer 192.168.1.100:8080 --adaptive true
 
 # Force compression even for incompressible data
-p2p-transfer send ./photos --to 192.168.1.100:8080 --adaptive false
+p2p-transfer send ./photos --peer 192.168.1.100:8080 --adaptive false
 ```
 
 #### Receive Files/Folders
 ```bash
-# Start receiver on port 8080 (automatically receives when peer sends)
-p2p-transfer receive ./downloads --port 8080
+# Receive as server (default) - listen for peer to connect and receive
+p2p-transfer receive --output ./downloads --port 8080
+
+# Receive as client - connect to peer and receive files
+p2p-transfer receive --output ./downloads --role client --peer 192.168.1.100:8080
 
 # Auto-accept incoming transfers (no prompts)
-p2p-transfer receive ./received --port 7778 --auto-accept
+p2p-transfer receive --output ./received --port 7778 --auto-accept
 
 # Short form
-p2p-transfer receive ./received -p 7778 -a
+p2p-transfer receive -o ./received -p 7778 -a
 ```
 
 **Note**: The receiver now runs in an event loop that automatically handles incoming transfers. When a peer initiates a send, the receiver will automatically start receiving - no manual action needed. The session stays alive for multiple transfers until the connection is closed.
@@ -185,18 +196,18 @@ Currently, when both machines are behind NAT, you need to manually use the disco
 2. **On Machine B (sender)** - Connect using Machine A's public IP:
    ```bash
    # Send to Machine A's public IP and forwarded port
-   p2p-transfer send myfile.zip --to 203.0.113.5:7778
+   p2p-transfer send myfile.zip --peer 203.0.113.5:7778
    ```
 
 #### Resume Interrupted Transfer
 ```bash
 # Transfer gets interrupted (Ctrl+C)
-p2p-transfer send ./large_folder --to 192.168.1.100:8080
+p2p-transfer send ./large_folder --peer 192.168.1.100:8080
 # State saved to: transfer_12345678-1234-5678-1234-567812345678.json
 
 # Resume later (supports chunk-level resume)
 p2p-transfer resume 12345678-1234-5678-1234-567812345678 \
-    --to 192.168.1.100:8080 \
+    --peer 192.168.1.100:8080 \
     --path ./large_folder
 ```
 
@@ -222,16 +233,16 @@ p2p-transfer history --failed
 
 ```bash
 # LAN (low latency, < 5ms)
-p2p-transfer send file.zip --to 192.168.1.100:8080 --window-size 8
+p2p-transfer send file.zip --peer 192.168.1.100:8080 --window-size 8
 
 # WiFi (medium latency, 10-20ms) - DEFAULT
-p2p-transfer send file.zip --to 192.168.1.100:8080 --window-size 16
+p2p-transfer send file.zip --peer 192.168.1.100:8080 --window-size 16
 
 # Internet (high latency, 50-100ms)
-p2p-transfer send file.zip --to 192.168.1.100:8080 --window-size 32
+p2p-transfer send file.zip --peer 192.168.1.100:8080 --window-size 32
 
 # Satellite/VPN (very high latency, 500ms+)
-p2p-transfer send file.zip --to 192.168.1.100:8080 --window-size 64
+p2p-transfer send file.zip --peer 192.168.1.100:8080 --window-size 64
 ```
 
 **Memory Usage**: Window size × 1MB chunk size
@@ -243,16 +254,16 @@ p2p-transfer send file.zip --to 192.168.1.100:8080 --window-size 64
 
 ```bash
 # Limit to 10 MB/s (useful for shared networks)
-p2p-transfer send largefile.zip --to 192.168.1.100:8080 --max-speed 10M
+p2p-transfer send largefile.zip --peer 192.168.1.100:8080 --max-speed 10M
 
 # Limit to 1 GB/s (for very fast networks)
-p2p-transfer send largefile.zip --to 192.168.1.100:8080 --max-speed 1G
+p2p-transfer send largefile.zip --peer 192.168.1.100:8080 --max-speed 1G
 
 # Limit to 512 KB/s (for slow connections)
-p2p-transfer send largefile.zip --to 192.168.1.100:8080 --max-speed 512K
+p2p-transfer send largefile.zip --peer 192.168.1.100:8080 --max-speed 512K
 
 # Unlimited bandwidth (default)
-p2p-transfer send largefile.zip --to 192.168.1.100:8080
+p2p-transfer send largefile.zip --peer 192.168.1.100:8080
 ```
 
 **How it works**:
@@ -267,16 +278,16 @@ Transfers automatically recover from network failures with exponential backoff:
 
 ```bash
 # Auto-reconnect is enabled by default
-p2p-transfer send large_folder/ --to 192.168.1.100:8080
+p2p-transfer send large_folder/ --peer 192.168.1.100:8080
 
 # Disable auto-reconnect (manual resume only)
-p2p-transfer send large_folder/ --to 192.168.1.100:8080 --auto-reconnect false
+p2p-transfer send large_folder/ --peer 192.168.1.100:8080 --auto-reconnect false
 
 # Unlimited retries (keeps trying until success or permanent error)
-p2p-transfer send large_folder/ --to 192.168.1.100:8080 --max-retries 0
+p2p-transfer send large_folder/ --peer 192.168.1.100:8080 --max-retries 0
 
 # Custom retry limit
-p2p-transfer send large_folder/ --to 192.168.1.100:8080 --max-retries 10
+p2p-transfer send large_folder/ --peer 192.168.1.100:8080 --max-retries 10
 ```
 
 **How it works**:
@@ -347,7 +358,7 @@ Progress: 100/100 chunks (100.0%, complete)
 
 # Later...
 $ p2p-transfer resume abc12345-def6-7890-ghij-klmnopqrstuv \
-    --to 192.168.1.100:8080 --path my_project
+    --peer 192.168.1.100:8080 --path my_project
 
 🔄 Resuming transfer
   Progress: 8/10 files (80.0%)

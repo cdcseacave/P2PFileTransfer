@@ -300,7 +300,7 @@ P2PFileTransfer/
 #### Python Integration Tests
 - Script: `test_transfer.py`
 - Tests real file transfers end-to-end
-- Verifies statistics, compression, data integrity
+- Verifies statistics, compression, windowed mode, data integrity
 - Remove `test_file` before running, when changing test size or compressibility
 
 ---
@@ -411,3 +411,20 @@ python3 benchmark.py
 2. **Fix the bug** and verify test passes
 3. **Run full test suite** to ensure no regressions
 4. **Update CHANGELOG.md** with the fix
+
+### Documentation Policy
+**CRITICAL**: Never create new markdown documentation files for feature summaries or implementation notes.
+
+✅ **DO**:
+- Update `README.md` with usage examples and user-facing documentation
+- Update `DESIGN.md` with architecture and implementation details
+- Update `TODO.md` to remove completed features or add notes for partial implementations
+- Update `CHANGELOG.md` with dated entries for all changes
+- Add inline code comments and module documentation
+
+❌ **DON'T**:
+- Create files like `FEATURE_NAME.md`, `IMPLEMENTATION_SUMMARY.md`, `QUICK_REFERENCE.md`, etc.
+- Create separate documentation files for individual features
+- Create temporary documentation files that duplicate existing docs
+
+**Rationale**: Keep documentation centralized in the four main files (README, DESIGN, TODO, CHANGELOG) to avoid fragmentation and maintenance burden.

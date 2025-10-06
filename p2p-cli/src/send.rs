@@ -8,44 +8,36 @@ use p2p_core::{
     transfer_folder::{FolderProgress, FolderTransferState},
     Uuid,
 };
-use std::{
-    net::SocketAddr,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 use tokio::signal;
 
-use crate::discover::discover_and_select_peer;
+use crate::cli::{SessionParams, TransferParams};
 
-#[allow(clippy::too_many_arguments)]
 pub async fn handle_send(
     path: PathBuf,
-    to: Option<String>,
-    discover: bool,
-    compress: bool,
-    compress_level: i32,
-    adaptive: bool,
-    chunk_size: u32,
-    window_size: usize,
-    bandwidth_limit: u64,
-    transfer_port: u16,
-    auto_reconnect: bool,
-    max_retries: u32,
+    session_params: SessionParams,
+    transfer_params: TransferParams,
 ) -> Result<()> {
     println!("📤 Starting send operation");
     println!("  Path: {}", path.display());
+
+    // Determine role (default to client for send)
+    let role = session_params.get_role("client");
+    println!("  Session role: {}", role);
+
     println!(
         "  Mode: {} (window size: {})",
-        if window_size == 1 {
+        if transfer_params.window_size == 1 {
             "Sequential"
         } else {
             "Windowed"
         },
-        window_size
+        transfer_params.window_size
     );
-    if bandwidth_limit > 0 {
+    if transfer_params.max_speed > 0 {
         println!(
             "  Speed limit: {}",
-            p2p_core::bandwidth::format_bandwidth(bandwidth_limit)
+            p2p_core::bandwidth::format_bandwidth(transfer_params.max_speed)
         );
     }
 
@@ -54,44 +46,39 @@ pub async fn handle_send(
         anyhow::bail!("Path does not exist: {}", path.display());
     }
 
-    // Determine peer address
-    let peer_addr = if let Some(addr_str) = to {
-        // Direct connection
-        println!("  Connecting to: {}", addr_str);
-        addr_str.parse::<SocketAddr>()?
-    } else if discover {
-        // Use discovery
-        println!("  Using peer discovery on port {}...", transfer_port);
-        let discovered_addr = discover_and_select_peer(transfer_port).await?;
-        println!("  Selected peer: {}", discovered_addr);
-        discovered_addr
-    } else {
-        anyhow::bail!("Either --to <address> or --discover must be specified");
+    // Build configuration
+    let config = ConfigMessage {
+        compression_enabled: transfer_params.compress,
+        compression_level: transfer_params.compress_level,
+        adaptive_compression: transfer_params.adaptive,
+        chunk_size: transfer_params.chunk_size * 1024, // Convert KB to bytes
+        window_size: transfer_params.window_size,
+        bandwidth_limit: transfer_params.max_speed,
     };
 
-    // Establish session (connection + handshake)
-    println!("  Establishing session...");
+    // Establish session based on role (with discovery support)
+    // Peer address parsing and status messages are handled by P2PSession::establish()
     let device_id = Uuid::new_v4();
     let capabilities = Capabilities::all();
 
-    let config = ConfigMessage {
-        compression_enabled: compress,
-        compression_level: compress_level,
-        adaptive_compression: adaptive,
-        chunk_size: chunk_size * 1024, // Convert KB to bytes
-        window_size,
-        bandwidth_limit,
-    };
+    let mut session = P2PSession::establish(
+        &role,
+        session_params.peer.clone(),
+        session_params.discover,
+        session_params.port,
+        device_id,
+        capabilities,
+        Some(config.clone()),
+    )
+    .await?;
 
-    let mut session =
-        P2PSession::connect(peer_addr, device_id, capabilities, config.clone()).await?;
     println!("  ✓ Session established");
     println!("    Peer: {}", session.peer_device_id());
     println!("    Capabilities: {:?}", session.capabilities());
 
     // Send file or folder with signal handling (unified)
     let result = tokio::select! {
-        result = send(&mut session, &path, config, auto_reconnect, max_retries) => {
+        result = send(&mut session, &path, config, transfer_params.auto_reconnect, transfer_params.max_retries) => {
             result
         }
         _ = signal::ctrl_c() => {

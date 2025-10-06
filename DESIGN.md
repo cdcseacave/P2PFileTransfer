@@ -454,27 +454,54 @@ session.run_event_loop(&output_dir, auto_accept).await?;
 - ✅ Supports session multiplexing (future)
 - ✅ Foundation for file browsing protocol (future)
 
-#### CLI Integration
+#### CLI Integration with Role Selection
 
-**External interface unchanged:**
+**CLI interface (flexible role selection)**:
 ```bash
-# Send (establishes session, sends, closes)
-p2p-transfer send file.zip --to host:port
+# Send as client (default) - connect to peer and send
+p2p-transfer send file.zip --peer host:port
 
-# Receive (establishes session, auto-receives until closed)
+# Send as server - listen for peer to connect, then send
+p2p-transfer send file.zip --role server --port 7778
+
+# Receive as server (default) - listen for peer and receive
 p2p-transfer receive --output ./downloads --port 7778
+
+# Receive as client - connect to peer and receive
+p2p-transfer receive --output ./downloads --role client --peer host:port
 ```
 
-**Internal flow (new)**:
+**Internal flow**:
 ```rust
-// Send command
-let mut session = P2PSession::connect(...).await?;
-session.send_path(&path, progress_callback).await?;
+// Unified session establishment using P2PSession::establish()
+let mut session = P2PSession::establish(
+    &role,              // "client" or "server"
+    peer_addr,          // Some(addr) for client, None for server
+    bind_addr,          // Bind address (used by server)
+    device_id,
+    capabilities,
+    Some(config),       // Config for client, can be None for server
+).await?;
 
-// Receive command
-let mut session = P2PSession::accept(...).await?;
-session.run_event_loop(&output, auto_accept).await?;  // Auto-receive loop
+// Then perform operation (send or receive)
+session.send_path(&path, progress_callback).await?;
+// or
+session.run_event_loop(&output, auto_accept).await?;
 ```
+
+**Common CLI Parameters**:
+- `SessionParams`: `--role`, `--peer`, `--port`, `--discover`
+- `TransferParams`: `--compress`, `--compress-level`, `--adaptive`, `--chunk-size`, `--window-size`, `--max-speed`, `--auto-reconnect`, `--max-retries`
+
+**Role Defaults**:
+- `send` command: defaults to `client` (connects to peer)
+- `receive` command: defaults to `server` (listens for peer)
+- Can be overridden with `--role` parameter
+
+**Code Reuse**:
+- `P2PSession::establish()` eliminates duplicate connection logic
+- Both `send.rs` and `receive.rs` use the same session establishment code
+- Cleaner, more maintainable CLI implementation
 
 #### Future Enhancements
 

@@ -13,22 +13,30 @@
 //!
 //! # Bidirectional & Symmetric Design
 //!
-//! Once a session is established, both peers are equal - there is no longer
-//! a "client" or "server" distinction. Either peer can initiate operations:
-//! - Peer A can send to Peer B
-//! - Peer B can send to Peer A
+//! **The session is fully bidirectional** - once established, both peers are
+//! completely equal and can perform any operation. There is no longer a
+//! "client" or "server" distinction after the handshake completes.
+//!
+//! ## Either peer can:
+//! - Send files/folders to the other peer (`send_path()`)
+//! - Receive files/folders from the other peer (`receive_to()`)
+//! - Initiate multiple operations on the same connection
 //! - Operations can be interleaved (A sends, then B sends, then A sends again)
 //!
-//! The client/server role only matters during connection establishment:
-//! - Client: Initiates the TCP connection
-//! - Server: Accepts the TCP connection
+//! ## Connection roles (client/server) only matter during establishment:
+//! - **Client/Initiator**: Calls `connect()` to initiate the TCP connection
+//! - **Server/Responder**: Calls `accept()` to accept an incoming TCP connection
 //!
-//! After handshake completes, both peers have a symmetric P2PSession object.
+//! After handshake completes, both peers have a symmetric `P2PSession` object
+//! with identical capabilities. The connection role is preserved only for
+//! logging/debugging purposes.
 //!
-//! This separation enables:
+//! ## This design enables:
 //! - Multiple operations on a single connection
 //! - Connection reuse without re-handshaking
-//! - Bidirectional transfers in GUI applications
+//! - Bidirectional transfers (both peers can send and receive)
+//! - CLI tools that can act as both client and server
+//! - GUI applications with flexible peer-to-peer interactions
 //! - Future support for request/response patterns
 
 use crate::{
@@ -198,6 +206,156 @@ impl P2PSession {
             handshake,
             connection_role: ConnectionRole::Responder,
         })
+    }
+
+    /// Establish a session based on role with discovery support
+    ///
+    /// This method simplifies session establishment by determining whether to
+    /// connect as a client or accept as a server based on the role parameter.
+    /// It also supports automatic peer discovery for client mode.
+    ///
+    /// # Arguments
+    ///
+    /// * `role` - "client" to connect, "server" to accept
+    /// * `peer_addr` - Optional peer address string (e.g., "192.168.1.100:7778") for client role direct connection
+    /// * `use_discovery` - Whether to use peer discovery (client role only)
+    /// * `port` - Port number for bind address (server) or discovery (client)
+    /// * `device_id` - Unique identifier for this device
+    /// * `capabilities` - Capabilities supported by this device
+    /// * `config` - Optional configuration (required for client role)
+    ///
+    /// # Returns
+    ///
+    /// An established `P2PSession` ready for operations
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use p2p_core::{session::P2PSession, protocol::{Capabilities, ConfigMessage}};
+    /// use uuid::Uuid;
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let device_id = Uuid::new_v4();
+    /// let capabilities = Capabilities::all();
+    ///
+    /// // As client with direct connection
+    /// let peer_addr = Some("192.168.1.100:7778".to_string());
+    /// let config = Some(ConfigMessage::default());
+    /// let session = P2PSession::establish(
+    ///     "client",
+    ///     peer_addr,
+    ///     false,  // use_discovery
+    ///     7778,   // port
+    ///     device_id,
+    ///     capabilities,
+    ///     config
+    /// ).await?;
+    ///
+    /// // As client with discovery
+    /// let session = P2PSession::establish(
+    ///     "client",
+    ///     None,
+    ///     true,   // use_discovery
+    ///     7778,   // port
+    ///     device_id,
+    ///     capabilities,
+    ///     Some(ConfigMessage::default())
+    /// ).await?;
+    ///
+    /// // As server
+    /// let session = P2PSession::establish(
+    ///     "server",
+    ///     None,
+    ///     false,  // use_discovery (ignored)
+    ///     7778,   // port
+    ///     device_id,
+    ///     capabilities,
+    ///     None
+    /// ).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn establish(
+        role: &str,
+        peer_addr: Option<String>,
+        use_discovery: bool,
+        port: u16,
+        device_id: Uuid,
+        capabilities: Capabilities,
+        config: Option<ConfigMessage>,
+    ) -> Result<Self> {
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        if role == "client" {
+            // Client mode: connect to peer
+            let has_peer_addr = peer_addr.is_some();
+
+            let peer = if let Some(addr_str) = peer_addr {
+                // Direct connection - parse the address string
+                info!("Connecting to: {}", addr_str);
+                let parsed_addr: SocketAddr = addr_str.parse().map_err(|e| {
+                    Error::Protocol(format!("Invalid peer address '{}': {}", addr_str, e))
+                })?;
+                parsed_addr
+            } else if use_discovery {
+                // Use peer discovery
+                info!("Using peer discovery on port {}...", port);
+                info!("Establishing session as client...");
+
+                let device_name = format!("p2p-{}", &device_id.to_string()[..8]);
+                let manager = Arc::new(
+                    crate::discovery::DiscoveryManager::new(
+                        device_name,
+                        port,
+                        capabilities,
+                        Duration::from_secs(10),
+                    )
+                    .await?,
+                );
+
+                let manager_clone = manager.clone();
+                let discovery_handle = tokio::spawn(async move {
+                    let _ = manager_clone.start().await;
+                });
+
+                // Wait for discovery
+                tokio::time::sleep(Duration::from_secs(3)).await;
+
+                let peers = manager.get_peers().await;
+                discovery_handle.abort();
+
+                if peers.is_empty() {
+                    return Err(Error::Protocol(
+                        "No peers discovered. Make sure a peer is running in server mode."
+                            .to_string(),
+                    ));
+                }
+
+                // Use the first discovered peer
+                peers[0].socket_addr()
+            } else {
+                return Err(Error::Protocol(
+                    "Peer address or discovery required for client role".to_string(),
+                ));
+            };
+
+            // Only show this message for direct connections (not discovery, which shows above)
+            if has_peer_addr {
+                info!("Establishing session as client...");
+            }
+
+            let cfg = config
+                .ok_or_else(|| Error::Protocol("Config required for client role".to_string()))?;
+            Self::connect(peer, device_id, capabilities, cfg).await
+        } else {
+            // Server mode: accept connection
+            let bind_addr: SocketAddr = format!("0.0.0.0:{}", port)
+                .parse()
+                .map_err(|e| Error::Protocol(format!("Invalid port {}: {}", port, e)))?;
+            info!("Waiting for connection on {} (server mode)...", bind_addr);
+            Self::accept(bind_addr, device_id, capabilities).await
+        }
     }
 
     // ============================================================================

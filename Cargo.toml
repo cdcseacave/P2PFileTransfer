@@ -2,7 +2,7 @@
 name = "p2p-transfer"
 version = "0.1.0"
 edition = "2021"
-authors = ["Your Name <your.email@example.com>"]
+authors = ["cDc <cdc.seacave@gmail.com>"]
 description = "A lightweight P2P file transfer tool with compression"
 license = "MIT"
 repository = "https://github.com/yourusername/p2p-transfer"

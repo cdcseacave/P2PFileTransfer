@@ -79,6 +79,7 @@ def main():
     parser.add_argument('--max-speed', type=str, help='Bandwidth limit (e.g., "2M", "5M", "1G")')
     parser.add_argument('--compressible', action='store_true', help='Create highly compressible test file (zeros)')
     parser.add_argument('--verbosity', type=str, default='info', help='Verbosity level: off, error, warn, info, debug, trace (default: warn)')
+    parser.add_argument('--window-size', type=int, default=8, help='Window size for parallel transfers (1 = sequential, default: 8)')
     args = parser.parse_args()
     
     print("=== P2P Transfer Test ===")
@@ -88,6 +89,7 @@ def main():
         print("File type: Random data (incompressible)")
     if args.max_speed:
         print(f"Bandwidth limit: {args.max_speed}")
+    print(f"Transfer mode: {'Sequential' if args.window_size == 1 else f'Windowed (window size: {args.window_size})'}")
     print(f"Verbosity level: {args.verbosity}")
     print()
     
@@ -143,8 +145,8 @@ def main():
     print("Starting sender...")
     sender_cmd = [
         binary_path, "send", str(test_file),
-        "--to", "127.0.0.1:7778",
-        "--window-size", "16",
+        "--peer", "127.0.0.1:7778",
+        "--window-size", str(args.window_size),
         "--verbosity", args.verbosity
     ]
     
@@ -152,6 +154,8 @@ def main():
     if args.max_speed:
         sender_cmd.extend(["--max-speed", args.max_speed])
         print(f"  Using bandwidth limit: {args.max_speed}")
+    
+    print(f"  Using window size: {args.window_size} ({'sequential' if args.window_size == 1 else 'windowed'})")
     
     # Track transfer time
     start_time = time.time()

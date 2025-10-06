@@ -71,40 +71,17 @@ pub async fn run_cli() -> Result<()> {
     match cli.command {
         cli::Commands::Send {
             path,
-            to,
-            discover,
-            compress,
-            compress_level,
-            adaptive,
-            chunk_size,
-            window_size,
-            max_speed,
-            transfer_port,
-            auto_reconnect,
-            max_retries,
+            session,
+            transfer,
         } => {
-            send::handle_send(
-                path,
-                to,
-                discover,
-                compress,
-                compress_level,
-                adaptive,
-                chunk_size,
-                window_size,
-                max_speed,
-                transfer_port,
-                auto_reconnect,
-                max_retries,
-            )
-            .await?;
+            send::handle_send(path, session, transfer).await?;
         }
         cli::Commands::Receive {
             output,
-            port,
             auto_accept,
+            session,
         } => {
-            receive::handle_receive(output, port, auto_accept).await?;
+            receive::handle_receive(output, auto_accept, session).await?;
         }
         cli::Commands::Discover { timeout } => {
             discover::handle_discover(timeout).await?;

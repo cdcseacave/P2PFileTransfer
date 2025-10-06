@@ -2,7 +2,7 @@
 name = "p2p-core"
 version = "0.1.0"
 edition = "2021"
-authors = ["Your Name <your.email@example.com>"]
+authors = ["cDc <cdc.seacave@gmail.com>"]
 description = "Core P2P file transfer library"
 license = "MIT"
 

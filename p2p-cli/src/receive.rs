@@ -1,13 +1,27 @@
 //! Receive operations
 
 use anyhow::Result;
-use p2p_core::{protocol::Capabilities, session::P2PSession, Uuid};
-use std::{net::SocketAddr, path::PathBuf};
+use p2p_core::{
+    protocol::{Capabilities, ConfigMessage},
+    session::P2PSession,
+    Uuid,
+};
+use std::path::PathBuf;
 
-pub async fn handle_receive(output: PathBuf, port: u16, auto_accept: bool) -> Result<()> {
+use crate::cli::SessionParams;
+
+pub async fn handle_receive(
+    output: PathBuf,
+    auto_accept: bool,
+    session_params: SessionParams,
+) -> Result<()> {
     println!("📥 Starting receive mode");
     println!("  Output directory: {}", output.display());
-    println!("  Listening on port: {}", port);
+
+    // Determine role (default to server for receive)
+    let role = session_params.get_role("server");
+    println!("  Session role: {}", role);
+
     if auto_accept {
         println!("  Mode: Auto-accept (no prompts)");
     }
@@ -15,14 +29,22 @@ pub async fn handle_receive(output: PathBuf, port: u16, auto_accept: bool) -> Re
     // Create output directory
     std::fs::create_dir_all(&output)?;
 
-    // Establish session (accept connection + handshake)
-    let bind_addr: SocketAddr = format!("0.0.0.0:{}", port).parse()?;
-    println!("  Waiting for connection on {}...", bind_addr);
-
+    // Establish session based on role (with discovery support)
+    // Peer address parsing and status messages are handled by P2PSession::establish()
     let device_id = Uuid::new_v4();
     let capabilities = Capabilities::all();
 
-    let mut session = P2PSession::accept(bind_addr, device_id, capabilities).await?;
+    let mut session = P2PSession::establish(
+        &role,
+        session_params.peer.clone(),
+        session_params.discover,
+        session_params.port,
+        device_id,
+        capabilities,
+        Some(ConfigMessage::default()),
+    )
+    .await?;
+
     println!("  ✓ Session established");
     println!("    Peer: {}", session.peer_device_id());
     println!("    Compression: {}", session.config().compression_enabled);

@@ -2,7 +2,7 @@
 name = "p2p-gui"
 version = "0.1.0"
 edition = "2021"
-authors = ["Your Name <your.email@example.com>"]
+authors = ["cDc <cdc.seacave@gmail.com>"]
 description = "GUI interface for P2P file transfer"
 license = "MIT"
 

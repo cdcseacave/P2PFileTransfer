@@ -99,7 +99,7 @@ class BenchmarkRunner:
         # Build command
         cmd = [
             self.binary_path, "send", str(file_path),
-            "--to", f"{self.receiver_ip}:{self.port}"
+            "--peer", f"{self.receiver_ip}:{self.port}"
         ]
         
         # Set window size: 1 for sequential, or specified value for windowed
