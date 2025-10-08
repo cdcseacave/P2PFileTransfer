@@ -80,11 +80,7 @@ pub struct TransferParams {
     #[arg(long, value_parser = parse_bandwidth_arg, default_value = "0")]
     pub max_speed: u64,
 
-    /// Enable automatic reconnection on network failures (default: enabled, use --auto-reconnect=false to disable)
-    #[arg(long, default_value = "true", action = clap::ArgAction::Set)]
-    pub auto_reconnect: bool,
-
-    /// Maximum reconnection attempts (0 = unlimited)
+    /// Maximum reconnection attempts on network failures (0 = unlimited, 1 = no retry)
     #[arg(long, default_value = "5")]
     pub max_retries: u32,
 }

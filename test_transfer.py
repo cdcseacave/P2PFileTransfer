@@ -10,6 +10,7 @@ import os
 import sys
 import platform
 import shutil
+import random
 import filecmp
 import argparse
 from pathlib import Path
@@ -21,22 +22,37 @@ def create_test_file(file_path: Path, size_mb: int = 10, compressible: bool = Fa
         print(f"Test file already exists: {file_path}")
         return
     
+    chunk_size = 1024 * 1024  # 1MB chunks
     if compressible:
-        print(f"Creating compressible test file ({size_mb}MB)...")
-        chunk_size = 1024 * 1024  # 1MB chunks
-        # Create highly compressible data (zeros)
+        print(f"Creating compressible test file (~50% compression ratio) ({size_mb}MB)...")
+        # Create moderately compressible data by mixing repeated patterns with random data
+        # This simulates real-world compressible files (e.g., text, JSON, logs)
+        # Mix pattern phrase and random data at random intervals for realistic compression
+        pattern_phrase = b'Lorem ipsum dolor sit amet, consectetur adipiscing elit. '
         with open(file_path, 'wb') as f:
-            for _ in range(size_mb):
-                f.write(b'\x00' * chunk_size)
+            remaining_bytes = size_mb * chunk_size
+            while remaining_bytes > 0:
+                # Randomly decide: write pattern (50% chance) or random data (50% chance)
+                if random.random() < 0.5:
+                    # Write pattern phrase (compressible)
+                    # Random length between 10-80 repetitions
+                    repetitions = random.randint(10, 80)
+                    data = pattern_phrase * repetitions
+                else:
+                    # Write random data (incompressible)
+                    # Random length between 200-10000 bytes
+                    data = os.urandom(random.randint(200, 10000))
+                # Ensure we don't exceed the target size
+                if len(data) > remaining_bytes:
+                    data = data[:remaining_bytes]
+                f.write(data)
+                remaining_bytes -= len(data)
         print(f"✓ Created compressible test file: {file_path}")
     else:
         print(f"Creating test file ({size_mb}MB)...")
-        chunk_size = 1024 * 1024  # 1MB chunks
-        
         with open(file_path, 'wb') as f:
             for _ in range(size_mb):
                 f.write(os.urandom(chunk_size))
-        
         print(f"✓ Created test file: {file_path}")
 
 
@@ -85,7 +101,7 @@ def main():
     
     print("=== P2P Transfer Test ===")
     if args.compressible:
-        print("File type: Highly compressible (zeros)")
+        print("File type: Moderately compressible (~50% compression ratio)")
     else:
         print("File type: Random data (incompressible)")
     if args.max_speed:

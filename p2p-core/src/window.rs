@@ -140,6 +140,11 @@ impl SlidingWindow {
         }
     }
 
+    /// Get an in-flight chunk by index
+    pub fn get_in_flight(&self, chunk_index: u32) -> Option<&InFlightChunk> {
+        self.in_flight.get(&chunk_index)
+    }
+
     /// Process a received ACK
     pub fn process_ack(&mut self, chunk_index: u32) -> AckResult {
         // Check if already acked

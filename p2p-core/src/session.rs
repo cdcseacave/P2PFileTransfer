@@ -43,8 +43,9 @@ use crate::{
     error::{Error, Result},
     handshake::{HandshakeClient, HandshakeResult, HandshakeServer},
     network::tcp::{TcpConnection, TcpServer},
+    progress::ProgressState,
     protocol::{Capabilities, ConfigMessage},
-    transfer_folder::{FolderTransferSession, FolderTransferState},
+    transfer_folder::{FolderTransferSession, FolderTransferState, StateCallback},
 };
 use std::{net::SocketAddr, path::Path};
 use tracing::{debug, info, trace};
@@ -371,67 +372,60 @@ impl P2PSession {
     /// * `path` - Path to file or folder to send
     /// * `progress_callback` - Optional callback for progress updates
     ///
+    /// Sends a file or folder to the peer with automatic resume and reconnection support.
+    ///
+    /// This is the main send method that handles both individual files and entire folders.
+    /// It includes automatic retry logic with exponential backoff on transient failures,
+    /// and maintains transfer state for resume capability.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path to file or folder to send
+    /// * `progress_callback` - Optional callback for progress updates (per-file granularity)
+    /// * `state_callback` - Optional callback for state updates (for auto-save functionality)
+    /// * `reconnect_config` - Configuration for auto-reconnect behavior (max attempts, backoff timing)
+    /// * `state_path` - Optional path to save/load transfer state for manual resume
+    /// * `state_provider` - Optional closure to provide in-memory state for automatic resume
+    ///
+    /// # Features
+    /// - Supports both single files and recursive folder transfers
+    /// - Automatic resume from interruptions (chunk-level granularity)
+    /// - Auto-reconnect with exponential backoff on transient failures
+    /// - Progress callbacks for UI updates
+    /// - State persistence for manual resume after failures
+    ///
     /// # Example
     ///
     /// ```no_run
     /// # async fn example(session: &mut p2p_core::session::P2PSession) -> Result<(), Box<dyn std::error::Error>> {
     /// use std::path::Path;
+    /// use p2p_core::reconnect::ReconnectConfig;
     ///
-    /// // Either peer can send
-    /// session.send_path(Path::new("/path/to/file.zip"), None).await?;
+    /// let reconnect_config = ReconnectConfig {
+    ///     max_attempts: 5,
+    ///     initial_backoff_secs: 3,
+    ///     max_backoff_secs: 180,
+    ///     exponential: true,
+    /// };
+    ///
+    /// let state_path = Path::new("transfer.json");
+    ///
+    /// session.send_path(
+    ///     Path::new("/path/to/file.zip"),
+    ///     None,  // progress_callback
+    ///     None,  // state_callback
+    ///     &reconnect_config,
+    ///     Some(&state_path),
+    ///     None,  // state_provider
+    /// ).await?;
     /// # Ok(())
     /// # }
     /// ```
     pub async fn send_path(
         &mut self,
         path: &Path,
-        progress_callback: Option<crate::transfer_folder::ProgressCallback>,
-    ) -> Result<()> {
-        if !path.exists() {
-            return Err(Error::Protocol(format!(
-                "Path does not exist: {}",
-                path.display()
-            )));
-        }
-
-        let transfer_id = Uuid::new_v4();
-        let base_name = path
-            .file_name()
-            .ok_or_else(|| Error::Protocol("Invalid path".to_string()))?
-            .to_string_lossy()
-            .to_string();
-
-        let mut session = FolderTransferSession::new(
-            &mut self.connection,
-            self.handshake.config.clone(),
-            transfer_id,
-        );
-
-        if let Some(callback) = progress_callback {
-            session.set_progress_callback(callback);
-        }
-
-        session.send(path, &base_name).await?;
-
-        Ok(())
-    }
-
-    /// Send a file or folder with auto-reconnect support
-    ///
-    /// This version includes automatic retry logic with exponential backoff.
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - Path to file or folder to send
-    /// * `progress_callback` - Optional callback for progress updates
-    /// * `state_callback` - Optional callback for state updates
-    /// * `reconnect_config` - Configuration for auto-reconnect behavior
-    /// * `state_path` - Optional path to save/load transfer state
-    pub async fn send_path_with_reconnect(
-        &mut self,
-        path: &Path,
-        progress_callback: Option<crate::transfer_folder::ProgressCallback>,
-        state_callback: Option<crate::transfer_folder::StateCallback>,
+        progress: Option<&mut ProgressState>,
+        state_callback: Option<StateCallback>,
         reconnect_config: &crate::reconnect::ReconnectConfig,
         state_path: Option<&Path>,
         state_provider: Option<Box<dyn Fn() -> Option<FolderTransferState> + Send>>,
@@ -444,11 +438,6 @@ impl P2PSession {
         }
 
         let transfer_id = Uuid::new_v4();
-        let base_name = path
-            .file_name()
-            .ok_or_else(|| Error::Protocol("Invalid path".to_string()))?
-            .to_string_lossy()
-            .to_string();
 
         let mut session = FolderTransferSession::new(
             &mut self.connection,
@@ -456,21 +445,18 @@ impl P2PSession {
             transfer_id,
         );
 
-        if let Some(callback) = progress_callback {
-            session.set_progress_callback(callback);
-        }
-
         if let Some(callback) = state_callback {
             session.set_state_callback(callback);
         }
 
         session
-            .send_folder_with_reconnect(
+            .send_folder(
                 path,
-                &base_name,
                 reconnect_config,
                 state_path,
                 state_provider,
+                None, // existing_state - None for new transfers
+                progress,
             )
             .await?;
 
@@ -485,7 +471,8 @@ impl P2PSession {
     /// # Arguments
     ///
     /// * `output_dir` - Directory to save received files
-    /// * `progress_callback` - Optional callback for progress updates
+    /// * `state_path` - Optional path to save/load transfer state for auto-resume
+    /// * `progress` - Optional progress state for unified progress tracking
     ///
     /// # Example
     ///
@@ -493,56 +480,25 @@ impl P2PSession {
     /// # async fn example(session: &mut p2p_core::session::P2PSession) -> Result<(), Box<dyn std::error::Error>> {
     /// use std::path::Path;
     ///
-    /// // Either peer can receive
-    /// session.receive_to(Path::new("/output/dir"), None).await?;
+    /// // Simple receive without state or progress
+    /// session.receive_to(Path::new("/output/dir"), None, None).await?;
+    ///
+    /// // Receive with progress tracking
+    /// let mut progress = p2p_core::progress::ProgressState::new(0);
+    /// session.receive_to(Path::new("/output/dir"), None, Some(&mut progress)).await?;
+    ///
+    /// // Receive with state file for auto-resume
+    /// let state_path = Path::new("transfer.json");
+    /// session.receive_to(Path::new("/output/dir"), Some(&state_path), Some(&mut progress)).await?;
     /// # Ok(())
     /// # }
     /// ```
     pub async fn receive_to(
         &mut self,
         output_dir: &Path,
-        progress_callback: Option<crate::transfer_folder::ProgressCallback>,
-    ) -> Result<()> {
-        info!("Starting receive operation to: {:?}", output_dir);
-
-        // Create output directory
-        tokio::fs::create_dir_all(output_dir).await?;
-
-        let transfer_id = Uuid::new_v4();
-        let mut session = FolderTransferSession::new(
-            &mut self.connection,
-            self.handshake.config.clone(),
-            transfer_id,
-        );
-
-        if let Some(callback) = progress_callback {
-            session.set_progress_callback(callback);
-        }
-
-        session.receive_folder(output_dir).await?;
-
-        info!("Receive operation completed");
-        Ok(())
-    }
-
-    /// Receive with state file support for auto-resume
-    ///
-    /// # Arguments
-    ///
-    /// * `output_dir` - Directory to save received files
-    /// * `progress_callback` - Optional callback for progress updates
-    /// * `state_path` - Optional path to save/load transfer state
-    pub async fn receive_to_with_state(
-        &mut self,
-        output_dir: &Path,
-        progress_callback: Option<crate::transfer_folder::ProgressCallback>,
         state_path: Option<&Path>,
+        progress: Option<&mut ProgressState>,
     ) -> Result<()> {
-        info!(
-            "Starting receive operation with state support to: {:?}",
-            output_dir
-        );
-
         // Create output directory
         tokio::fs::create_dir_all(output_dir).await?;
 
@@ -552,16 +508,11 @@ impl P2PSession {
             self.handshake.config.clone(),
             transfer_id,
         );
-
-        if let Some(callback) = progress_callback {
-            session.set_progress_callback(callback);
-        }
 
         session
-            .receive_folder_with_state(output_dir, state_path)
+            .receive_folder(output_dir, state_path, progress)
             .await?;
 
-        info!("Receive operation with state support completed");
         Ok(())
     }
 
@@ -589,18 +540,24 @@ impl P2PSession {
     /// # async fn example(session: &mut p2p_core::session::P2PSession) -> Result<(), Box<dyn std::error::Error>> {
     /// use std::path::Path;
     ///
-    /// // Automatically handle incoming transfers
+    /// // Automatically handle incoming transfers with progress display
     /// session.run_event_loop(
     ///     Path::new("/downloads"),
-    ///     true  // Auto-accept all transfers
+    ///     true,  // Auto-accept all transfers
+    ///     true   // Show progress bar
     /// ).await?;
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn run_event_loop(&mut self, output_dir: &Path, auto_accept: bool) -> Result<()> {
+    pub async fn run_event_loop(
+        &mut self,
+        output_dir: &Path,
+        auto_accept: bool,
+        show_progress: bool,
+    ) -> Result<()> {
         debug!(
-            "Starting session event loop (auto-receive mode, auto_accept={})",
-            auto_accept
+            "Starting session event loop (auto-receive mode, auto_accept={}, show_progress={})",
+            auto_accept, show_progress
         );
 
         loop {
@@ -612,8 +569,15 @@ impl P2PSession {
                 debug!("Waiting for user to accept incoming transfer (auto_accept=false)");
             }
 
+            // Create a fresh progress state for each transfer if requested
+            let mut progress = if show_progress {
+                Some(ProgressState::new(0))
+            } else {
+                None
+            };
+
             // Attempt to receive - this will block until a transfer starts or connection closes
-            match self.receive_to(output_dir, None).await {
+            match self.receive_to(output_dir, None, progress.as_mut()).await {
                 Ok(_) => {
                     debug!("Transfer completed successfully, ready for next operation");
                     // Continue loop to handle next transfer

@@ -109,7 +109,11 @@ impl TcpServer {
         // Log all reachable addresses if bound to wildcard
         let reachable_addrs = server.reachable_addrs();
         let addr_strings: Vec<String> = reachable_addrs.iter().map(|a| a.to_string()).collect();
-        info!("TCP server listening on {} (reachable via: {})", local_addr, addr_strings.join(", "));
+        info!(
+            "TCP server listening on {} (reachable via: {})",
+            local_addr,
+            addr_strings.join(", ")
+        );
 
         Ok(server)
     }
@@ -130,13 +134,13 @@ impl TcpServer {
     }
 
     /// Get all reachable addresses for this server
-    /// 
+    ///
     /// If the server is bound to 0.0.0.0 (all interfaces), this returns a list
     /// of all local IP addresses where the server can be reached.
     /// Otherwise, returns just the bound address.
     pub fn reachable_addrs(&self) -> Vec<SocketAddr> {
         let port = self.local_addr.port();
-        
+
         // If not bound to wildcard address, just return the local address
         if !self.local_addr.ip().is_unspecified() {
             return vec![self.local_addr];
@@ -147,12 +151,12 @@ impl TcpServer {
     }
 
     /// List all local IP addresses with the given port
-    /// 
+    ///
     /// This is useful when binding to 0.0.0.0 to discover all addresses
     /// where the server is reachable.
     pub fn list_local_addrs(port: u16) -> Vec<SocketAddr> {
         use std::net::IpAddr;
-        
+
         let mut addrs = Vec::new();
 
         // Try to get network interfaces

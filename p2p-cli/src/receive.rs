@@ -46,18 +46,18 @@ pub async fn handle_receive(
     )
     .await?;
 
-    info!("  ✓ Session established");
+    info!("✅ Session established");
     info!("    Peer: {}", session.peer_device_id());
     info!("    Compression: {}", session.config().compression_enabled);
 
-    info!("\n📁 Session ready - waiting for incoming transfers...");
+    info!("📁 Session ready - waiting for incoming transfers...");
     info!("  (Press Ctrl+C to exit)");
 
-    // Run event loop - automatically receives incoming transfers
+    // Run event loop - automatically receives incoming transfers with progress display
     // The loop continues until the peer closes the connection
-    session.run_event_loop(&output, auto_accept).await?;
+    session.run_event_loop(&output, auto_accept, true).await?;
 
-    info!("\n✅ Session ended");
+    info!("✅ Session ended");
 
     Ok(())
 }

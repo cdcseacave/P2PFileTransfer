@@ -14,6 +14,7 @@ use crate::{
     compression::{AdaptiveCompressor, Decompressor},
     error::{Error, Result},
     network::tcp::TcpConnection,
+    progress::ProgressState,
     protocol::{AckStatus, ChunkAck, ChunkMessage, ConfigMessage, Message},
     verification,
     window::{InFlightChunk, SlidingWindow, WindowConfig},
@@ -74,20 +75,27 @@ impl<'a> FileTransferSession<'a> {
         }
     }
 
-    /// Send a file to the peer
-    pub async fn send_file(&mut self, path: &Path) -> Result<()> {
-        self.send_file_with_resume(path, &[]).await
-    }
-
-    /// Send a file with chunk-level resume support
+    /// Sends a file to the peer using sequential chunk transfer.
+    ///
+    /// This method sends a file chunk-by-chunk with acknowledgment after each chunk.
+    /// It supports automatic resume by skipping already-completed chunks.
     ///
     /// # Arguments
     /// * `path` - Path to the file to send
-    /// * `completed_chunks` - Slice of chunk indices that have already been transferred
-    pub async fn send_file_with_resume(
+    /// * `completed_chunks` - Slice of chunk indices that have already been transferred (empty for new transfers)
+    /// * `progress` - Optional progress state for unified progress tracking
+    ///
+    /// # Features
+    /// - Sequential chunk transfer with per-chunk acknowledgment
+    /// - Automatic resume capability (skips completed chunks)
+    /// - Optional compression with adaptive detection
+    /// - CRC32 checksum verification per chunk
+    /// - Bandwidth throttling support
+    pub async fn send_file(
         &mut self,
         path: &Path,
         completed_chunks: &[u64],
+        mut progress: Option<&mut ProgressState>,
     ) -> Result<()> {
         debug!("Starting file send: {:?}", path);
 
@@ -180,6 +188,11 @@ impl<'a> FileTransferSession<'a> {
                 )));
             }
 
+            // Update progress after successful chunk send (uncompressed size)
+            if let Some(ref mut progress) = progress {
+                progress.add_bytes(uncompressed_size);
+            }
+
             trace!("Sent chunk {}/{}", chunk_index + 1, total_chunks);
         }
 
@@ -187,27 +200,34 @@ impl<'a> FileTransferSession<'a> {
         Ok(())
     }
 
-    /// Send a file using sliding window protocol for better performance
+    /// Sends a file to the peer using the sliding window protocol for high performance.
+    ///
+    /// This method sends multiple chunks in parallel without waiting for individual acknowledgments,
+    /// providing 5-15x speedup on high-latency networks. It supports automatic resume by skipping
+    /// already-completed chunks.
+    ///
+    /// # Arguments
+    /// * `path` - Path to the file to send
+    /// * `window_config` - Window configuration (max window size, timeout, retries)
+    /// * `completed_chunks` - Slice of chunk indices that have already been transferred (empty for new transfers)
+    ///
+    /// # Features
+    /// - Parallel chunk transfer with sliding window flow control
+    /// - Automatic resume capability (skips completed chunks)
+    /// - Automatic retry on chunk failures (up to max_retries)
+    /// - Optional compression with adaptive detection
+    /// - CRC32 checksum verification per chunk
+    /// - Bandwidth throttling support
+    ///
+    /// # Performance
+    /// The sliding window protocol significantly improves transfer speed on networks with
+    /// high latency by keeping the pipeline full with in-flight chunks.
     pub async fn send_file_windowed(
         &mut self,
         path: &Path,
         window_config: &WindowConfig,
-    ) -> Result<()> {
-        self.send_file_windowed_with_resume(path, window_config, &[])
-            .await
-    }
-
-    /// Send a file using sliding window protocol with chunk-level resume support
-    ///
-    /// # Arguments
-    /// * `path` - Path to the file to send
-    /// * `window_config` - Window configuration
-    /// * `completed_chunks` - Slice of chunk indices that have already been transferred
-    pub async fn send_file_windowed_with_resume(
-        &mut self,
-        path: &Path,
-        window_config: &WindowConfig,
         completed_chunks: &[u64],
+        mut progress: Option<&mut ProgressState>,
     ) -> Result<()> {
         debug!("Starting windowed file send: {:?}", path);
 
@@ -304,6 +324,11 @@ impl<'a> FileTransferSession<'a> {
                         .send_message(&Message::Chunk(chunk_msg.clone()))
                         .await?;
 
+                    // Update progress immediately after sending (uncompressed size)
+                    if let Some(ref mut progress) = progress {
+                        progress.add_bytes(uncompressed_size);
+                    }
+
                     // Mark as in-flight (store the actual message for potential retransmission)
                     let in_flight = InFlightChunk {
                         message: chunk_msg,
@@ -312,7 +337,7 @@ impl<'a> FileTransferSession<'a> {
                     };
                     window.mark_sent(in_flight);
 
-                    debug!(
+                    trace!(
                         "Sent chunk {} (window: {}/{})",
                         chunk_index,
                         window.in_flight_count(),

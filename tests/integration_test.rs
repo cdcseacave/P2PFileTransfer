@@ -9,7 +9,7 @@ use p2p_core::{
 };
 use std::time::Duration;
 use tokio::time::timeout;
-use tracing::info;
+use tracing::{debug, info};
 
 #[tokio::test]
 async fn test_full_connection_flow() {

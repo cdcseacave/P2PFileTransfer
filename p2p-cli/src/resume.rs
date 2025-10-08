@@ -1,12 +1,11 @@
 //! Resume operations
 
 use anyhow::Result;
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use p2p_core::{
     handshake::HandshakeClient,
     network::tcp::TcpConnection,
     protocol::{Capabilities, ConfigMessage},
-    transfer_folder::{FolderProgress, FolderTransferSession, FolderTransferState},
+    transfer_folder::{FolderTransferSession, FolderTransferState},
     Uuid,
 };
 use std::{net::SocketAddr, path::PathBuf};
@@ -87,51 +86,32 @@ pub async fn handle_resume(transfer_id: String, to: String, path: PathBuf) -> Re
         });
     }));
 
-    // Set up progress callback
-    let multi = MultiProgress::new();
-
-    let overall_pb = multi.add(ProgressBar::new(100));
-    overall_pb.set_style(
-        ProgressStyle::default_bar()
-            .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} files ({percent}%)")
-            .unwrap()
-            .progress_chars("=>-"),
-    );
-
-    let current_pb = multi.add(ProgressBar::new(100));
-    current_pb.set_style(
-        ProgressStyle::default_bar()
-            .template("  Current: {msg} {bar:40.green/yellow} {bytes}/{total_bytes} ({percent}%)")
-            .unwrap()
-            .progress_chars("=>-"),
-    );
-
-    session.set_progress_callback(Box::new(move |progress: FolderProgress| {
-        overall_pb.set_length(progress.total_files as u64);
-        overall_pb.set_position(progress.completed_files as u64);
-
-        if let Some(file) = &progress.current_file {
-            current_pb.set_message(file.clone());
-            current_pb.set_position((progress.current_file_progress * 100.0) as u64);
-        }
-
-        if progress.completed_files == progress.total_files {
-            overall_pb.finish_with_message("Complete!");
-            current_pb.finish_and_clear();
-        }
-    }));
+    // Create progress state for unified progress tracking
+    // Initialize with already completed bytes for resume
+    let mut progress = p2p_core::progress::ProgressState::new(state.total_bytes);
+    // Add the bytes already transferred
+    progress.add_bytes(state.transferred_bytes);
 
     // Resume transfer with signal handling
-    info!("\n📁 Resuming folder transfer...");
+    info!("📁 Resuming folder transfer...");
+
+    // Use the unified send_folder method with existing state
+    let reconnect_config = p2p_core::reconnect::ReconnectConfig {
+        max_attempts: 1, // Single attempt, no auto-reconnect for manual resume command
+        initial_backoff_secs: 3,
+        max_backoff_secs: 180,
+        exponential: true,
+    };
+
     tokio::select! {
-        result = session.resume_send_folder(&path, &state) => {
+        result = session.send_folder(&path, &reconnect_config, Some(&state_path), None, Some(&state), Some(&mut progress)) => {
             result?;
             let _ = tokio::fs::remove_file(&state_path).await;
-            info!("\n✅ Transfer resumed and completed!");
+            info!("✅ Transfer resumed and completed!");
             info!("  State file removed");
         }
         _ = signal::ctrl_c() => {
-            warn!("\n⚠️  Transfer interrupted again. State has been saved.");
+            warn!("⚠️  Transfer interrupted again. State has been saved.");
             info!("  Use 'p2p-transfer resume {} --to {} --path {}' to continue",
                 transfer_id, to, path.display());
             return Ok(());

@@ -12,6 +12,7 @@ pub mod handshake;
 pub mod history; // Transfer history tracking
 pub mod nat; // NAT traversal and hole punching
 pub mod network;
+pub mod progress; // Unified progress tracking
 pub mod protocol;
 pub mod reconnect; // Auto-reconnect with exponential backoff
 pub mod session; // High-level session management

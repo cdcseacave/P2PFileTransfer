@@ -32,7 +32,7 @@ pub async fn handle_discover(timeout_secs: u64, port: u16) -> Result<()> {
     // Get discovered peers
     let peers = manager.get_peers().await;
 
-    info!("\n📡 Discovered {} peer(s):", peers.len());
+    info!("📡 Discovered {} peer(s):", peers.len());
     for (idx, peer) in peers.iter().enumerate() {
         info!(
             "  [{}] {} - {} ({})",

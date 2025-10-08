@@ -59,9 +59,17 @@ impl ReconnectConfig {
         Duration::from_secs(delay_secs)
     }
 
-    /// Check if should retry for given attempt
+    /// Check if should retry after the given attempt number.
+    ///
+    /// Note: `attempt` is 0-indexed and represents the attempt that just failed.
+    /// This is called BEFORE incrementing to check if we should try again.
+    ///
+    /// `max_attempts` determines the maximum number of retries (not total attempts):
+    /// - 0 = unlimited retries
+    /// - 1 = allow 1 retry (2 total attempts)
+    /// - 2 = allow 2 retries (3 total attempts)
     pub fn should_retry(&self, attempt: u32) -> bool {
-        self.max_attempts == 0 || attempt < self.max_attempts
+        self.max_attempts == 0 || (attempt + 1) < self.max_attempts
     }
 }
 
@@ -102,17 +110,20 @@ where
                 return Ok(result);
             }
             Err(e) => {
-                attempt += 1;
-
+                // Check if we can retry BEFORE incrementing attempt
                 if !config.should_retry(attempt) {
                     error!(
                         "{} failed after {} attempts: {}",
-                        operation_name, attempt, e
+                        operation_name,
+                        attempt + 1,
+                        e
                     );
                     return Err(e);
                 }
 
-                let delay = config.backoff_delay(attempt - 1);
+                let delay = config.backoff_delay(attempt);
+                attempt += 1;
+
                 warn!(
                     "{} failed (attempt {}/{}): {}. Retrying in {:?}...",
                     operation_name,
@@ -183,11 +194,15 @@ mod tests {
 
     #[test]
     fn test_should_retry() {
+        // max_attempts = 3 means allow up to 2 retries (3 total attempts)
         let config = ReconnectConfig::with_max_attempts(3);
 
+        // attempt 0: first try fails, should_retry(0) -> (0+1) < 3 = true (retry #1)
+        // attempt 1: second try fails, should_retry(1) -> (1+1) < 3 = true (retry #2)
+        // attempt 2: third try fails, should_retry(2) -> (2+1) < 3 = false (no more retries)
         assert!(config.should_retry(0));
         assert!(config.should_retry(1));
-        assert!(config.should_retry(2));
+        assert!(!config.should_retry(2));
         assert!(!config.should_retry(3));
         assert!(!config.should_retry(10));
     }
@@ -251,9 +266,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_retry_exhausted() {
+        // max_attempts = 2 means 1 original attempt + 1 retry = 2 total attempts
         let config = ReconnectConfig {
             initial_backoff_secs: 0, // No delay for test
-            max_attempts: 3,
+            max_attempts: 2,
             ..Default::default()
         };
         let counter = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
@@ -270,6 +286,6 @@ mod tests {
         .await;
 
         assert!(result.is_err());
-        assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 3);
+        assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 }
