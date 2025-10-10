@@ -48,7 +48,7 @@ pub struct TransferStats {
 }
 
 /// State callback for auto-saving transfer state
-pub type StateCallback = Box<dyn Fn(&FolderTransferState) + Send + Sync>;
+pub type StateCallback = std::sync::Arc<dyn Fn(&FolderTransferState) + Send + Sync>;
 
 /// Folder transfer session managing multiple file transfers
 pub struct FolderTransferSession<'a> {
@@ -185,50 +185,59 @@ impl<'a> FolderTransferSession<'a> {
         }
     }
 
-    /// Send a file or folder to the peer with optional resume from existing state.
+    /// Send a file or folder to the peer with mutable state for chunk-level resume.
     ///
     /// This is the unified send method that handles both new transfers and resuming interrupted
-    /// transfers. For new transfers, pass `existing_state = None` and it will scan the path and
-    /// create a fresh state. For resume, pass the existing state and it will skip completed files
-    /// and chunks.
+    /// transfers. The state is updated during transfer as chunks complete, allowing resume
+    /// from the exact interruption point if connection is lost.
     ///
     /// # Arguments
     /// * `path` - Path to the file or folder to send
-    /// * `existing_state` - Optional existing state to resume from (None for new transfers)
+    /// * `state` - Mutable reference to transfer state (updated during transfer with chunk completions)
     /// * `progress` - Optional progress state for unified progress tracking
     pub async fn send(
         &mut self,
         path: &Path,
-        existing_state: Option<&FolderTransferState>,
+        state: &mut FolderTransferState,
         mut progress: Option<&mut ProgressState>,
     ) -> Result<()> {
         // Start timing the transfer
         self.transfer_start = Some(std::time::Instant::now());
         self.total_compressed_bytes = 0;
 
-        // Build or use existing state, and prepare resume point if needed
-        let (mut state, resume_point) = if let Some(existing) = existing_state {
-            // Resume: use existing state
+        // Check if we're resuming or starting fresh
+        let resume_point = if !state.files.is_empty() {
+            // Resume: state already has files
             info!("Resuming transfer: {:?}", path);
-            let state = existing.clone();
+
+            info!(
+                "Resume state: {}/{} files completed, {} bytes transferred",
+                state.completed_files.len(),
+                state.files.len(),
+                state.transferred_bytes
+            );
 
             // Build resume point from state (None if no completed chunks in current file)
-            let resume_point = if let Some(next_file) = state.next_file() {
+            if let Some(next_file) = state.next_file() {
                 let completed_chunks = state.get_completed_chunks(next_file);
                 if !completed_chunks.is_empty() {
+                    info!(
+                        "Resuming file {} from chunk {}",
+                        next_file,
+                        completed_chunks.len()
+                    );
                     Some(crate::protocol::ResumePoint {
                         transfer_id: self.transfer_id,
                         file_index: next_file as u32,
                         completed_chunks: completed_chunks.to_vec(),
                     })
                 } else {
+                    info!("Resuming file {} from beginning", next_file);
                     None
                 }
             } else {
                 None
-            };
-
-            (state, resume_point)
+            }
         } else {
             // New transfer: scan and build state
             info!("Starting transfer: {:?}", path);
@@ -243,10 +252,9 @@ impl<'a> FolderTransferSession<'a> {
             // Check if path is a file or folder and collect metadata accordingly
             let files = if path.is_file() {
                 // Single file: treat as 1-file "folder"
+                // Only read metadata, not the file content (checksum will be computed during transfer)
                 let metadata = fs::metadata(path).await?;
-                let data = fs::read(path).await?;
-                let checksum = verification::sha256(&data);
-                let size = data.len() as u64;
+                let size = metadata.len();
                 let modified = metadata
                     .modified()
                     .unwrap_or(SystemTime::UNIX_EPOCH)
@@ -258,7 +266,7 @@ impl<'a> FolderTransferSession<'a> {
                 let file_meta = FileMetadata {
                     path: file_name.clone(),
                     size,
-                    checksum,
+                    checksum: [0u8; 32], // Placeholder - will be computed during transfer
                     modified,
                 };
 
@@ -278,10 +286,9 @@ impl<'a> FolderTransferSession<'a> {
 
             // Create fresh state with no completed files/chunks (no resume point)
             let file_list: Vec<FileMetadata> = files.iter().map(|(_, meta)| meta.clone()).collect();
-            let state =
-                FolderTransferState::new(self.transfer_id, base_name.to_string(), file_list);
+            *state = FolderTransferState::new(self.transfer_id, base_name.to_string(), file_list);
 
-            (state, None)
+            None
         };
 
         let total_files = state.files.len();
@@ -293,6 +300,7 @@ impl<'a> FolderTransferSession<'a> {
         }
 
         // Send transfer info with file list and optional resume point
+        let is_resuming = resume_point.is_some();
         let transfer_info = TransferInfo {
             transfer_id: self.transfer_id,
             items: state.files.clone(),
@@ -309,7 +317,7 @@ impl<'a> FolderTransferSession<'a> {
             return Err(Error::Protocol(format!("Expected Ready, got {:?}", msg)));
         }
 
-        if existing_state.is_some() {
+        if is_resuming {
             debug!(
                 "Receiver ready, resuming from file {}",
                 state.completed_files.len()
@@ -319,11 +327,13 @@ impl<'a> FolderTransferSession<'a> {
         }
 
         // Normalize base_path: for single files, use parent directory as base
+        // For folders, also use parent so we can join with the folder-name-inclusive relative paths
         let base_path = if path.is_file() {
             path.parent()
                 .ok_or_else(|| Error::Protocol("File has no parent directory".to_string()))?
         } else {
-            path
+            // For folders, use parent as base (same as in scan_folder)
+            path.parent().unwrap_or(path)
         };
 
         // Transfer each file (skipping already completed ones)
@@ -340,12 +350,18 @@ impl<'a> FolderTransferSession<'a> {
             // Get completed chunks for this file (for resume within file)
             let completed_chunks = state.get_completed_chunks(file_index).to_vec();
 
+            // Create chunk completion callback that updates state directly
+            let chunk_callback = |chunk_index: u64| {
+                state.mark_chunk_complete(file_index, chunk_index);
+            };
+
             // Send the file with chunk-level resume (progress state passed to FileTransferSession)
             self.send_single_file(
                 &full_path,
                 file_index as u32,
                 &completed_chunks,
                 progress.as_deref_mut(),
+                Some(chunk_callback),
             )
             .await?;
 
@@ -355,7 +371,7 @@ impl<'a> FolderTransferSession<'a> {
 
             // Save state after each file
             if let Some(callback) = &self.state_callback {
-                callback(&state);
+                callback(state);
             }
 
             trace!("File {} complete", relative_path.display());
@@ -383,174 +399,6 @@ impl<'a> FolderTransferSession<'a> {
         // Display transfer statistics
         self.display_transfer_stats(total_files, total_bytes, duration_secs, true);
         Ok(())
-    }
-
-    /// Sends a file or folder to the peer with automatic resume and reconnection support.
-    ///
-    /// This is the main unified send method that handles both new transfers and resuming interrupted
-    /// transfers. It includes automatic retry logic with exponential backoff on transient failures,
-    /// and maintains transfer state for resume capability.
-    ///
-    /// # Arguments
-    /// * `path` - Path to the file or folder to send  
-    /// * `reconnect_config` - Configuration for auto-reconnect behavior (max attempts, backoff timing)
-    /// * `state_path` - Optional path to save/load transfer state for manual resume
-    /// * `state_provider` - Optional closure to provide in-memory state for automatic resume
-    /// * `existing_state` - Optional existing state to resume from (None for new transfers)
-    /// * `progress` - Optional progress state for unified progress tracking
-    ///
-    /// # Features
-    /// - Supports both single files and recursive folder transfers
-    /// - Automatic resume from interruptions (chunk-level granularity)
-    /// - Auto-reconnect with exponential backoff on transient failures
-    /// - Skips already-completed files and chunks within partial files during resume
-    ///
-    /// # Implementation Note
-    /// This method uses the unified `send()` method which handles both fresh transfers and
-    /// resume operations transparently. The `send()` method accepts an optional state parameter:
-    /// when None, it scans the path and creates a fresh state; when provided, it resumes from
-    /// the existing state, skipping completed files and chunks.
-    pub async fn send_folder(
-        &mut self,
-        path: &Path,
-        reconnect_config: &crate::reconnect::ReconnectConfig,
-        state_path: Option<&Path>,
-        state_provider: Option<Box<dyn Fn() -> Option<FolderTransferState> + Send>>,
-        existing_state: Option<&FolderTransferState>,
-        mut progress: Option<&mut ProgressState>,
-    ) -> Result<()> {
-        use crate::reconnect::is_transient_error;
-
-        let mut attempt = 0;
-        let mut last_state: Option<FolderTransferState> = existing_state.cloned();
-
-        // Try to load existing state from disk first (for manual resume) if not provided
-        if last_state.is_none() {
-            if let Some(state_file) = state_path {
-                if state_file.exists() {
-                    info!("Loading existing transfer state from {:?}", state_file);
-                    match FolderTransferState::load_from_file(state_file).await {
-                        Ok(state) => {
-                            if state.transfer_id == self.transfer_id {
-                                last_state = Some(state);
-                                info!("Resuming previous transfer from state file");
-                            }
-                        }
-                        Err(e) => warn!("Failed to load state file: {}", e),
-                    }
-                }
-            }
-        }
-
-        loop {
-            let result = {
-                let attempt_type = if last_state.is_some() {
-                    "resume"
-                } else {
-                    "send"
-                };
-                debug!(
-                    "Attempting {} (attempt {}/{})",
-                    attempt_type,
-                    attempt + 1,
-                    if reconnect_config.max_attempts == 0 {
-                        "∞".to_string()
-                    } else {
-                        reconnect_config.max_attempts.to_string()
-                    }
-                );
-                // Use the unified send() method with optional state
-                self.send(path, last_state.as_ref(), progress.as_deref_mut())
-                    .await
-            };
-
-            match result {
-                Ok(_) => {
-                    // Clean up state file on success
-                    if let Some(state_file) = state_path {
-                        if state_file.exists() {
-                            let _ = tokio::fs::remove_file(state_file).await;
-                        }
-                    }
-                    return Ok(());
-                }
-                Err(e) => {
-                    // Check if error is transient
-                    if !is_transient_error(&e) {
-                        warn!("Non-transient error, not retrying: {}", e);
-                        // Save state to disk for manual resume
-                        if let Some(ref provider) = state_provider {
-                            if let Some(state) = provider() {
-                                if let Some(state_file) = state_path {
-                                    let _ = state.save_to_file(state_file).await;
-                                    info!("Saved state to disk for manual resume");
-                                }
-                            }
-                        }
-                        return Err(e);
-                    }
-
-                    // Check if we should retry
-                    if !reconnect_config.should_retry(attempt) {
-                        warn!(
-                            "Max reconnection attempts ({}) reached",
-                            reconnect_config.max_attempts
-                        );
-                        // Save state to disk for manual resume
-                        if let Some(ref provider) = state_provider {
-                            if let Some(state) = provider() {
-                                if let Some(state_file) = state_path {
-                                    let _ = state.save_to_file(state_file).await;
-                                    info!("Saved state to disk after max retries");
-                                }
-                            }
-                        }
-                        return Err(Error::Protocol(format!(
-                            "Transfer failed after {} attempts: {}",
-                            attempt + 1,
-                            e
-                        )));
-                    }
-
-                    // Calculate backoff delay
-                    let delay = reconnect_config.backoff_delay(attempt);
-                    warn!(
-                        "Transient error occurred (attempt {}/{}): {}. Retrying in {:?}...",
-                        attempt + 1,
-                        if reconnect_config.max_attempts == 0 {
-                            "∞".to_string()
-                        } else {
-                            reconnect_config.max_attempts.to_string()
-                        },
-                        e,
-                        delay
-                    );
-
-                    // Get current state for retry (from memory if available, otherwise from disk)
-                    if let Some(ref provider) = state_provider {
-                        // Get in-memory state
-                        if let Some(state) = provider() {
-                            last_state = Some(state);
-                            info!("Using in-memory state for retry attempt");
-                        }
-                    } else if let Some(state_file) = state_path {
-                        // Fallback: load from disk (for manual resume scenarios)
-                        if let Ok(state) = FolderTransferState::load_from_file(state_file).await {
-                            last_state = Some(state);
-                            info!("Loaded state from disk for retry attempt");
-                        }
-                    }
-
-                    // Wait before retrying
-                    tokio::time::sleep(delay).await;
-                    attempt += 1;
-
-                    // Note: Connection will need to be re-established by caller
-                    // This function assumes the connection is re-established between attempts
-                    info!("Retrying transfer after backoff delay...");
-                }
-            }
-        }
     }
 
     /// Receive a folder from the peer with optional state file for auto-resume
@@ -625,9 +473,45 @@ impl<'a> FolderTransferSession<'a> {
         // Calculate total size
         let total_bytes: u64 = transfer_info.items.iter().map(|f| f.size).sum();
 
-        // Set total bytes in progress state if provided
+        // Calculate already-transferred bytes from resume information
+        let mut already_transferred = 0u64;
+        if let Some(ref resume_point) = transfer_info.resume_from {
+            let file_index = resume_point.file_index as usize;
+            // Add bytes from all completed files before the resume point
+            for i in 0..file_index {
+                if i < transfer_info.items.len() {
+                    already_transferred += transfer_info.items[i].size;
+                }
+            }
+            // Add bytes from completed chunks in the current file
+            if file_index < transfer_info.items.len() {
+                let current_file_size = transfer_info.items[file_index].size;
+                let chunk_size = self.config.chunk_size as u64;
+                let total_chunks = ((current_file_size + chunk_size - 1) / chunk_size) as u64;
+                let completed_chunks = resume_point.completed_chunks.len() as u64;
+                if completed_chunks < total_chunks {
+                    already_transferred += completed_chunks * chunk_size;
+                } else {
+                    already_transferred += current_file_size;
+                }
+                debug!(
+                    "Resume: {} completed chunks ({} bytes) in file {} (total {} chunks)",
+                    completed_chunks, already_transferred, file_index, total_chunks
+                );
+            }
+            info!(
+                "Resume detected: {} bytes already transferred ({:.1}%)",
+                already_transferred,
+                (already_transferred as f64 / total_bytes as f64) * 100.0
+            );
+        }
+
+        // Set total bytes and initialize with already-transferred bytes if resuming
         if let Some(ref mut progress) = progress {
             progress.set_total_bytes(total_bytes);
+            if already_transferred > 0 {
+                progress.add_bytes(already_transferred);
+            }
         }
 
         // Create output directory
@@ -659,7 +543,7 @@ impl<'a> FolderTransferSession<'a> {
             let expected_chunks = ((file_meta.size + self.config.chunk_size as u64 - 1)
                 / self.config.chunk_size as u64) as u32;
 
-            // Receive the file using our connection
+            // Receive the file using our connection (checksum verification is now done per-file)
             self.receive_single_file(
                 &full_path,
                 file_index as u32,
@@ -667,20 +551,6 @@ impl<'a> FolderTransferSession<'a> {
                 progress.as_deref_mut(),
             )
             .await?;
-
-            // Verify file checksum
-            let received_data = fs::read(&full_path).await?;
-            let calculated_checksum = verification::sha256(&received_data);
-
-            if calculated_checksum != file_meta.checksum {
-                warn!(
-                    "File checksum mismatch: {} (expected {:?}, got {:?})",
-                    relative_path.display(),
-                    file_meta.checksum,
-                    calculated_checksum
-                );
-                // Note: In production, this should probably fail or retry
-            }
 
             trace!("File {} complete", relative_path.display());
         }
@@ -708,13 +578,18 @@ impl<'a> FolderTransferSession<'a> {
     /// Send a single file (internal helper)
     /// Uses windowed or sequential mode based on config.window_size.
     /// Supports chunk-level resume by skipping chunks in completed_chunks.
-    async fn send_single_file(
+    /// Sends the computed checksum and waits for receiver confirmation.
+    async fn send_single_file<F>(
         &mut self,
         path: &Path,
         file_index: u32,
         completed_chunks: &[u64],
         progress: Option<&mut ProgressState>,
-    ) -> Result<()> {
+        chunk_complete_callback: Option<F>,
+    ) -> Result<()>
+    where
+        F: FnMut(u64),
+    {
         // Create a FileTransferSession with borrowed connection
         let mut file_session = FileTransferSession::new(
             self.connection,
@@ -724,7 +599,7 @@ impl<'a> FolderTransferSession<'a> {
         );
 
         // Use windowed mode if window_size > 1, otherwise sequential
-        let result = if self.config.window_size > 1 {
+        let sender_checksum = if self.config.window_size > 1 {
             // Create window config from settings
             let window_config = WindowConfig {
                 max_window_size: self.config.window_size,
@@ -732,25 +607,77 @@ impl<'a> FolderTransferSession<'a> {
                 max_retries: 3,
             };
             file_session
-                .send_file_windowed(path, &window_config, completed_chunks, progress)
-                .await
+                .send_file_windowed(
+                    path,
+                    &window_config,
+                    completed_chunks,
+                    chunk_complete_callback,
+                    progress,
+                )
+                .await?
         } else {
             file_session
-                .send_file(path, completed_chunks, progress)
-                .await
+                .send_file(path, completed_chunks, chunk_complete_callback, progress)
+                .await?
         };
 
         // Aggregate compression statistics
         self.total_compressed_bytes += file_session.compressed_bytes_sent;
 
-        result
+        // Send the file checksum to receiver and immediately receive acknowledgment
+        // This minimizes round-trip latency by chaining send->recv without intermediate delays
+        use crate::protocol::FileChecksumMessage;
+        let checksum_msg = FileChecksumMessage {
+            transfer_id: self.transfer_id,
+            file_index,
+            checksum: sender_checksum,
+        };
+
+        // Send checksum message
+        self.connection
+            .send_message(&Message::FileChecksum(checksum_msg))
+            .await?;
+
+        // Immediately start receiving receiver's checksum (receiver will be sending it in parallel)
+        let msg = self.connection.recv_message().await?;
+
+        // Validate checksum response and compare checksums
+        match msg {
+            Message::FileChecksum(receiver_msg) => {
+                // Compare sender's checksum with receiver's checksum
+                let matches = sender_checksum == receiver_msg.checksum;
+
+                if !matches {
+                    return Err(Error::Verification(format!(
+                        "File checksum mismatch for file {}: sender={:02x?}, receiver={:02x?}",
+                        file_index,
+                        &sender_checksum[..8],
+                        &receiver_msg.checksum[..8]
+                    )));
+                }
+                debug!(
+                    "File {} checksum verified: {:02x?}",
+                    file_index,
+                    &sender_checksum[..8]
+                );
+            }
+            _ => {
+                return Err(Error::Protocol(format!(
+                    "Expected FileChecksum, got {:?}",
+                    msg
+                )));
+            }
+        }
+
+        Ok(())
     }
 
     /// Receive a single file (internal helper)
+    /// Receives chunks, computes checksum, and verifies against sender's checksum
     async fn receive_single_file(
         &mut self,
         path: &Path,
-        _file_index: u32, // Reserved for future use
+        file_index: u32,
         expected_chunks: u32,
         mut progress: Option<&mut ProgressState>,
     ) -> Result<()> {
@@ -783,11 +710,14 @@ impl<'a> FolderTransferSession<'a> {
                     // Track compression statistics (network bytes only)
                     self.total_compressed_bytes += chunk_msg.data.len() as u64;
 
-                    // Verify checksum
+                    // Verify checksum (fast, synchronous check for data corruption)
                     verification::verify_crc32(&chunk_msg.data, chunk_msg.checksum)?;
 
-                    // Decompress if needed
-                    // Check if chunk is actually compressed by comparing sizes
+                    // Start sending ACK immediately after verification (don't wait yet)
+                    use crate::protocol::AckStatus;
+                    let ack_future = self.send_ack(chunk_index, AckStatus::Success);
+
+                    // Do expensive operations (decompression, disk I/O) in parallel with ACK send
                     let is_compressed = chunk_msg.is_compressed();
                     let final_data = if is_compressed && decompressor.is_some() {
                         decompressor.as_mut().unwrap().decompress(&chunk_msg.data)?
@@ -795,7 +725,7 @@ impl<'a> FolderTransferSession<'a> {
                         chunk_msg.data
                     };
 
-                    // Write chunk
+                    // Write chunk (also updates running SHA256 checksum)
                     writer.write_chunk(chunk_index, &final_data).await?;
 
                     // Update progress with uncompressed size
@@ -804,9 +734,8 @@ impl<'a> FolderTransferSession<'a> {
                         progress.add_bytes(uncompressed_size);
                     }
 
-                    // Send ACK
-                    use crate::protocol::AckStatus;
-                    self.send_ack(chunk_index, AckStatus::Success).await?;
+                    // Ensure ACK send completed before processing next chunk
+                    ack_future.await?;
 
                     received += 1;
                 }
@@ -816,8 +745,57 @@ impl<'a> FolderTransferSession<'a> {
             }
         }
 
-        // Finalize file
-        writer.finalize().await?;
+        // Finalize file and get the computed checksum
+        let receiver_checksum = writer.finalize().await?;
+
+        // Send receiver's checksum first (same pattern as sender - both send, then both receive)
+        // This allows both messages to be "in flight" simultaneously, reducing latency
+        use crate::protocol::FileChecksumMessage;
+        let receiver_checksum_msg = FileChecksumMessage {
+            transfer_id: self.transfer_id,
+            file_index,
+            checksum: receiver_checksum,
+        };
+        self.connection
+            .send_message(&Message::FileChecksum(receiver_checksum_msg))
+            .await?;
+
+        // Now receive sender's checksum message (sender already sent it and is waiting for ours)
+        let msg = self.connection.recv_message().await?;
+        let sender_checksum = match msg {
+            Message::FileChecksum(checksum_msg) => {
+                if checksum_msg.file_index != file_index {
+                    return Err(Error::Protocol(format!(
+                        "File index mismatch: expected {}, got {}",
+                        file_index, checksum_msg.file_index
+                    )));
+                }
+                checksum_msg.checksum
+            }
+            _ => {
+                return Err(Error::Protocol(format!(
+                    "Expected FileChecksum, got {:?}",
+                    msg
+                )));
+            }
+        };
+
+        // Log the comparison result (for receiver's awareness)
+        if sender_checksum == receiver_checksum {
+            debug!(
+                "File {} checksum match: {:02x?}",
+                file_index,
+                &receiver_checksum[..8]
+            );
+        } else {
+            // Receiver logs mismatch, but sender will detect and handle the error
+            warn!(
+                "File {} checksum mismatch: sender={:02x?}, receiver={:02x?}",
+                file_index,
+                &sender_checksum[..8],
+                &receiver_checksum[..8]
+            );
+        }
 
         Ok(())
     }
@@ -845,11 +823,13 @@ impl<'a> FolderTransferSession<'a> {
     /// Scan a folder and build file metadata list
     async fn scan_folder(&self, folder_path: &Path) -> Result<Vec<(PathBuf, FileMetadata)>> {
         let mut files = Vec::new();
-        Self::scan_folder_recursive(folder_path, folder_path, &mut files).await?;
+        // Use parent as base so folder name is included in relative paths
+        let base_path = folder_path.parent().unwrap_or(folder_path);
+        Self::scan_folder_recursive(base_path, folder_path, &mut files).await?;
         Ok(files)
     }
 
-    /// Recursively scan a folder
+    /// Recursively scan a folder (only reads metadata, not file contents)
     fn scan_folder_recursive<'b>(
         base_path: &'b Path,
         current_path: &'b Path,
@@ -869,10 +849,8 @@ impl<'a> FolderTransferSession<'a> {
                         .map_err(|e| Error::Protocol(format!("Invalid path: {}", e)))?
                         .to_path_buf();
 
-                    // Read file for checksum
-                    let data = fs::read(&path).await?;
-                    let checksum = verification::sha256(&data);
-                    let size = data.len() as u64;
+                    // Only read metadata, not file content (checksum will be computed during transfer)
+                    let size = metadata.len();
 
                     // Get modified time
                     let modified = metadata
@@ -886,7 +864,7 @@ impl<'a> FolderTransferSession<'a> {
                         path: relative_path.to_string_lossy().to_string(),
                         size,
                         modified,
-                        checksum,
+                        checksum: [0u8; 32], // Placeholder - will be computed during transfer
                     };
 
                     files.push((relative_path, file_meta));

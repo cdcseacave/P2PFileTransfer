@@ -171,13 +171,13 @@ rcgen = "0.11"  # For self-signed cert generation
 **Example Usage**:
 ```bash
 # With TLS (default)
-p2p-transfer send file.zip --to 192.168.1.100:8080
+p2p-transfer send file.zip --peer 192.168.1.100:8080
 
 # Without TLS (for testing)
-p2p-transfer send file.zip --to 192.168.1.100:8080 --no-tls
+p2p-transfer send file.zip --peer 192.168.1.100:8080 --no-tls
 
 # With custom certificate
-p2p-transfer send file.zip --to 192.168.1.100:8080 --cert mycert.pem
+p2p-transfer send file.zip --peer 192.168.1.100:8080 --cert mycert.pem
 ```
 
 #### 2. Authentication (1.5 hours)
@@ -193,7 +193,7 @@ rand = "0.8"    # For token generation
 **A. Pre-shared Key (simple)**
 ```bash
 # Sender
-p2p-transfer send file.zip --to 192.168.1.100:8080 --password mysecret
+p2p-transfer send file.zip --peer 192.168.1.100:8080 --password mysecret
 
 # Receiver
 p2p-transfer receive ./downloads --port 8080 --password mysecret
@@ -268,13 +268,13 @@ p2p-transfer receive ./downloads --port 8080 --password mysecret
 **CLI Integration**:
 ```bash
 # Limit to 10 MB/s
-p2p-transfer send file.zip --to 192.168.1.100:8080 --max-speed 10M
+p2p-transfer send file.zip --peer 192.168.1.100:8080 --max-speed 10M
 
 # Limit to 1 GB/s
-p2p-transfer send file.zip --to 192.168.1.100:8080 --max-speed 1G
+p2p-transfer send file.zip --peer 192.168.1.100:8080 --max-speed 1G
 
 # Unlimited (default)
-p2p-transfer send file.zip --to 192.168.1.100:8080
+p2p-transfer send file.zip --peer 192.168.1.100:8080
 ```
 
 **Files Created/Modified**:
@@ -328,7 +328,7 @@ p2p-transfer nat-test --stun-server stun.example.com:3478
 p2p-transfer receive ./downloads --port 14567
 
 # Machine B (sender): Use Machine A's public IP from nat-test:
-p2p-transfer send file.zip --to 203.0.113.5
+p2p-transfer send file.zip --peer 203.0.113.5
 ```
 
 **Next Steps** (for full automatic hole punching):
@@ -354,10 +354,10 @@ p2p-transfer send file.zip --to 203.0.113.5
 **CLI Integration**:
 ```bash
 # Adaptive compression enabled by default
-p2p-transfer send file.zip --to 192.168.1.100:8080
+p2p-transfer send file.zip --peer 192.168.1.100:8080
 
 # Disable adaptive compression (always compress)
-p2p-transfer send file.zip --to 192.168.1.100:8080 --adaptive false
+p2p-transfer send file.zip --peer 192.168.1.100:8080 --adaptive false
 ```
 
 **Files Created/Modified**:

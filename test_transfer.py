@@ -97,9 +97,18 @@ def main():
     parser.add_argument('--window-size', type=int, default=8, help='Window size for parallel transfers (1 = sequential, default: 8)')
     parser.add_argument('--port', type=int, default=14567, help='Port to use for receiver and sender (default: 14567)')
     parser.add_argument('--verbosity', type=str, default='debug', help='Verbosity level: off, error, warn, info, debug, trace (default: debug)')
+    parser.add_argument('--test-reconnect', action='store_true', help='Test auto-reconnect by killing receiver mid-transfer')
+    parser.add_argument('--kill-delay', type=float, default=2.0, help='Seconds to wait before killing receiver (default: 2.0)')
+    parser.add_argument('--restart-delay', type=float, default=3.0, help='Seconds to wait before restarting receiver (default: 3.0)')
     args = parser.parse_args()
     
     print("=== P2P Transfer Test ===")
+    if args.test_reconnect:
+        print("Mode: AUTO-RECONNECT TEST")
+        print(f"  Will kill receiver after {args.kill_delay}s")
+        print(f"  Will restart receiver after {args.restart_delay}s")
+    else:
+        print("Mode: Normal transfer")
     if args.compressible:
         print("File type: Moderately compressible (~50% compression ratio)")
     else:
@@ -178,27 +187,97 @@ def main():
     # Track transfer time
     start_time = time.time()
     
-    try:
-        result = subprocess.run(
+    # Start sender in background if testing reconnect
+    if args.test_reconnect:
+        print()
+        print("Starting sender in background...")
+        sender_process = subprocess.Popen(
             sender_cmd,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             encoding='utf-8',
-            errors='replace',
-            timeout=30
+            errors='replace'
         )
-        sender_exit_code = result.returncode
-        elapsed_time = time.time() - start_time
         
-        # Print sender output for debugging
-        if result.stdout:
-            print(result.stdout)
-        if result.stderr:
-            print(result.stderr, file=sys.stderr)
+        # Wait for transfer to start
+        print(f"Waiting {args.kill_delay}s for transfer to start...")
+        time.sleep(args.kill_delay)
         
-    except subprocess.TimeoutExpired:
-        print("❌ Sender timed out after 30 seconds")
+        # Kill receiver to simulate connection loss
+        print("🔪 Killing receiver to simulate connection loss...")
         receiver_process.terminate()
-        sys.exit(1)
+        try:
+            receiver_process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            receiver_process.kill()
+            receiver_process.wait()
+        print("✓ Receiver killed")
+        
+        # Wait before restarting
+        print(f"Waiting {args.restart_delay}s before restarting receiver...")
+        time.sleep(args.restart_delay)
+        
+        # Restart receiver
+        print("🔄 Restarting receiver...")
+        receiver_process = subprocess.Popen(
+            receiver_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            encoding='utf-8',
+            errors='replace'
+        )
+        time.sleep(1)  # Give it time to start
+        
+        if receiver_process.poll() is not None:
+            print("❌ Receiver failed to restart")
+            sender_process.terminate()
+            sys.exit(1)
+        
+        print("✓ Receiver restarted")
+        print("Sender should auto-reconnect and resume...")
+        print()
+        
+        # Wait for sender to complete (with longer timeout for reconnect)
+        try:
+            sender_process.wait(timeout=60)
+            sender_exit_code = sender_process.returncode
+            elapsed_time = time.time() - start_time
+            
+            # Get sender output
+            stdout, stderr = sender_process.communicate(timeout=1)
+            if stdout:
+                print(stdout)
+            if stderr:
+                print(stderr, file=sys.stderr)
+                
+        except subprocess.TimeoutExpired:
+            print("❌ Sender timed out after 60 seconds")
+            sender_process.terminate()
+            receiver_process.terminate()
+            sys.exit(1)
+    else:
+        # Normal transfer (synchronous)
+        try:
+            result = subprocess.run(
+                sender_cmd,
+                capture_output=True,
+                encoding='utf-8',
+                errors='replace',
+                timeout=30
+            )
+            sender_exit_code = result.returncode
+            elapsed_time = time.time() - start_time
+            
+            # Print sender output for debugging
+            if result.stdout:
+                print(result.stdout)
+            if result.stderr:
+                print(result.stderr, file=sys.stderr)
+            
+        except subprocess.TimeoutExpired:
+            print("❌ Sender timed out after 30 seconds")
+            receiver_process.terminate()
+            sys.exit(1)
     
     # Wait a moment for receiver to finish
     time.sleep(1)

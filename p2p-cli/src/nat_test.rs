@@ -43,7 +43,7 @@ pub async fn handle_nat_test(stun_server: Option<String>) -> Result<()> {
                 }
                 NatType::Unknown => {
                     info!("❓ Could not determine NAT type.");
-                    info!("   Try using --to <address> for direct connections.");
+                    info!("   Try using --peer <address> for direct connections.");
                 }
             }
 

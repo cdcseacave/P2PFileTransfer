@@ -72,6 +72,7 @@ pub enum Message {
     Pause,
     Cancel,
     Complete(CompleteMessage),
+    FileChecksum(FileChecksumMessage),
     Error(ErrorMessage),
 
     // Keepalive
@@ -157,9 +158,15 @@ pub struct FileMetadata {
     pub size: u64,
     /// Last modified timestamp (Unix)
     pub modified: u64,
-    /// SHA256 checksum of entire file
+    /// SHA256 checksum of entire file (optional - computed during transfer for streaming)
     #[serde(with = "checksum_hex")]
+    #[serde(default = "default_checksum")]
     pub checksum: [u8; 32],
+}
+
+/// Default checksum value (all zeros) for when checksum is computed during transfer
+fn default_checksum() -> [u8; 32] {
+    [0u8; 32]
 }
 
 /// Resume point information
@@ -283,6 +290,21 @@ pub struct CompleteMessage {
     pub total_bytes: u64,
     /// Transfer duration in milliseconds
     pub duration_ms: u64,
+}
+
+/// File checksum message (bidirectional - sent by both sender and receiver)
+///
+/// Sender sends this with their computed checksum after completing file transfer.
+/// Receiver responds with their computed checksum, and sender compares them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileChecksumMessage {
+    /// Transfer identifier
+    pub transfer_id: Uuid,
+    /// File index
+    pub file_index: u32,
+    /// SHA256 checksum of the complete file
+    #[serde(with = "checksum_hex")]
+    pub checksum: [u8; 32],
 }
 
 /// Error message

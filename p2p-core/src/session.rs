@@ -45,10 +45,10 @@ use crate::{
     network::tcp::{TcpConnection, TcpServer},
     progress::ProgressState,
     protocol::{Capabilities, ConfigMessage},
-    transfer_folder::{FolderTransferSession, FolderTransferState, StateCallback},
+    transfer_folder::{FolderTransferSession, FolderTransferState},
 };
 use std::{net::SocketAddr, path::Path};
-use tracing::{debug, info, trace};
+use tracing::{debug, info, trace, warn};
 use uuid::Uuid;
 
 /// P2P session representing an established connection between two peers
@@ -381,18 +381,16 @@ impl P2PSession {
     /// # Arguments
     ///
     /// * `path` - Path to file or folder to send
-    /// * `progress_callback` - Optional callback for progress updates (per-file granularity)
-    /// * `state_callback` - Optional callback for state updates (for auto-save functionality)
+    /// * `progress` - Optional progress state for unified progress tracking
     /// * `reconnect_config` - Configuration for auto-reconnect behavior (max attempts, backoff timing)
-    /// * `state_path` - Optional path to save/load transfer state for manual resume
-    /// * `state_provider` - Optional closure to provide in-memory state for automatic resume
+    /// * `state_path` - Optional path to save/load transfer state for chunk-level resume
     ///
     /// # Features
     /// - Supports both single files and recursive folder transfers
     /// - Automatic resume from interruptions (chunk-level granularity)
     /// - Auto-reconnect with exponential backoff on transient failures
-    /// - Progress callbacks for UI updates
-    /// - State persistence for manual resume after failures
+    /// - Progress tracking for UI updates
+    /// - State persistence for automatic chunk-level resume after connection loss
     ///
     /// # Example
     ///
@@ -412,11 +410,9 @@ impl P2PSession {
     ///
     /// session.send_path(
     ///     Path::new("/path/to/file.zip"),
-    ///     None,  // progress_callback
-    ///     None,  // state_callback
     ///     &reconnect_config,
     ///     Some(&state_path),
-    ///     None,  // state_provider
+    ///     None,  // progress
     /// ).await?;
     /// # Ok(())
     /// # }
@@ -424,12 +420,12 @@ impl P2PSession {
     pub async fn send_path(
         &mut self,
         path: &Path,
-        progress: Option<&mut ProgressState>,
-        state_callback: Option<StateCallback>,
         reconnect_config: &crate::reconnect::ReconnectConfig,
         state_path: Option<&Path>,
-        state_provider: Option<Box<dyn Fn() -> Option<FolderTransferState> + Send>>,
+        mut progress: Option<&mut ProgressState>,
     ) -> Result<()> {
+        use crate::reconnect::is_transient_error;
+
         if !path.exists() {
             return Err(Error::Protocol(format!(
                 "Path does not exist: {}",
@@ -437,30 +433,168 @@ impl P2PSession {
             )));
         }
 
-        let transfer_id = Uuid::new_v4();
+        let mut attempt = 0;
 
-        let mut session = FolderTransferSession::new(
-            &mut self.connection,
-            self.handshake.config.clone(),
-            transfer_id,
-        );
+        // Create or load state (empty state for fresh transfers, loaded state for resume)
+        let mut state = if let Some(state_file) = state_path {
+            if state_file.exists() {
+                info!("Loading existing transfer state from {:?}", state_file);
+                match FolderTransferState::load_from_file(state_file).await {
+                    Ok(loaded_state) => {
+                        info!(
+                            "Loaded state: {} files total, {} completed ({:.1}% done)",
+                            loaded_state.files.len(),
+                            loaded_state.completed_files.len(),
+                            loaded_state.progress_percentage()
+                        );
+                        loaded_state
+                    }
+                    Err(e) => {
+                        warn!("Failed to load state file: {}", e);
+                        // Create empty state (will be initialized during send())
+                        FolderTransferState::new(Uuid::new_v4(), String::new(), vec![])
+                    }
+                }
+            } else {
+                // No state file, create empty state
+                FolderTransferState::new(Uuid::new_v4(), String::new(), vec![])
+            }
+        } else {
+            // No state path provided, create empty state
+            FolderTransferState::new(Uuid::new_v4(), String::new(), vec![])
+        };
 
-        if let Some(callback) = state_callback {
-            session.set_state_callback(callback);
+        // Use transfer_id from state if it exists, or create new one
+        let transfer_id = if state.files.is_empty() {
+            Uuid::new_v4()
+        } else {
+            state.transfer_id
+        };
+
+        if !state.files.is_empty() {
+            info!("Resuming transfer with ID: {}", transfer_id);
+        } else {
+            info!("Starting new transfer with ID: {}", transfer_id);
         }
 
-        session
-            .send_folder(
-                path,
-                reconnect_config,
-                state_path,
-                state_provider,
-                None, // existing_state - None for new transfers
-                progress,
-            )
-            .await?;
+        loop {
+            let result = {
+                let mut folder_session = FolderTransferSession::new(
+                    &mut self.connection,
+                    self.handshake.config.clone(),
+                    transfer_id,
+                );
 
-        Ok(())
+                let attempt_type = if !state.files.is_empty() && !state.completed_files.is_empty() {
+                    "resume"
+                } else {
+                    "send"
+                };
+                debug!(
+                    "Attempting {} (attempt {}/{})",
+                    attempt_type,
+                    attempt + 1,
+                    if reconnect_config.max_attempts == 0 {
+                        "∞".to_string()
+                    } else {
+                        reconnect_config.max_attempts.to_string()
+                    }
+                );
+
+                // Use the unified send() method with mutable state
+                folder_session
+                    .send(path, &mut state, progress.as_deref_mut())
+                    .await
+            };
+
+            match result {
+                Ok(_) => {
+                    // Clean up state file on success
+                    if let Some(state_file) = state_path {
+                        if state_file.exists() {
+                            let _ = tokio::fs::remove_file(state_file).await;
+                        }
+                    }
+                    return Ok(());
+                }
+                Err(e) => {
+                    // Check if error is transient
+                    if !is_transient_error(&e) {
+                        warn!("Non-transient error, not retrying: {}", e);
+                        // Save state to disk for manual resume
+                        if let Some(state_file) = state_path {
+                            let _ = state.save_to_file(state_file).await;
+                            info!("Saved state to disk for manual resume");
+                        }
+                        return Err(e);
+                    }
+
+                    // Check if we should retry
+                    if !reconnect_config.should_retry(attempt) {
+                        warn!(
+                            "Max reconnection attempts ({}) reached",
+                            reconnect_config.max_attempts
+                        );
+                        // Save state to disk for manual resume
+                        if let Some(state_file) = state_path {
+                            let _ = state.save_to_file(state_file).await;
+                            info!("Saved state to disk after max retries");
+                        }
+                        return Err(Error::Protocol(format!(
+                            "Transfer failed after {} attempts: {}",
+                            attempt + 1,
+                            e
+                        )));
+                    }
+
+                    // Calculate backoff delay
+                    let delay = reconnect_config.backoff_delay(attempt);
+                    warn!(
+                        "Transient error occurred (attempt {}/{}): {}. Retrying in {:?}...",
+                        attempt + 1,
+                        if reconnect_config.max_attempts == 0 {
+                            "∞".to_string()
+                        } else {
+                            reconnect_config.max_attempts.to_string()
+                        },
+                        e,
+                        delay
+                    );
+
+                    // Save current state to disk before attempting reconnection
+                    // This captures all completed chunks in memory at the moment of disconnection
+                    if let Some(state_file) = state_path {
+                        if let Err(save_err) = state.save_to_file(state_file).await {
+                            warn!("Failed to save state to disk: {}", save_err);
+                        } else {
+                            debug!("Saved current state to disk for chunk-level resume");
+                        }
+                    }
+
+                    // State is already up-to-date in memory (chunks were marked complete during transfer)
+                    // No need to reload - just use the existing state for retry
+
+                    // Wait before retrying
+                    tokio::time::sleep(delay).await;
+
+                    // Re-establish connection before retry
+                    info!("Re-establishing connection...");
+                    match self.reconnect().await {
+                        Ok(_) => {
+                            info!("Connection re-established successfully");
+                        }
+                        Err(reconnect_err) => {
+                            warn!("Failed to reconnect: {}", reconnect_err);
+                            attempt += 1;
+                            continue;
+                        }
+                    }
+
+                    attempt += 1;
+                    info!("Retrying transfer after backoff delay...");
+                }
+            }
+        }
     }
 
     /// Receive a file or folder from the peer
@@ -599,6 +733,52 @@ impl P2PSession {
                 }
             }
         }
+    }
+
+    // ============================================================================
+    // Connection Management
+    // ============================================================================
+
+    /// Reconnect to the peer after connection loss
+    ///
+    /// This re-establishes the TCP connection and performs handshake again.
+    /// Only works for client (initiator) sessions - server sessions can't reconnect.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` if reconnection successful, `Err` otherwise.
+    pub async fn reconnect(&mut self) -> Result<()> {
+        // Only clients can reconnect (they know the peer address)
+        if self.connection_role != ConnectionRole::Initiator {
+            return Err(Error::Protocol(
+                "Only client sessions can reconnect".to_string(),
+            ));
+        }
+
+        let peer_addr = self.connection.peer_addr();
+        info!("Attempting to reconnect to {}", peer_addr);
+
+        // Establish new TCP connection
+        let mut new_connection = TcpConnection::connect(peer_addr).await?;
+        trace!("TCP connection re-established");
+
+        // Perform handshake again
+        let handshake_client =
+            HandshakeClient::new(self.device_id, self.handshake.agreed_capabilities);
+        let handshake = handshake_client
+            .perform_handshake(&mut new_connection, self.handshake.config.clone())
+            .await?;
+
+        info!(
+            "Reconnection successful (peer: {}, capabilities: {:?})",
+            handshake.peer_device_id, handshake.agreed_capabilities
+        );
+
+        // Replace old connection with new one
+        self.connection = new_connection;
+        self.handshake = handshake;
+
+        Ok(())
     }
 
     // ============================================================================

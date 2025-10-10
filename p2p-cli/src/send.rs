@@ -4,7 +4,6 @@ use anyhow::Result;
 use p2p_core::{
     protocol::{Capabilities, ConfigMessage},
     session::P2PSession,
-    transfer_folder::FolderTransferState,
     Uuid,
 };
 use std::path::{Path, PathBuf};
@@ -85,18 +84,7 @@ pub async fn handle_send(
             Err(anyhow::anyhow!("Transfer interrupted by user (Ctrl+C)"))
         }
     };
-
-    match result {
-        Ok(_) => {
-            info!("✅ Transfer complete!");
-            Ok(())
-        }
-        Err(e) => {
-            warn!("⚠️  Transfer interrupted: {}", e);
-            info!("  State has been saved. Use 'p2p-transfer resume <transfer-id>' to continue");
-            Err(e)
-        }
-    }
+    result
 }
 
 async fn send(
@@ -132,24 +120,14 @@ async fn send(
         info!("   Auto-reconnect: enabled (max {} retries)", max_retries);
     }
 
-    // Generate transfer ID for this operation
+    // Generate transfer ID for this operation (or use existing one from state file)
     let transfer_id = Uuid::new_v4();
 
     // Create state file path
     let state_file = PathBuf::from(format!("transfer_{}.json", transfer_id));
 
-    // Keep state in memory using Arc<Mutex> for thread-safe access
-    let current_state = std::sync::Arc::new(std::sync::Mutex::new(None::<FolderTransferState>));
     // Create progress state for unified progress tracking
     let mut progress = p2p_core::progress::ProgressState::new(0);
-
-    // Create state callback to update in-memory state
-    let current_state_for_callback = current_state.clone();
-    let state_callback = Box::new(move |state: &FolderTransferState| {
-        if let Ok(mut guard) = current_state_for_callback.lock() {
-            *guard = Some(state.clone());
-        }
-    });
 
     // Configure reconnection behavior
     let reconnect_config = p2p_core::reconnect::ReconnectConfig {
@@ -159,62 +137,34 @@ async fn send(
         exponential: true,
     };
 
-    // Create state provider closure that reads from in-memory state
-    let state_for_reconnect = current_state.clone();
-    let state_provider = Box::new(move || {
-        state_for_reconnect
-            .lock()
-            .ok()
-            .and_then(|guard| guard.clone())
-    });
-
-    // Send file or folder with state tracking (unified method)
+    // Send file or folder (state is managed internally by session)
     let result = session
         .send_path(
             path,
-            Some(&mut progress),
-            Some(state_callback),
             &reconnect_config,
             Some(&state_file),
-            Some(state_provider),
+            Some(&mut progress),
         )
         .await;
 
     match result {
         Ok(_) => {
-            // Success - save state if debug/trace mode is enabled (for debugging/analysis)
-            if tracing::level_enabled!(tracing::Level::DEBUG) {
-                let state_to_save = current_state.lock().ok().and_then(|guard| guard.clone());
-                if let Some(state) = state_to_save {
-                    if let Err(save_err) = state.save_to_file(&state_file).await {
-                        warn!("  ⚠️  Failed to save state (debug): {}", save_err);
-                    } else {
-                        info!("  📝 State saved to: {} (debug mode)", state_file.display());
-                    }
-                }
-            } else {
-                // Clean up any old state file
-                if state_file.exists() {
-                    let _ = tokio::fs::remove_file(&state_file).await;
-                }
+            // Success - clean up state file (already done by send_path)
+            if state_file.exists() {
+                let _ = tokio::fs::remove_file(&state_file).await;
             }
             info!("✅ Transfer complete!");
             Ok(())
         }
         Err(e) => {
-            // Error - save current state to disk for resume
-            // Clone state before dropping the lock to avoid holding across await
-            let state_to_save = current_state.lock().ok().and_then(|guard| guard.clone());
-
-            if let Some(state) = state_to_save {
-                if let Err(save_err) = state.save_to_file(&state_file).await {
-                    warn!("  ⚠️  Failed to save state: {}", save_err);
-                } else {
-                    info!(
-                        "  ⚠️  Transfer interrupted, state saved to: {}",
-                        state_file.display()
-                    );
-                }
+            // Error - state was already saved by send_path for resume
+            if state_file.exists() {
+                warn!("  ⚠️  Transfer interrupted after {} attempts", max_retries);
+                warn!("  📝 State saved to: {}", state_file.display());
+                warn!(
+                    "  💡 Resume with: p2p-transfer resume {}",
+                    state_file.display()
+                );
             }
             Err(e.into())
         }

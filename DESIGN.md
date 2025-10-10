@@ -510,7 +510,7 @@ With session foundation in place:
 1. **Multiple Operations** (CLI):
    ```bash
    # Future: Interactive mode
-   p2p-transfer interactive --to host:port
+   p2p-transfer interactive --peer host:port
    > send file1.zip
    > send file2.pdf
    > receive
@@ -903,7 +903,7 @@ tokio::select! {
 
 **CLI Command**:
 ```bash
-p2p-transfer resume <TRANSFER_ID> --to <ADDRESS> --path <FOLDER>
+p2p-transfer resume <TRANSFER_ID> --peer <ADDRESS> --path <FOLDER>
 ```
 
 **Resume Flow**:
@@ -1027,13 +1027,13 @@ connection.send_message(&chunk_msg).await?;
 **CLI Integration**:
 ```bash
 # Limit to 10 MB/s
-p2p-transfer send file.zip --to 192.168.1.100:8080 --max-speed 10M
+p2p-transfer send file.zip --peer 192.168.1.100:8080 --max-speed 10M
 
 # Limit to 1 GB/s  
-p2p-transfer send file.zip --to 192.168.1.100:8080 --max-speed 1G
+p2p-transfer send file.zip --peer 192.168.1.100:8080 --max-speed 1G
 
 # Unlimited (default)
-p2p-transfer send file.zip --to 192.168.1.100:8080
+p2p-transfer send file.zip --peer 192.168.1.100:8080
 ```
 
 **Format Parsing**:
@@ -1742,16 +1742,16 @@ impl TransferHistory {
 **CLI Usage**:
 ```bash
 # Send with auto-reconnect enabled (default)
-p2p-transfer send file.zip --to 192.168.1.100:7778
+p2p-transfer send file.zip --peer 192.168.1.100:7778
 
 # Disable auto-reconnect
-p2p-transfer send file.zip --to 192.168.1.100:7778 --auto-reconnect false
+p2p-transfer send file.zip --peer 192.168.1.100:7778 --auto-reconnect false
 
 # Unlimited retries
-p2p-transfer send folder/ --to 192.168.1.100:7778 --max-retries 0
+p2p-transfer send folder/ --peer 192.168.1.100:7778 --max-retries 0
 
 # Custom retry limit
-p2p-transfer send large_folder/ --to 192.168.1.100:7778 --max-retries 10
+p2p-transfer send large_folder/ --peer 192.168.1.100:7778 --max-retries 10
 ```
 
 **Implementation**:

@@ -8,6 +8,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Chunk-level resume** (2025-10-10): Transfer now resumes from exact chunk where interrupted, not from beginning
+  - Chunk completions tracked in memory during transfer
+  - State automatically saved to disk when connection error detected (before reconnection attempt)
+  - On reconnection, transfer skips already-completed chunks
+  - Works with both sequential and windowed transfer modes
+  - Significantly reduces retry overhead for interrupted large file transfers
+  - No user intervention required - automatic with auto-reconnect feature
+
+### Changed
+- **Streaming checksum computation** (2025-10-09): Files are no longer read fully into memory for checksums
+  - File scanning now only reads metadata (size, modified time), not file contents
+  - SHA256 checksums computed incrementally during transfer (as chunks are read/written)
+  - Added `FileChecksumMessage` for bidirectional checksum exchange after each file
+  - Removed redundant `matches` field - sender compares checksums locally
+  - Unified checksum protocol to single message type (removed `ChecksumAckMessage`)
+  - Receiver computes SHA256 incrementally and verifies against sender's checksum
+  - Significantly reduces memory usage for large files
+  - Maintains same security guarantees (CRC32 per chunk + SHA256 per file)
+- **Optimized chunk ACK latency** (2025-10-09): Chunk acknowledgments now sent in parallel with I/O operations
+  - Receiver sends ACK immediately after CRC32 verification (before decompression and disk write)
+  - Decompression and disk write happen in parallel with ACK network transmission
+  - Reduces per-chunk round-trip latency, especially on high-latency networks
+  - Improves throughput for sequential transfer mode
+- **Optimized checksum exchange** (2025-10-09): Both peers send checksums simultaneously
+  - Sender and receiver both send first, then receive (symmetric pattern)
+  - Both checksum messages "in flight" simultaneously, reducing latency
+  - Minimizes round-trip delay for file verification
+- **Auto-reconnect at session level** (2025-10-09): Connection re-establishment now handled by P2PSession
+  - Added `P2PSession::reconnect()` method to re-establish connection after failure
+  - Retry logic moved from `FolderTransferSession` to `P2PSession::send_path()`
+  - Session automatically reconnects and retries on transient errors (broken pipe, connection reset)
+  - Supports exponential backoff with configurable max attempts (default: 5 retries)
+  - File-level resume: Skips already-completed files in folder transfers
+  - Note: Chunk-level resume within a file not yet implemented (file restarts if interrupted mid-transfer)
+  - Only client (initiator) sessions support reconnection (server sessions can't reconnect)
+  - Removed deprecated `FolderTransferSession::send_folder()` method (use `P2PSession::send_path()` instead)
+  - Updated `resume` command to use `P2PSession::send_path()` for proper reconnection support
+- **Reconnect test mode** (2025-10-09): Added `--test-reconnect` flag to test_transfer.py
+  - Automatically kills receiver mid-transfer to test auto-reconnect
+  - Configurable kill and restart delays
+  - Verifies sender automatically reconnects and completes transfer
+  - Implement test in `test_transfer.py`, for ex: `python3 test_transfer.py --size 30 --max-speed 2MB --compressible --test-reconnect --kill-delay 3 --restart-delay 2`
+
+### Added
 - **Bidirectional session support** (2025-10-06): CLI can now act as both client and server
   - Added `SessionParams` struct with `--role`, `--peer`, `--port`, and `--discover` parameters
   - Added `TransferParams` struct for common transfer configuration

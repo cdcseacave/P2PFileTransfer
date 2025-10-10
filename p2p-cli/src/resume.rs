@@ -2,10 +2,9 @@
 
 use anyhow::Result;
 use p2p_core::{
-    handshake::HandshakeClient,
-    network::tcp::TcpConnection,
     protocol::{Capabilities, ConfigMessage},
-    transfer_folder::{FolderTransferSession, FolderTransferState},
+    session::P2PSession,
+    transfer_folder::FolderTransferState,
     Uuid,
 };
 use std::{net::SocketAddr, path::PathBuf};
@@ -48,43 +47,17 @@ pub async fn handle_resume(transfer_id: String, to: String, path: PathBuf) -> Re
     // Parse peer address
     let peer_addr = to.parse::<SocketAddr>()?;
 
-    // Connect to peer
+    // Connect to peer and establish session
     info!("  Reconnecting to peer...");
-    let mut connection = TcpConnection::connect(peer_addr).await?;
-
-    // Perform handshake (use same config as original transfer)
-    info!("  Performing handshake...");
     let device_id = Uuid::new_v4();
     let capabilities = Capabilities::all();
-    let handshake = HandshakeClient::new(device_id, capabilities);
 
     // Use default config for resume (should match original)
     // TODO: restore compression_level, window_size, bandwidth_limit from state
     let config = ConfigMessage::default();
 
-    let handshake_result = handshake
-        .perform_handshake(&mut connection, config.clone())
-        .await?;
-    info!(
-        "  ✓ Handshake complete (capabilities: {:?})",
-        handshake_result.agreed_capabilities
-    );
-
-    // Create session and set up callbacks
-    let mut session =
-        FolderTransferSession::new(&mut connection, config.clone(), state.transfer_id);
-
-    // Set up state callback for auto-save
-    let state_file_clone = state_path.clone();
-    session.set_state_callback(Box::new(move |state: &FolderTransferState| {
-        let state_clone = state.clone();
-        let path_clone = state_file_clone.clone();
-        tokio::spawn(async move {
-            if let Err(e) = state_clone.save_to_file(&path_clone).await {
-                warn!("⚠️  Failed to save state: {}", e);
-            }
-        });
-    }));
+    let mut session = P2PSession::connect(peer_addr, device_id, capabilities, config).await?;
+    info!("  ✓ Session established");
 
     // Create progress state for unified progress tracking
     // Initialize with already completed bytes for resume
@@ -95,16 +68,16 @@ pub async fn handle_resume(transfer_id: String, to: String, path: PathBuf) -> Re
     // Resume transfer with signal handling
     info!("📁 Resuming folder transfer...");
 
-    // Use the unified send_folder method with existing state
+    // Single attempt reconnection config for manual resume (user can run resume command again if needed)
     let reconnect_config = p2p_core::reconnect::ReconnectConfig {
-        max_attempts: 1, // Single attempt, no auto-reconnect for manual resume command
+        max_attempts: 1,
         initial_backoff_secs: 3,
         max_backoff_secs: 180,
         exponential: true,
     };
 
     tokio::select! {
-        result = session.send_folder(&path, &reconnect_config, Some(&state_path), None, Some(&state), Some(&mut progress)) => {
+        result = session.send_path(&path, &reconnect_config, Some(&state_path), Some(&mut progress)) => {
             result?;
             let _ = tokio::fs::remove_file(&state_path).await;
             info!("✅ Transfer resumed and completed!");
@@ -112,7 +85,7 @@ pub async fn handle_resume(transfer_id: String, to: String, path: PathBuf) -> Re
         }
         _ = signal::ctrl_c() => {
             warn!("⚠️  Transfer interrupted again. State has been saved.");
-            info!("  Use 'p2p-transfer resume {} --to {} --path {}' to continue",
+            info!("  Use 'p2p-transfer resume {} --peer {} --path {}' to continue",
                 transfer_id, to, path.display());
             return Ok(());
         }

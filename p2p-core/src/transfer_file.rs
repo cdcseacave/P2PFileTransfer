@@ -19,6 +19,7 @@ use crate::{
     verification,
     window::{InFlightChunk, SlidingWindow, WindowConfig},
 };
+use sha2::Digest;
 use std::{
     io::SeekFrom,
     path::{Path, PathBuf},
@@ -79,11 +80,16 @@ impl<'a> FileTransferSession<'a> {
     ///
     /// This method sends a file chunk-by-chunk with acknowledgment after each chunk.
     /// It supports automatic resume by skipping already-completed chunks.
+    /// The file's SHA256 checksum is computed incrementally during the transfer.
     ///
     /// # Arguments
     /// * `path` - Path to the file to send
     /// * `completed_chunks` - Slice of chunk indices that have already been transferred (empty for new transfers)
+    /// * `chunk_complete_callback` - Optional boxed closure invoked after each chunk is successfully acknowledged
     /// * `progress` - Optional progress state for unified progress tracking
+    ///
+    /// # Returns
+    /// The SHA256 checksum of the complete file
     ///
     /// # Features
     /// - Sequential chunk transfer with per-chunk acknowledgment
@@ -91,12 +97,18 @@ impl<'a> FileTransferSession<'a> {
     /// - Optional compression with adaptive detection
     /// - CRC32 checksum verification per chunk
     /// - Bandwidth throttling support
-    pub async fn send_file(
+    /// - Streaming SHA256 computation (no full file read required)
+    /// - Chunk completion tracking for incremental state saving
+    pub async fn send_file<F>(
         &mut self,
         path: &Path,
         completed_chunks: &[u64],
+        mut chunk_complete_callback: Option<F>,
         mut progress: Option<&mut ProgressState>,
-    ) -> Result<()> {
+    ) -> Result<[u8; 32]>
+    where
+        F: FnMut(u64),
+    {
         debug!("Starting file send: {:?}", path);
 
         let mut reader = ChunkReader::new(path, self.config.chunk_size as usize).await?;
@@ -131,7 +143,7 @@ impl<'a> FileTransferSession<'a> {
                 trace!("Skipping already completed chunk {}", chunk_index);
                 continue;
             }
-            // Read chunk
+            // Read chunk (this also updates the running SHA256 checksum)
             let chunk_data = reader.read_chunk(chunk_index).await?;
             let uncompressed_size = chunk_data.len() as u64;
 
@@ -193,23 +205,35 @@ impl<'a> FileTransferSession<'a> {
                 progress.add_bytes(uncompressed_size);
             }
 
+            // Notify callback that chunk completed successfully
+            if let Some(ref mut callback) = chunk_complete_callback {
+                callback(chunk_index as u64);
+            }
+
             trace!("Sent chunk {}/{}", chunk_index + 1, total_chunks);
         }
 
-        debug!("File transfer complete");
-        Ok(())
+        // Finalize and get the SHA256 checksum
+        let checksum = reader.finalize_checksum();
+        debug!("File transfer complete, SHA256: {:02x?}", &checksum[..8]);
+        Ok(checksum)
     }
 
     /// Sends a file to the peer using the sliding window protocol for high performance.
     ///
     /// This method sends multiple chunks in parallel without waiting for individual acknowledgments,
     /// providing 5-15x speedup on high-latency networks. It supports automatic resume by skipping
-    /// already-completed chunks.
+    /// already-completed chunks. The file's SHA256 checksum is computed incrementally during the transfer.
     ///
     /// # Arguments
     /// * `path` - Path to the file to send
     /// * `window_config` - Window configuration (max window size, timeout, retries)
     /// * `completed_chunks` - Slice of chunk indices that have already been transferred (empty for new transfers)
+    /// * `chunk_complete_callback` - Optional boxed closure invoked after each chunk is successfully acknowledged
+    /// * `progress` - Optional progress state for unified progress tracking
+    ///
+    /// # Returns
+    /// The SHA256 checksum of the complete file
     ///
     /// # Features
     /// - Parallel chunk transfer with sliding window flow control
@@ -218,17 +242,23 @@ impl<'a> FileTransferSession<'a> {
     /// - Optional compression with adaptive detection
     /// - CRC32 checksum verification per chunk
     /// - Bandwidth throttling support
+    /// - Streaming SHA256 computation (no full file read required)
+    /// - Chunk completion tracking for incremental state saving
     ///
     /// # Performance
     /// The sliding window protocol significantly improves transfer speed on networks with
     /// high latency by keeping the pipeline full with in-flight chunks.
-    pub async fn send_file_windowed(
+    pub async fn send_file_windowed<F>(
         &mut self,
         path: &Path,
         window_config: &WindowConfig,
         completed_chunks: &[u64],
+        mut chunk_complete_callback: Option<F>,
         mut progress: Option<&mut ProgressState>,
-    ) -> Result<()> {
+    ) -> Result<[u8; 32]>
+    where
+        F: FnMut(u64),
+    {
         debug!("Starting windowed file send: {:?}", path);
 
         let mut reader = ChunkReader::new(path, self.config.chunk_size as usize).await?;
@@ -351,8 +381,14 @@ impl<'a> FileTransferSession<'a> {
             // Phase 2: Try to receive ACKs (with short timeout to not block)
             match timeout(Duration::from_millis(50), self.connection.recv_message()).await {
                 Ok(Ok(Message::ChunkAck(ack))) if ack.status == AckStatus::Success => {
-                    window.process_ack(ack.chunk_index as u32);
-                    trace!("ACK received for chunk {}", ack.chunk_index);
+                    let chunk_idx = ack.chunk_index;
+                    window.process_ack(chunk_idx as u32);
+                    trace!("ACK received for chunk {}", chunk_idx);
+
+                    // Notify callback that chunk completed successfully
+                    if let Some(ref mut callback) = chunk_complete_callback {
+                        callback(chunk_idx);
+                    }
                 }
                 Ok(Ok(_)) => {
                     // Other message type, ignore
@@ -426,13 +462,17 @@ impl<'a> FileTransferSession<'a> {
             }
         }
 
-        Ok(())
+        // Finalize and get the SHA256 checksum
+        let checksum = reader.finalize_checksum();
+        debug!("File transfer complete, SHA256: {:02x?}", &checksum[..8]);
+        Ok(checksum)
     }
 
-    /// Receive a file from the peer
+    /// Receive a file from the peer and compute SHA256 checksum incrementally.
     ///
     /// The total number of chunks is determined from the first chunk message received.
-    pub async fn receive_file(&mut self, output_path: &Path) -> Result<()> {
+    /// Returns the computed SHA256 checksum for verification.
+    pub async fn receive_file(&mut self, output_path: &Path) -> Result<[u8; 32]> {
         debug!("Starting file receive: {:?}", output_path);
 
         let mut writer = ChunkWriter::new(output_path, self.config.chunk_size as usize).await?;
@@ -475,6 +515,7 @@ impl<'a> FileTransferSession<'a> {
                     } else {
                         chunk_msg.data
                     };
+                    // Write chunk also updates the running SHA256 checksum
                     writer.write_chunk(chunk_index, &final_data).await?;
                     received += 1;
 
@@ -496,11 +537,11 @@ impl<'a> FileTransferSession<'a> {
             }
         }
 
-        // Finalize file
-        writer.finalize().await?;
+        // Finalize file and get the computed checksum
+        let checksum = writer.finalize().await?;
 
-        debug!("File receive complete");
-        Ok(())
+        debug!("File receive complete, SHA256: {:02x?}", &checksum[..8]);
+        Ok(checksum)
     }
 
     /// Receive a chunk acknowledgment
@@ -537,12 +578,13 @@ impl<'a> FileTransferSession<'a> {
     }
 }
 
-/// Chunk-based file reader
+/// Chunk-based file reader with streaming checksum computation
 pub struct ChunkReader {
     file: File,
     chunk_size: usize,
     total_chunks: u32,
     file_size: u64,
+    hasher: sha2::Sha256,
 }
 
 impl ChunkReader {
@@ -564,6 +606,7 @@ impl ChunkReader {
             chunk_size,
             total_chunks,
             file_size,
+            hasher: sha2::Sha256::new(),
         })
     }
 
@@ -572,7 +615,7 @@ impl ChunkReader {
         self.total_chunks
     }
 
-    /// Read a specific chunk
+    /// Read a specific chunk and update running checksum
     pub async fn read_chunk(&mut self, index: u32) -> Result<Vec<u8>> {
         let offset = index as u64 * self.chunk_size as u64;
         self.file.seek(SeekFrom::Start(offset)).await?;
@@ -583,15 +626,26 @@ impl ChunkReader {
         let mut buffer = vec![0u8; to_read];
         self.file.read_exact(&mut buffer).await?;
 
+        // Update running checksum
+        use sha2::Digest;
+        self.hasher.update(&buffer);
+
         Ok(buffer)
+    }
+
+    /// Finalize and return the SHA256 checksum
+    pub fn finalize_checksum(self) -> [u8; 32] {
+        use sha2::Digest;
+        self.hasher.finalize().into()
     }
 }
 
-/// Chunk-based file writer
+/// Chunk-based file writer with streaming checksum computation
 pub struct ChunkWriter {
     file: File,
     path: PathBuf,
     chunk_size: usize,
+    hasher: sha2::Sha256,
 }
 
 impl ChunkWriter {
@@ -618,15 +672,19 @@ impl ChunkWriter {
             file,
             path: path.to_path_buf(), // Store original path
             chunk_size,
+            hasher: sha2::Sha256::new(),
         })
     }
 
-    /// Write a chunk at the specified index
+    /// Write a chunk at the specified index and update running checksum
     pub async fn write_chunk(&mut self, index: u32, data: &[u8]) -> Result<()> {
         let offset = index as u64 * self.chunk_size as u64;
         self.file.seek(SeekFrom::Start(offset)).await?;
         self.file.write_all(data).await?;
         self.file.flush().await?;
+
+        // Update running checksum
+        self.hasher.update(data);
 
         Ok(())
     }
@@ -638,11 +696,14 @@ impl ChunkWriter {
         PathBuf::from(partial_path)
     }
 
-    /// Finalize the file (remove .partial suffix)
-    pub async fn finalize(self) -> Result<()> {
+    /// Finalize the file (remove .partial suffix) and return the computed checksum
+    pub async fn finalize(self) -> Result<[u8; 32]> {
         // Compute paths before consuming self
         let partial_path = self.partial_path();
         let final_path = self.path.clone();
+
+        // Finalize checksum before moving file handle
+        let checksum: [u8; 32] = self.hasher.finalize().into();
 
         // Ensure all data is written
         self.file.sync_all().await?;
@@ -652,7 +713,7 @@ impl ChunkWriter {
         tokio::fs::rename(&partial_path, &final_path).await?;
 
         info!("File finalized: {:?}", final_path);
-        Ok(())
+        Ok(checksum)
     }
 }
 
