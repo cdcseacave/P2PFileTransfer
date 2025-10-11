@@ -62,46 +62,95 @@ fn init_logging(verbosity: &str) {
         .try_init();
 }
 
-pub async fn run_cli() -> Result<()> {
+/// Entry point for CLI - checks if GUI mode should be used before entering async context
+pub fn run_cli_sync() -> Result<()> {
     let cli = Cli::parse();
 
     // Initialize logging
     init_logging(&cli.verbosity);
 
+    // Check if we should run GUI mode (no command or explicit gui command)
+    // GUI must be run outside of async context to avoid nested runtime issues
+    #[cfg(feature = "gui")]
+    {
+        match &cli.command {
+            None | Some(cli::Commands::Gui) => {
+                // Launch GUI in blocking mode (it has its own Tokio runtime via Iced)
+                return p2p_gui::run_gui();
+            }
+            _ => {
+                // Continue to async CLI commands
+            }
+        }
+    }
+
+    #[cfg(not(feature = "gui"))]
+    {
+        if cli.command.is_none() {
+            eprintln!("GUI not available. This binary was built without GUI support.");
+            eprintln!("To use GUI, rebuild with: cargo build --release --features full");
+            eprintln!("\nAvailable CLI commands:");
+            eprintln!("  p2p-transfer send <PATH> --peer <IP:PORT>");
+            eprintln!("  p2p-transfer receive --output <DIR>");
+            eprintln!("  p2p-transfer discover");
+            eprintln!("  p2p-transfer --help");
+            std::process::exit(1);
+        }
+        // Continue to async CLI commands
+    }
+
+    // Run async CLI commands in Tokio runtime
+    tokio::runtime::Runtime::new()?.block_on(run_cli_async(cli))
+}
+
+async fn run_cli_async(cli: Cli) -> Result<()> {
     match cli.command {
-        cli::Commands::Send {
+        // GUI cases already handled in run_cli_sync
+        #[cfg(feature = "gui")]
+        None | Some(cli::Commands::Gui) => {
+            unreachable!("GUI mode should be handled in run_cli_sync")
+        }
+        #[cfg(not(feature = "gui"))]
+        None => {
+            unreachable!("No command case should be handled in run_cli_sync")
+        }
+        #[cfg(not(feature = "gui"))]
+        Some(cli::Commands::Gui) => {
+            unreachable!("Gui command should be handled in run_cli_sync")
+        }
+        Some(cli::Commands::Send {
             path,
             session,
             transfer,
-        } => {
+        }) => {
             send::handle_send(path, session, transfer).await?;
         }
-        cli::Commands::Receive {
+        Some(cli::Commands::Receive {
             output,
             auto_accept,
             session,
-        } => {
+        }) => {
             receive::handle_receive(output, auto_accept, session).await?;
         }
-        cli::Commands::Discover { timeout, port } => {
+        Some(cli::Commands::Discover { timeout, port }) => {
             discover::handle_discover(timeout, port).await?;
         }
-        cli::Commands::NatTest { stun_server } => {
+        Some(cli::Commands::NatTest { stun_server }) => {
             nat_test::handle_nat_test(stun_server).await?;
         }
-        cli::Commands::Resume {
+        Some(cli::Commands::Resume {
             transfer_id,
             to,
             path,
-        } => {
+        }) => {
             resume::handle_resume(transfer_id, to, path).await?;
         }
-        cli::Commands::History {
+        Some(cli::Commands::History {
             limit,
             direction,
             completed,
             failed,
-        } => {
+        }) => {
             history::handle_history(limit, direction, completed, failed).await?;
         }
     }

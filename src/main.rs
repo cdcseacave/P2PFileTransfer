@@ -2,13 +2,12 @@
 
 use anyhow::Result;
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    // Parse command-line arguments
+fn main() -> Result<()> {
+    // Parse command-line arguments and run appropriate mode
     #[cfg(feature = "cli")]
     {
-        use p2p_cli::run_cli;
-        run_cli().await?;
+        use p2p_cli::run_cli_sync;
+        run_cli_sync()?;
     }
 
     #[cfg(feature = "gui")]
@@ -20,7 +19,7 @@ async fn main() -> Result<()> {
 
     #[cfg(not(any(feature = "cli", feature = "gui")))]
     {
-        error!("No interface enabled. Build with --features cli or --features gui");
+        eprintln!("No interface enabled. Build with --features cli or --features gui");
         std::process::exit(1);
     }
 

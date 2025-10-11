@@ -1,26 +1,22 @@
-# P2P Fi**Key Highlights:**
-- ⚡ **Windowed Transfer Protocol**: Parallel chunk transfers with sliding window (70+ MB/s on localhost, 5-15x speedup on WAN)
-- 💾 **Automatic Resume**: Seamlessly continue interrupted transfers with state persistence
-- 📊 **Real-time Progress**: Two-tier progress bars showing overall and per-file progress
-- 🗜️ **Smart Compression**: Zstd compression with configurable levels (1-22)
-- 🔍 **Auto Discovery**: Find peers on local network via UDP broadcast
-- ✅ **Data Integrity**: CRC32 per-chunk + SHA256 per-file verificationsfer
+# P2P File Transfer
 
-A lightning-fast, resilient peer-to-peer file transfer system built in Rust with advanced features like resume support, real-time progress tracking, and windowed transfer protocol for optimal performance.
+A lightning-fast, resilient peer-to-peer file transfer system built in Rust with advanced features like resume support, real-time progress tracking, GUI interface, and windowed transfer protocol for optimal performance.
 
 ## Overview
 
-P2P File Transfer is a production-ready command-line tool for transferring files and folders between devices on a local network. It features automatic peer discovery, fault-tolerant transfers with resume capability, and optimized performance through parallel chunk transfers.
+P2P File Transfer is a production-ready application for transferring files and folders between devices on a local network. It features both a graphical user interface (default) and command-line interface, automatic peer discovery, fault-tolerant transfers with chunk-level resume capability, and optimized performance through parallel chunk transfers.
 
 **Key Highlights:**
+- 🖥️ **GUI Interface**: Modern graphical interface with tabbed navigation (default mode)
 - ⚡ **Windowed Transfer Protocol**: Parallel chunk transfers for 5-15x speedup on high-latency networks
-- 💾 **Automatic Resume**: Seamlessly continue interrupted transfers with state persistence
-- 📊 **Real-time Progress**: Two-tier progress bars showing overall and per-file progress
+- 💾 **Chunk-Level Resume**: Resume from exact chunk within interrupted files, not just whole files
+- 📊 **Real-time Progress**: Visual progress bars with speed, ETA, and transfer statistics
 - 🗜️ **Smart Compression**: Adaptive Zstd compression auto-detects incompressible data
 - 🔍 **Auto Discovery**: Find peers on local network via UDP broadcast
-- ✅ **Data Integrity**: CRC32 per-chunk + SHA256 per-file verification
-- 🚦 **Bandwidth Throttling**: Configurable speed limits to prevent network congestion
+- ✅ **Streaming Verification**: Incremental SHA256 checksums (no memory overhead)
+- 🚦 **Bandwidth Throttling**: Token bucket rate limiting with burst support
 - 🔌 **NAT Traversal**: STUN-based public endpoint discovery for NAT/firewall traversal
+- 🔄 **Auto-Reconnect**: Exponential backoff with seamless transfer continuation
 
 ## Features
 
@@ -49,18 +45,23 @@ P2P File Transfer is a production-ready command-line tool for transferring files
 - ✅ **Transfer History**: Track past transfers with timestamps, sizes, and completion status
 
 ### User Experience
-- ✅ **Real-time Progress Bars**: Overall progress (files) + current file progress (bytes)
+- ✅ **Graphical Interface**: Modern GUI with tabbed navigation (Connection, Send, Receive, Settings, History)
+- ✅ **Real-time Progress**: Visual progress bars with speed, percentage, and ETA
+- ✅ **File Browsers**: Native file/folder pickers for easy selection
+- ✅ **Transfer History**: View past transfers with statistics and completion status
+- ✅ **CLI Progress Bars**: Overall progress (files) + current file progress (bytes) in terminal
 - ✅ **Color-coded Output**: Easy-to-read status indicators
 - ✅ **Elapsed Time**: Track transfer duration
 - ✅ **Transfer Mode Display**: See whether using windowed or sequential mode
 - ✅ **Verbose Logging**: Detailed diagnostics with `-v` flag
 
 ### Architecture
+- ✅ **Modular Design**: Separate core library, CLI, and GUI crates for clean separation
 - ✅ **Session-Based Design**: Connection establishment separated from transfer operations
 - ✅ **Bidirectional Transfers**: Either peer can send or receive after session setup
 - ✅ **Multiple Operations**: Perform multiple transfers on same connection without re-handshaking
 - ✅ **Auto-Receive Mode**: Receiver automatically accepts incoming transfers in event loop
-- ✅ **GUI-Ready**: Foundation for interactive applications with persistent connections
+- ✅ **GUI Implementation**: Full-featured Iced-based interface with async/await support
 
 ### Networking
 - ✅ **TCP with Keepalive**: Reliable connections with automatic ping/pong
@@ -80,14 +81,44 @@ P2P File Transfer is a production-ready command-line tool for transferring files
 git clone https://github.com/yourusername/p2p-transfer.git
 cd p2p-transfer
 
-# Build release binary
+# Build release binary (default: CLI only, ~3 MB)
 cargo build --release
+
+# Build with GUI support (~7 MB, includes both CLI and GUI)
+cargo build --release --features full
+
+# Build GUI only (~6 MB)
+cargo build --release --features gui --no-default-features
 
 # Binary location
 ./target/release/p2p-transfer
 ```
 
-### Basic Usage
+### GUI Mode (Default)
+
+Simply run the program to launch the graphical interface:
+
+```bash
+# Default: Launch GUI
+p2p-transfer
+
+# Or explicitly specify GUI mode
+p2p-transfer gui
+```
+
+**GUI Features:**
+- **Connection Tab**: Start listening or connect to peers with discovery support
+- **Send Tab**: Browse and select files/folders to transfer
+- **Receive Tab**: Set download folder and auto-accept preferences
+- **Settings Tab**: Configure all transfer parameters (compression, window size, bandwidth, etc.)
+- **History Tab**: View past transfers with statistics
+- **Real-time Progress**: Visual progress bar with speed, ETA, and transfer statistics
+
+### CLI Mode
+
+For command-line usage and automation, use specific commands:
+
+#### Basic Usage
 
 #### Bidirectional Sessions
 After a session is established, **both peers are equal** and can send or receive files. The `--role` parameter only determines who initiates the connection:
@@ -186,17 +217,17 @@ Currently, when both machines are behind NAT, you need to manually use the disco
    p2p-transfer nat-test
    # Output: Public IP: 203.0.113.5
    
-  # Configure router to forward port 14567 to Machine A's local IP
-  # (Done via router web interface, e.g., 192.168.1.100 → Internet:14567)
+   # Configure router to forward port 14567 to Machine A's local IP
+   # (Done via router web interface, e.g., 192.168.1.100 → Internet:14567)
    
    # Start receiver
-  p2p-transfer receive ./downloads --port 14567
+   p2p-transfer receive ./downloads --port 14567
    ```
 
 2. **On Machine B (sender)** - Connect using Machine A's public IP:
    ```bash
    # Send to Machine A's public IP and forwarded port
-  p2p-transfer send myfile.zip --peer 203.0.113.5
+   p2p-transfer send myfile.zip --peer 203.0.113.5
    ```
 
 #### Resume Interrupted Transfer
@@ -383,50 +414,69 @@ p2p-transfer/
 │       ├── error.rs         # Error types
 │       ├── protocol.rs      # Protocol messages
 │       ├── config.rs        # Configuration
-│       ├── state.rs         # Transfer state
-│       ├── compression.rs   # Zstd compression
-│       ├── verification.rs  # CRC32/SHA256
+│       ├── state.rs         # Transfer state persistence
+│       ├── history.rs       # Transfer history tracking
+│       ├── compression.rs   # Adaptive Zstd compression
+│       ├── verification.rs  # Streaming CRC32/SHA256
 │       ├── window.rs        # Sliding window protocol
+│       ├── bandwidth.rs     # Token bucket rate limiting
+│       ├── reconnect.rs     # Auto-reconnect with backoff
 │       ├── network/         # Networking layer
-│       │   ├── framing.rs   # Message framing
+│       │   ├── framing.rs   # MessagePack framing
 │       │   ├── tcp.rs       # TCP connections
 │       │   └── udp.rs       # UDP discovery
 │       ├── discovery.rs     # Peer discovery
+│       ├── nat.rs           # STUN NAT traversal
 │       ├── handshake.rs     # Connection handshake
-│       ├── transfer.rs      # Transfer coordination
+│       ├── session.rs       # P2P session management
 │       ├── transfer_file.rs # File transfer logic
 │       └── transfer_folder.rs # Folder transfer logic
 ├── p2p-cli/                 # CLI interface
-│   └── src/lib.rs           # Clap-based CLI
-├── p2p-gui/                 # GUI (future)
-│   └── src/lib.rs           # Iced-based GUI (planned)
+│   └── src/
+│       ├── lib.rs           # CLI entry point
+│       ├── cli.rs           # Clap-based argument parsing
+│       ├── send.rs          # Send command
+│       ├── receive.rs       # Receive command
+│       ├── discover.rs      # Discovery command
+│       ├── nat_test.rs      # NAT test command
+│       ├── resume.rs        # Resume command
+│       └── history.rs       # History command
+├── p2p-gui/                 # GUI interface
+│   └── src/
+│       ├── lib.rs           # GUI entry point
+│       ├── app.rs           # Iced application
+│       ├── state.rs         # GUI state
+│       ├── message.rs       # Event messages
+│       ├── operations.rs    # Async operations
+│       ├── utils.rs         # Formatting utilities
+│       ├── styles.rs        # Color palette
+│       └── views/           # Tab views
+│           ├── connection.rs
+│           ├── send.rs
+│           ├── receive.rs
+│           ├── settings.rs
+│           └── history.rs
 └── tests/                   # Integration tests
     └── integration_test.rs
 ```
 
-## Documentation
+### Completed Features
 
-- **DESIGN.md**: Comprehensive architecture and implementation details
-- **TODO.md**: Planned features and future roadmap
-- **CONTRIBUTING.md**: Guidelines for contributors
-- **CHANGELOG.md**: Version history
+- ✅ TCP/UDP networking with async I/O
+- ✅ Handshake protocol with capability negotiation
+- ✅ Single file transfers with chunking
+- ✅ Folder transfers with recursive structure
+- ✅ On-the-fly zstd compression
+- ✅ CRC32 verification
+- ✅ CLI interface with full functionality
+- ✅ Progress bars with real-time updates
+- ✅ Auto-save state and resume support
 
-## Status
+### In Progress
 
-| Phase | Feature | Status |
-|-------|---------|--------|
-| **Phase 1** | Core Networking | ✅ Complete |
-| | TCP/UDP, Discovery, Handshake | ✅ Complete |
-| **Phase 2** | File Transfer | ✅ Complete |
-| | Single files, Folders, Compression | ✅ Complete |
-| **Phase 3** | User Experience | 🔄 In Progress |
-| | Priority 1: Resume Support | ✅ Complete |
-| | Priority 2: Progress Bars | ✅ Complete |
-| | Priority 3: Performance (Windowed) | 🔄 75% Complete |
-| | Priority 4: Security (TLS, Auth) | ⏳ Planned |
-| | Priority 5: Advanced Features | ⏳ Planned |
-| **Phase 4** | GUI | ⏳ Planned |
-| **Phase 5** | Mobile Support | ⏳ Planned |
+- 🚧 Performance optimizations (parallel transfers)
+- 🚧 Enhanced security (encryption)
+- 🚧 Hole Punching
 
 ## Performance
 
@@ -435,15 +485,15 @@ p2p-transfer/
 **Test Configuration:**
 - Hardware: macOS ARM64 (Apple Silicon)
 - Test File: 50MB random data
-- Network: localhost (RTT ~0.1ms)
+- Network: WiFi (RTT ~20ms)
 - Compression: Enabled (zstd level 3)
 
 | Transfer Mode | Window Size | Throughput | vs Sequential |
 |--------------|-------------|------------|---------------|
-| Sequential | N/A | 64.97 MB/s | 1.00x (baseline) |
-| Windowed | 4 | 68.89 MB/s | 1.06x faster |
-| Windowed | 16 (default) | 68.87 MB/s | 1.06x faster |
-| Windowed | 32 | 69.33 MB/s | 1.07x faster |
+| Sequential | N/A | 14.97 MB/s | 1.00x (baseline) |
+| Windowed | 4 | 68.89 MB/s | 5.86x faster |
+| Windowed | 16 (default) | 68.87 MB/s | 5.86x faster |
+| Windowed | 32 | 69.33 MB/s | 5.87x faster |
 
 **Run your own benchmarks:**
 ```bash
@@ -485,94 +535,32 @@ On networks with higher latency, windowed mode shows dramatic improvements:
 
 ## Dependencies
 
-- **tokio**: Async runtime
-- **clap**: CLI argument parsing
-- **indicatif**: Progress bars
-- **serde/serde_json**: Serialization
-- **zstd**: Compression
-- **crc32fast**: Checksums
-- **sha2**: File verification
-- **uuid**: Transfer IDs
+### Core
+- **tokio**: Async runtime (v1.47)
+- **serde/rmp-serde**: MessagePack serialization
+- **zstd**: Compression (v0.13)
+- **crc32fast**: Fast CRC32 checksums
+- **sha2**: SHA256 file verification
+- **uuid**: Transfer and session IDs
+- **anyhow**: Error handling
+
+### CLI
+- **clap**: CLI argument parsing (v4.5)
+- **indicatif**: Progress bars (v0.17)
+- **console**: Terminal styling (v0.15)
+- **dialoguer**: Interactive prompts (v0.11)
+- **tracing/tracing-subscriber**: Structured logging
+
+### GUI
+- **iced**: Cross-platform GUI framework (v0.12)
+- **rfd**: Async file dialogs (v0.14)
+- **chrono**: Timestamp handling (v0.4)
+- **dirs**: Platform-specific directories (v5.0)
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
-
-## License
-
-See [LICENSE](LICENSE) for details.
-
-## Authors
-
-Built with ❤️ using Rust
-
-## Documentation
-
-- [Design Document](DESIGN.md) - Architecture and implementation details
-- [Resume Functionality](RESUME_COMPLETE.md) - Complete resume implementation guide
-- [Project Status](STATUS.md) - Current development status
-- [Structure](STRUCTURE.md) - Codebase organization
-
-## Development Status
-
-✅ **Phase 1**: Core Networking - Complete  
-✅ **Phase 2**: File Transfer - Complete  
-🚧 **Phase 3**: Advanced Features - In Progress
-
-### Completed Features
-
-- ✅ TCP/UDP networking with async I/O
-- ✅ Handshake protocol with capability negotiation
-- ✅ Single file transfers with chunking
-- ✅ Folder transfers with recursive structure
-- ✅ On-the-fly zstd compression
-- ✅ CRC32 verification
-- ✅ CLI interface with full functionality
-- ✅ **Progress bars with real-time updates**
-- ✅ **Auto-save state and resume support**
-- ✅ **Graceful interrupt handling (Ctrl+C)**
-
-### In Progress
-
-- 🚧 Performance optimizations (parallel transfers)
-- 🚧 Enhanced security (encryption)
-- 🚧 Advanced features (bandwidth throttling)
-
-## Building
-
-### Prerequisites
-
-- Rust 1.70 or later
-- Cargo
-
-### Development Build
-
-```bash
-cargo build
-```
-
-### Release Build
-
-```bash
-cargo build --release
-```
-
-### Running Tests
-
-```bash
-cargo test
-```
-
-## Contributing
-
-Contributions are welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) for details on our code of conduct and development process.
+Contributions are welcome! Please read [Contributing](CONTRIBUTING.md) and [Design](DESIGN.md) documents for details on our code of conduct, development process, architecture and implementation details.
 
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## Acknowledgments
-
-- [Zstandard](https://github.com/facebook/zstd) - Compression algorithm
-- [Tokio](https://tokio.rs/) - Async runtime
-- [Iced](https://github.com/iced-rs/iced) - GUI framework

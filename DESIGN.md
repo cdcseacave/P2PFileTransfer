@@ -1907,16 +1907,131 @@ test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured
 
 ---
 
+## GUI Architecture
+
+### Implementation Overview (October 2025)
+
+The GUI is implemented using the **Iced framework** for cross-platform support with a reactive, Elm-inspired architecture. The design separates UI state from transfer operations while maintaining async compatibility.
+
+### Architecture Components
+
+```
+┌────────────────────────────────────────────────────────────┐
+│                P2PTransferApp (Main State)                 │
+│  • current_tab: Active tab selection                       │
+│  • connection_state: Connection management                 │
+│  • send_state: File/folder send state                     │
+│  • receive_state: Download settings                       │
+│  • settings: Transfer configuration                       │
+│  • session: Arc<tokio::Mutex<P2PSession>>                 │
+│  • transfer_progress: Real-time stats                     │
+│  • history: Arc<std::Mutex<TransferHistory>>              │
+└────────────────────────────────────────────────────────────┘
+                            │
+        ┌──────────────────┼──────────────────┐
+        │                  │                  │
+    ┌───▼───┐         ┌────▼────┐       ┌────▼────┐
+    │Message│         │ Command │       │  View   │
+    │ Types │         │Handlers │       │ Layer   │
+    └───────┘         └─────────┘       └─────────┘
+```
+
+### Key Design Decisions
+
+1. **Hybrid Mutex Strategy**
+   - `tokio::Mutex<P2PSession>`: Async operations (send/receive)
+   - `std::Mutex<TransferHistory>`: Synchronous view rendering
+   - Rationale: Avoid async in view() while maintaining Send/Sync
+
+2. **Tab-Based Navigation**
+   - Connection: Session establishment (listen/connect)
+   - Send: File/folder picker and transfer initiation
+   - Receive: Output directory and auto-accept settings
+   - Settings: All transfer configuration (compression, window, bandwidth)
+   - History: Past transfers with statistics
+
+3. **Progress Tracking**
+   - Real-time progress bar with ETA, speed, percentage
+   - Bytes transferred and total size display
+   - Separate progress for send vs receive operations
+
+4. **Async Command Pattern**
+   - Connection operations return `Command<Message>`
+   - Background tasks use `tokio::spawn` for async execution
+   - Results sent back as messages (success/failure)
+
+### Message Flow
+
+```
+User Action (Button Click)
+    ↓
+Message Generated (e.g., StartSend)
+    ↓
+update() Method Handles Message
+    ↓
+Command::perform() Spawns Async Task
+    ↓
+Async Operation (send_path, etc.)
+    ↓
+Result Message (SendComplete/SendFailed)
+    ↓
+update() Updates State
+    ↓
+view() Re-renders UI
+```
+
+### Integration with Core Library
+
+- **Session Management**: Uses `P2PSession::establish()` for both client and server modes
+- **Send Operation**: Calls `session.send_path()` with reconnect config
+- **Receive Operation (Listen Mode)**: Event loop starts automatically when connection is established
+- **Receive Operation (Connect Mode)**: Uses `session.run_event_loop()` after connecting
+- **Progress Callbacks**: Future enhancement to update GUI progress in real-time
+
+### Receive Mode Behavior
+
+**Listen Mode (Server)**:
+1. User clicks "Start Connection" in Listen mode
+2. GUI calls `P2PSession::establish("server", ...)` and immediately starts event loop
+3. Server waits for incoming connection and automatically receives transfers
+4. No separate "Start Receive" action needed - receiving is automatic
+
+**Connect Mode (Client)**:
+1. User clicks "Start Connection" with peer address
+2. GUI establishes connection to peer
+3. User can then click "Start Send" or "Start Receive"
+4. For receiving, event loop starts when "Start Receive" is clicked
+
+**Key Design Note**: In Listen mode, the event loop blocks until the transfer completes or connection closes. This is the correct behavior - the server should continuously listen for incoming data once a sender connects.
+
+### File Dialog Integration
+
+- **rfd crate**: Async file/folder dialogs for cross-platform support
+- Browse buttons trigger `rfd::AsyncFileDialog`
+- Selected paths update application state via messages
+
+### Theme and Styling
+
+- **Dark Theme**: Default theme for better visibility
+- **Color-coded Status**: Visual feedback for connection, transfers, errors
+- **Responsive Layout**: Adapts to different window sizes
+- **Progress Bars**: Iced's native progress_bar widget
+
+---
+
 ## Future Enhancements
 
 See [TODO.md](TODO.md) for complete roadmap.
 
 **Highlights**:
+- Real-time progress callbacks to GUI (currently uses placeholders)
+- Multi-transfer queue support
+- Drag-and-drop file selection
+- Tray icon for background operation
+- Connection profiles (save frequently used peers)
 - Benchmarking suite for windowed vs sequential
 - Security layer (TLS, authentication)
-- Advanced features (adaptive compression, transfer history)
 - Full UDP hole punching with rendezvous server
-- GUI with Iced framework
 - Mobile support (iOS, Android)
 
 ---

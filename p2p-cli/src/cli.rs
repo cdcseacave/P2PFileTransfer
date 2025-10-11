@@ -87,11 +87,11 @@ pub struct TransferParams {
 
 #[derive(Parser)]
 #[command(name = "p2p-transfer")]
-#[command(about = "P2P file transfer with compression", long_about = None)]
+#[command(about = "P2P file transfer with compression (GUI mode by default)", long_about = None)]
 #[command(version)]
 pub struct Cli {
     #[command(subcommand)]
-    pub command: Commands,
+    pub command: Option<Commands>,
 
     /// Set logging level: off, error, warn, info, debug, trace
     #[arg(short = 'v', long = "verbosity", default_value = "info", global = true)]
@@ -184,4 +184,7 @@ pub enum Commands {
         #[arg(long)]
         failed: bool,
     },
+
+    /// Launch graphical user interface
+    Gui,
 }

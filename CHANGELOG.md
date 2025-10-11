@@ -5,9 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
-
 ### Added
+- **GUI Implementation** (2025-10-10): Complete graphical user interface using Iced framework
+  - Tabbed interface with Connection, Send, Receive, Settings, and History tabs
+  - Connection management: Start listener or connect to peers with discovery support
+  - Send tab: File/folder picker with browse buttons and transfer initiation
+  - Receive tab: Output directory selection and auto-accept toggle
+  - Settings tab: All CLI settings available (compression, window size, chunk size, bandwidth limit, etc.)
+  - History tab: Display past transfers with statistics and completion status
+  - Progress tracking: Real-time progress bar with speed, ETA, percentage, and bytes transferred
+  - Dark theme UI with clean, intuitive design
+  - Async-compatible architecture using tokio::Mutex for session management
+- **Modular GUI Architecture** (2025-10-10): Refactored GUI into organized module structure
+  - Split monolithic 1224-line file into 10+ focused modules
+  - Created module structure: app.rs, state.rs, message.rs, operations.rs, utils.rs, styles.rs, views/
+  - Separated view rendering from business logic for better maintainability
+  - Simplified styling to use Iced 0.12 built-in themes (Primary, Secondary, Destructive)
+  - Added chrono dependency for timestamp handling in history view
+  - Professional appearance with smaller text sizes (12-18px), consistent spacing, and card-like containers
 - **Chunk-level resume** (2025-10-10): Transfer now resumes from exact chunk where interrupted, not from beginning
   - Chunk completions tracked in memory during transfer
   - State automatically saved to disk when connection error detected (before reconnection attempt)

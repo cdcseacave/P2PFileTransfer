@@ -487,7 +487,7 @@ impl<'a> FolderTransferSession<'a> {
             if file_index < transfer_info.items.len() {
                 let current_file_size = transfer_info.items[file_index].size;
                 let chunk_size = self.config.chunk_size as u64;
-                let total_chunks = ((current_file_size + chunk_size - 1) / chunk_size) as u64;
+                let total_chunks = (current_file_size + chunk_size - 1) / chunk_size;
                 let completed_chunks = resume_point.completed_chunks.len() as u64;
                 if completed_chunks < total_chunks {
                     already_transferred += completed_chunks * chunk_size;

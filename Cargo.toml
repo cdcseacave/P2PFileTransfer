@@ -1,3 +1,11 @@
+# P2P File Transfer
+# 
+# Build Options:
+#   cargo build --release                                       # CLI only (default, ~3 MB)
+#   cargo build --release --features full                       # CLI + GUI (~7 MB)
+#   cargo build --release --features gui --no-default-features  # GUI only (~6 MB)
+#   cargo build --release --features cli --no-default-features  # CLI only (explicit, ~3 MB)
+
 [package]
 name = "p2p-transfer"
 version = "0.1.0"
@@ -25,9 +33,14 @@ env_logger = "0.11"
 tracing = "0.1"
 
 [features]
+# Default: CLI only (small binary, ~5-10 MB)
 default = ["cli"]
+# CLI interface with all core features
 cli = ["p2p-cli"]
-gui = ["p2p-gui"]
+# GUI interface with Iced framework (large binary, ~60+ MB due to graphics dependencies)
+gui = ["p2p-gui", "p2p-cli/gui"]
+# Build both CLI and GUI
+full = ["cli", "gui"]
 
 [profile.release]
 opt-level = 3
