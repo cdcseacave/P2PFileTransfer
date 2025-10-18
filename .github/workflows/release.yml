@@ -1,0 +1,114 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-release:
+    name: Build Release
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact_name: p2p-transfer
+            asset_name: p2p-transfer-linux-x86_64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_name: p2p-transfer.exe
+            asset_name: p2p-transfer-windows-x86_64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact_name: p2p-transfer
+            asset_name: p2p-transfer-macos-x86_64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact_name: p2p-transfer
+            asset_name: p2p-transfer-macos-aarch64
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: ${{ matrix.target }}
+    
+    - name: Build release
+      run: cargo build --release --target ${{ matrix.target }}
+    
+    - name: Strip binary (Linux/macOS)
+      if: matrix.os != 'windows-latest'
+      run: strip target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
+    
+    - name: Create release package (Linux/macOS)
+      if: matrix.os != 'windows-latest'
+      run: |
+        mkdir -p release-package
+        cp target/${{ matrix.target }}/release/${{ matrix.artifact_name }} release-package/
+        cp README.md LICENSE CHANGELOG.md release-package/
+        cd release-package
+        tar czf ../${{ matrix.asset_name }}.tar.gz *
+        cd ..
+        sha256sum ${{ matrix.asset_name }}.tar.gz > ${{ matrix.asset_name }}.tar.gz.sha256
+    
+    - name: Create release package (Windows)
+      if: matrix.os == 'windows-latest'
+      shell: pwsh
+      run: |
+        New-Item -ItemType Directory -Force -Path release-package
+        Copy-Item target/${{ matrix.target }}/release/${{ matrix.artifact_name }} release-package/
+        Copy-Item README.md, LICENSE, CHANGELOG.md release-package/
+        Compress-Archive -Path release-package/* -DestinationPath ${{ matrix.asset_name }}.zip
+        $hash = (Get-FileHash -Algorithm SHA256 ${{ matrix.asset_name }}.zip).Hash.ToLower()
+        "$hash  ${{ matrix.asset_name }}.zip" | Out-File -Encoding ascii ${{ matrix.asset_name }}.zip.sha256
+    
+    - name: Upload release archive
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ matrix.asset_name }}
+        path: |
+          ${{ matrix.asset_name }}.tar.gz
+          ${{ matrix.asset_name }}.tar.gz.sha256
+          ${{ matrix.asset_name }}.zip
+          ${{ matrix.asset_name }}.zip.sha256
+        if-no-files-found: ignore
+    
+  create-release:
+    name: Create Release
+    needs: build-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Download artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: artifacts
+    
+    - name: Display structure of downloaded files
+      run: ls -R artifacts/
+    
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        files: |
+          artifacts/**/*.tar.gz
+          artifacts/**/*.tar.gz.sha256
+          artifacts/**/*.zip
+          artifacts/**/*.zip.sha256
+        draft: false
+        prerelease: false
+        body_path: CHANGELOG.md
+        generate_release_notes: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

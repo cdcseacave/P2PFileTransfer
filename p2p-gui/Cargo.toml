@@ -1,0 +1,19 @@
+[package]
+name = "p2p-gui"
+version = "0.1.0"
+edition = "2021"
+authors = ["cDc <cdc.seacave@gmail.com>"]
+description = "GUI interface for P2P file transfer"
+license = "MIT"
+
+[dependencies]
+p2p-core = { path = "../p2p-core" }
+iced = { version = "0.12", features = ["tokio", "advanced"] }
+tokio = { version = "1.40", features = ["full"] }
+anyhow = "1.0"
+log = "0.4"
+tracing = "0.1"
+uuid = { version = "1.18", features = ["v4"] }
+dirs = "5.0"
+rfd = "0.14"  # Async file dialogs
+chrono = "0.4"  # For timestamp handling in history view

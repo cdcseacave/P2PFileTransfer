@@ -1,0 +1,24 @@
+[package]
+name = "p2p-cli"
+version = "0.1.0"
+edition = "2021"
+authors = ["cDc <cdc.seacave@gmail.com>"]
+description = "CLI interface for P2P file transfer"
+license = "MIT"
+
+[dependencies]
+p2p-core = { path = "../p2p-core" }
+p2p-gui = { path = "../p2p-gui", optional = true }
+tokio = { version = "1.40", features = ["full", "signal"] }
+clap = { version = "4.5", features = ["derive", "cargo"] }
+indicatif = "0.17"
+anyhow = "1.0"
+tracing = "0.1"  # Already exists, no change needed
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+console = "0.15"
+dialoguer = "0.11"
+chrono = "0.4"
+
+[features]
+# GUI integration feature - enables launching GUI from CLI
+gui = ["p2p-gui"]
