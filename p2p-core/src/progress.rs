@@ -10,6 +10,9 @@ pub struct ProgressState {
     global_bar: Option<ProgressBar>,
     /// True when bar is owned by a MultiProgress — skip draw-target manipulation.
     managed: bool,
+    /// True for queue-mode bars that persist across multiple batches.
+    /// finish() becomes a no-op; set_total_bytes() updates tracking only (no bar reset).
+    no_finish: bool,
 }
 
 impl ProgressState {
@@ -35,6 +38,7 @@ impl ProgressState {
             progress_bar,
             global_bar: None,
             managed: false,
+            no_finish: false,
         }
     }
 
@@ -51,6 +55,22 @@ impl ProgressState {
             progress_bar: local,
             global_bar: Some(global),
             managed: true,
+            no_finish: false,
+        }
+    }
+
+    /// Like `from_bars` but the bar persists across multiple batches (queue mode).
+    /// `finish()` is a no-op; `set_total_bytes()` only updates local tracking,
+    /// not the bar's length (which is managed externally by the queue worker).
+    pub fn from_bars_persistent(local: ProgressBar, global: ProgressBar) -> Self {
+        let total = local.length().unwrap_or(0);
+        Self {
+            total_bytes: total,
+            transferred_bytes: 0,
+            progress_bar: local,
+            global_bar: Some(global),
+            managed: true,
+            no_finish: true,
         }
     }
 
@@ -80,6 +100,7 @@ impl ProgressState {
             progress_bar: bar,
             global_bar: global,
             managed: true,
+            no_finish: false,
         }
     }
 
@@ -93,6 +114,13 @@ impl ProgressState {
 
     pub fn set_total_bytes(&mut self, total_bytes: u64) {
         if self.total_bytes == total_bytes {
+            return;
+        }
+
+        if self.no_finish {
+            // Persistent queue-mode bar: don't reset the bar's accumulated length.
+            // The queue worker manages bar length externally via set_length().
+            self.total_bytes = total_bytes;
             return;
         }
 
@@ -114,7 +142,9 @@ impl ProgressState {
     }
 
     pub fn finish(&self) {
-        self.progress_bar.finish_with_message("done");
+        if !self.no_finish {
+            self.progress_bar.finish_with_message("done");
+        }
     }
 
     pub fn total_bytes(&self) -> u64 {
