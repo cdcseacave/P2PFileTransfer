@@ -2,7 +2,7 @@ name: Build Artifacts
 
 on:
   push:
-    branches: ["main"]
+    branches: ["feat/parallel-sys"]
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
