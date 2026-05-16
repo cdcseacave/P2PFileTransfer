@@ -34,6 +34,28 @@ use tokio::{
 use tracing::{debug, info, trace, warn};
 use uuid::Uuid;
 
+/// Returns true if the file extension indicates already-compressed content.
+/// These formats gain nothing from zstd compression and waste CPU trying.
+fn is_precompressed(path: &Path) -> bool {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_ascii_lowercase());
+    matches!(
+        ext.as_deref(),
+        Some(
+            "gz" | "tgz" | "bz2" | "xz" | "zst" | "lz4" | "lzma" | "br" // compressed archives
+            | "zip" | "7z" | "rar" | "cab" | "arc"                        // archive formats
+            | "jpg" | "jpeg" | "png" | "gif" | "webp" | "heic" | "avif"   // images
+            | "mp4" | "mkv" | "avi" | "mov" | "webm" | "flv" | "m4v"     // video
+            | "mp3" | "aac" | "ogg" | "flac" | "opus" | "m4a" | "wma"    // audio
+            | "pdf"                                                         // PDF (usually compressed)
+            | "docx" | "xlsx" | "pptx" | "odt" | "ods"                    // Office (zip-based)
+            | "vpk" | "pak" | "wad" | "pk3" | "pk4"                       // game archives
+        )
+    )
+}
+
 /// File transfer session for single-file transfers
 /// This is a helper struct that never owns the connection, only borrows it.
 pub struct FileTransferSession<'a> {
@@ -125,20 +147,14 @@ impl<'a> FileTransferSession<'a> {
 
         let done_set: HashSet<u64> = completed_chunks.iter().copied().collect();
 
-        // Compression if enabled
-        let mut compressor: Option<AdaptiveCompressor> = if self.config.compression_enabled {
-            let sample_size = if self.config.adaptive_compression {
-                3
+        // Compression if enabled — skip entirely for already-compressed formats
+        let mut compressor: Option<AdaptiveCompressor> =
+            if self.config.compression_enabled && !is_precompressed(path) {
+                let sample_size = if self.config.adaptive_compression { 3 } else { 0 };
+                Some(AdaptiveCompressor::new(self.config.compression_level, sample_size))
             } else {
-                0
+                None
             };
-            Some(AdaptiveCompressor::new(
-                self.config.compression_level,
-                sample_size,
-            ))
-        } else {
-            None
-        };
 
         for chunk_index in 0..total_chunks {
             // Skip already completed chunks
@@ -307,20 +323,14 @@ impl<'a> FileTransferSession<'a> {
             }
         }
 
-        // Compression if enabled
-        let mut compressor: Option<AdaptiveCompressor> = if self.config.compression_enabled {
-            let sample_size = if self.config.adaptive_compression {
-                3
+        // Compression if enabled — skip entirely for already-compressed formats
+        let mut compressor: Option<AdaptiveCompressor> =
+            if self.config.compression_enabled && !is_precompressed(path) {
+                let sample_size = if self.config.adaptive_compression { 3 } else { 0 };
+                Some(AdaptiveCompressor::new(self.config.compression_level, sample_size))
             } else {
-                0
+                None
             };
-            Some(AdaptiveCompressor::new(
-                self.config.compression_level,
-                sample_size,
-            ))
-        } else {
-            None
-        };
 
         // Main transfer loop
         let mut last_progress = 0;
