@@ -148,15 +148,17 @@ pub fn is_transient_error(error: &crate::error::Error) -> bool {
     use crate::error::Error;
 
     match error {
-        Error::Network(_) => true, // All network errors are transient
+        Error::Network(_) => true,
+        Error::Timeout => true,
+        Error::Disconnected => true,
         Error::Protocol(msg) => {
-            // Some protocol errors are transient
             msg.contains("timeout")
                 || msg.contains("connection")
                 || msg.contains("reset")
                 || msg.contains("broken pipe")
+                || msg.contains("eof")
         }
-        _ => false, // Other errors are not transient
+        _ => false,
     }
 }
 

@@ -3,6 +3,7 @@
 use anyhow::Result;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use p2p_core::{
+    error::Error as P2PError,
     handshake::HandshakeServer,
     network::tcp::TcpServer,
     progress::ProgressState,
@@ -12,9 +13,22 @@ use p2p_core::{
     Uuid,
 };
 use std::{path::PathBuf, sync::Arc};
-use tracing::info;
+use tokio::signal;
+use tracing::{info, warn};
 
 use crate::cli::SessionParams;
+
+fn make_spinner(msg: &str) -> ProgressBar {
+    let bar = ProgressBar::new_spinner();
+    bar.set_style(
+        indicatif::ProgressStyle::with_template("{spinner:.cyan} {msg}")
+            .unwrap()
+            .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
+    );
+    bar.set_message(msg.to_string());
+    bar.enable_steady_tick(std::time::Duration::from_millis(80));
+    bar
+}
 
 pub async fn handle_receive(
     output: PathBuf,
@@ -43,35 +57,68 @@ pub async fn handle_receive(
     }
 }
 
-/// Standard single-connection receive (original behaviour).
+/// Standard single-connection receive — re-listens after connection drops.
 async fn handle_single_receive(
     output: PathBuf,
     auto_accept: bool,
     session_params: SessionParams,
 ) -> Result<()> {
-    let device_id = Uuid::new_v4();
-    let capabilities = Capabilities::all();
+    let role = session_params.get_role("server");
+    let port = session_params.port;
 
-    let mut session = P2PSession::establish(
-        &session_params.get_role("server"),
-        session_params.peer.clone(),
-        session_params.discover,
-        session_params.port,
-        device_id,
-        capabilities,
-        Some(ConfigMessage::default()),
-    )
-    .await?;
+    loop {
+        let sp = make_spinner(&format!("Listening on port {}... (Ctrl+C to stop)", port));
 
-    info!("✅ Session established");
-    info!("    Peer: {}", session.peer_device_id());
-    info!("    Compression: {}", session.config().compression_enabled);
-    info!("📁 Session ready - waiting for incoming transfers...");
-    info!("  (Press Ctrl+C to exit)");
+        let mut session = tokio::select! {
+            result = P2PSession::establish(
+                &role,
+                session_params.peer.clone(),
+                session_params.discover,
+                port,
+                Uuid::new_v4(),
+                Capabilities::all(),
+                Some(ConfigMessage::default()),
+            ) => {
+                sp.finish_and_clear();
+                result?
+            }
+            _ = signal::ctrl_c() => {
+                sp.finish_and_clear();
+                eprintln!("Stopped.");
+                return Ok(());
+            }
+        };
 
-    session.run_event_loop(&output, auto_accept, true).await?;
-    info!("✅ Session ended");
-    Ok(())
+        eprintln!(
+            "✓ Connected  peer={}  compression={}",
+            session.peer_device_id(),
+            session.config().compression_enabled
+        );
+
+        let result = tokio::select! {
+            r = session.run_event_loop(&output, auto_accept, true) => r,
+            _ = signal::ctrl_c() => {
+                eprintln!("Stopped.");
+                return Ok(());
+            }
+        };
+
+        match result {
+            Ok(()) => {
+                // Graceful close from peer — continue listening for next connection
+                eprintln!("Connection closed. Re-listening...");
+            }
+            Err(e) if matches!(e, P2PError::Disconnected) => {
+                warn!("Connection dropped. Re-listening on port {}...", port);
+                // Small delay so sender's backoff can kick in before we re-bind
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+            Err(e) => {
+                warn!("Error: {}. Re-listening...", e);
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+        }
+    }
 }
 
 /// Parallel receive: bind once, accept N connections, handle each in its own task.

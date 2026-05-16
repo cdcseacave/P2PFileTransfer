@@ -653,25 +653,24 @@ impl P2PSession {
                 None
             };
 
-            // Attempt to receive - this will block until a transfer starts or connection closes
+            // Attempt to receive - blocks until transfer completes or connection drops
             match self.receive_to(output_dir, None, progress.as_mut()).await {
                 Ok(_) => {
                     debug!("Transfer completed successfully, ready for next operation");
-                    // Continue loop to handle next transfer
                 }
                 Err(e) => {
-                    // Check if this is a connection close (normal termination)
                     let error_msg = e.to_string().to_lowercase();
-                    if error_msg.contains("connection")
-                        || error_msg.contains("closed")
+                    let is_drop = matches!(e, Error::Timeout | Error::Disconnected)
+                        || error_msg.contains("connection")
                         || error_msg.contains("eof")
                         || error_msg.contains("reset")
                         || error_msg.contains("broken pipe")
-                    {
-                        debug!("Connection closed, ending event loop");
-                        return Ok(());
+                        || error_msg.contains("closed");
+
+                    if is_drop {
+                        debug!("Connection dropped: {}", e);
+                        return Err(Error::Disconnected);
                     }
-                    // Other errors should be propagated
                     return Err(e);
                 }
             }
