@@ -163,20 +163,6 @@ pub enum Commands {
         stun_server: Option<String>,
     },
 
-    /// Resume a previous transfer
-    Resume {
-        /// Transfer ID to resume (or state file path)
-        transfer_id: String,
-
-        /// Peer address (IP:PORT) to reconnect to
-        #[arg(long)]
-        to: String,
-
-        /// Original folder path to resume from
-        #[arg(long)]
-        path: PathBuf,
-    },
-
     /// View transfer history
     History {
         /// Show only recent N transfers

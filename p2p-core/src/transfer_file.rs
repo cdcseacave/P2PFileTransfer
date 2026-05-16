@@ -21,6 +21,7 @@ use crate::{
 };
 use sha2::Digest;
 use std::{
+    collections::HashSet,
     io::SeekFrom,
     path::{Path, PathBuf},
     time::{Duration, Instant},
@@ -122,6 +123,8 @@ impl<'a> FileTransferSession<'a> {
         }
         debug!("File has {} total chunks", total_chunks);
 
+        let done_set: HashSet<u64> = completed_chunks.iter().copied().collect();
+
         // Compression if enabled
         let mut compressor: Option<AdaptiveCompressor> = if self.config.compression_enabled {
             let sample_size = if self.config.adaptive_compression {
@@ -139,7 +142,7 @@ impl<'a> FileTransferSession<'a> {
 
         for chunk_index in 0..total_chunks {
             // Skip already completed chunks
-            if completed_chunks.contains(&(chunk_index as u64)) {
+            if done_set.contains(&(chunk_index as u64)) {
                 trace!("Skipping already completed chunk {}", chunk_index);
                 continue;
             }
@@ -296,7 +299,7 @@ impl<'a> FileTransferSession<'a> {
         // Create sliding window
         let mut window = SlidingWindow::new(window_config.clone(), total_chunks);
 
-        // Mark completed chunks in the window
+        // Mark completed chunks in the window (O(n) once, instead of O(n) per chunk)
         for &chunk_index in completed_chunks {
             if chunk_index < total_chunks as u64 {
                 window.mark_completed(chunk_index as u32);
@@ -753,7 +756,6 @@ impl ChunkWriter {
         let offset = index as u64 * self.chunk_size as u64;
         self.file.seek(SeekFrom::Start(offset)).await?;
         self.file.write_all(data).await?;
-        self.file.flush().await?;
 
         // Update running checksum
         self.hasher.update(data);

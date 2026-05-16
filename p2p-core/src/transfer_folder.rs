@@ -359,11 +359,13 @@ impl<'a> FolderTransferSession<'a> {
 
                 vec![(PathBuf::from(file_name), file_meta)]
             } else if path.is_dir() {
-                // Folder: scan recursively
+                info!("Scanning {}...", path.display());
                 let files = self.scan_folder(path).await?;
                 if files.is_empty() {
                     return Err(Error::Protocol("Folder is empty".to_string()));
                 }
+                let scan_bytes: u64 = files.iter().map(|(_, m)| m.size).sum();
+                info!("Found {} files ({})", files.len(), crate::bandwidth::format_bandwidth(scan_bytes));
                 files
             } else {
                 return Err(Error::Protocol(
@@ -549,7 +551,7 @@ impl<'a> FolderTransferSession<'a> {
     pub async fn receive_folder(
         &mut self,
         output_dir: &Path,
-        state_path: Option<&Path>,
+        _state_path: Option<&Path>,
         mut progress: Option<&mut ProgressState>,
     ) -> Result<()> {
         // Receive transfer info
@@ -686,6 +688,13 @@ impl<'a> FolderTransferSession<'a> {
                 total_files,
                 relative_path.display()
             );
+            if let Some(ref mut p) = progress {
+                let short = relative_path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| file_meta.path.clone());
+                p.set_message(format!("[{}/{}] {}", file_index + 1, total_files, short));
+            }
 
             // Create parent directories
             if let Some(parent) = full_path.parent() {
@@ -962,20 +971,20 @@ impl<'a> FolderTransferSession<'a> {
             }
         };
 
-        if sender_checksum == receiver_checksum {
-            debug!(
-                "File {} checksum verified: {:02x?}",
-                file_index,
-                &receiver_checksum[..8]
-            );
-        } else {
-            warn!(
+        if sender_checksum != receiver_checksum {
+            return Err(crate::error::Error::Verification(format!(
                 "File {} checksum mismatch: sender={:02x?}, receiver={:02x?}",
                 file_index,
                 &sender_checksum[..8],
                 &receiver_checksum[..8]
-            );
+            )));
         }
+
+        debug!(
+            "File {} checksum verified: {:02x?}",
+            file_index,
+            &receiver_checksum[..8]
+        );
 
         Ok(receiver_checksum)
     }
@@ -1079,6 +1088,14 @@ impl<'a> FolderTransferSession<'a> {
             let resume_chunks = partial_map.remove(&idx).unwrap_or_default();
             let relative_path = PathBuf::from(&file_meta.path);
             let full_path = base_path.join(&relative_path);
+
+            if let Some(ref mut p) = progress {
+                let short = relative_path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| file_meta.path.clone());
+                p.set_message(format!("[{}/{}] {}", file_index + 1, total_files, short));
+            }
 
             self.send_single_file(
                 &full_path,

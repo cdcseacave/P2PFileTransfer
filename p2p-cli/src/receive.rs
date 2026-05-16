@@ -1,9 +1,11 @@
 //! Receive operations
 
 use anyhow::Result;
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use p2p_core::{
     handshake::HandshakeServer,
     network::tcp::TcpServer,
+    progress::ProgressState,
     protocol::{Capabilities, ConfigMessage},
     session::P2PSession,
     transfer_folder::FolderTransferSession,
@@ -91,15 +93,29 @@ async fn handle_parallel_receive(
         parallel
     );
 
+    // Build multi-progress display.
+    // Total bytes unknown until connections arrive, so the overall bar is a spinner.
+    // Each connection bar is created inside its task (also unknown total until handshake).
+    let multi = MultiProgress::new();
+    let overall_bar = multi.add(ProgressBar::new_spinner());
+    overall_bar.set_style(
+        ProgressStyle::with_template(
+            "  [Total ] {spinner:.yellow} {bytes} received ({bytes_per_sec})",
+        )
+        .unwrap(),
+    );
+    overall_bar.enable_steady_tick(std::time::Duration::from_millis(100));
+
     let output = Arc::new(output);
     let mut handles = Vec::new();
 
     for idx in 0..parallel {
-        // Accept connections sequentially (each accept is fast — the heavy work is spawned)
         let conn = server.accept().await?;
         let device_id = Uuid::new_v4();
         let capabilities = Capabilities::all();
         let output_clone = Arc::clone(&output);
+        let overall_clone = overall_bar.clone();
+        let multi_clone = multi.clone();
 
         let handle = tokio::spawn(async move {
             let handshaker = HandshakeServer::new(device_id, capabilities);
@@ -115,17 +131,28 @@ async fn handle_parallel_receive(
                 handshake.peer_device_id
             );
 
+            // Create the connection bar now that the connection is live.
+            // Total bytes unknown until TransferInfo arrives — bar will show 0/? until set.
+            let conn_bar = multi_clone.add(ProgressBar::new(0));
+            conn_bar.set_style(
+                ProgressStyle::with_template(&format!(
+                    "  [Conn {:>2}] {{bar:35.green/white}} {{bytes}}/{{total_bytes}} ({{bytes_per_sec}}) {{msg}}",
+                    idx + 1
+                ))
+                .unwrap()
+                .progress_chars("█▉▊▋▌▍▎▏ "),
+            );
+            conn_bar.enable_steady_tick(std::time::Duration::from_millis(100));
+
             let transfer_id = Uuid::new_v4();
             let mut folder_session =
                 FolderTransferSession::new(&mut conn, handshake.config.clone(), transfer_id);
 
-            let mut progress = p2p_core::progress::ProgressState::new(0);
+            let mut progress = ProgressState::from_bars(conn_bar, overall_clone);
             folder_session
                 .receive_folder(&output_clone, None, Some(&mut progress))
                 .await
-                .map_err(|e| {
-                    anyhow::anyhow!("Connection {} receive failed: {}", idx + 1, e)
-                })
+                .map_err(|e| anyhow::anyhow!("Connection {} receive failed: {}", idx + 1, e))
         });
 
         handles.push(handle);
@@ -145,6 +172,8 @@ async fn handle_parallel_receive(
             }
         }
     }
+
+    overall_bar.finish_with_message("all done");
 
     if errors.is_empty() {
         info!("✅ All parallel transfers received!");

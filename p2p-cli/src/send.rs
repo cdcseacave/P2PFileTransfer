@@ -1,7 +1,10 @@
 //! Send operations
 
 use anyhow::Result;
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use p2p_core::{
+    bandwidth::format_bandwidth,
+    progress::ProgressState,
     protocol::{Capabilities, ConfigMessage},
     session::P2PSession,
     transfer_folder::{scan_folder_for_parallel, split_files_for_parallel},
@@ -13,34 +16,25 @@ use tokio::signal;
 use crate::cli::{SessionParams, TransferParams};
 use tracing::{info, warn};
 
+fn spinner_style() -> ProgressStyle {
+    ProgressStyle::with_template("{spinner:.cyan} {msg}")
+        .unwrap()
+        .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"])
+}
+
+fn make_spinner(msg: &str) -> ProgressBar {
+    let bar = ProgressBar::new_spinner();
+    bar.set_style(spinner_style());
+    bar.set_message(msg.to_string());
+    bar.enable_steady_tick(std::time::Duration::from_millis(80));
+    bar
+}
+
 pub async fn handle_send(
     path: PathBuf,
     session_params: SessionParams,
     transfer_params: TransferParams,
 ) -> Result<()> {
-    info!("📤 Starting send operation");
-    info!("  Path: {}", path.display());
-
-    // Determine role (default to client for send)
-    let role = session_params.get_role("client");
-    info!("  Session role: {}", role);
-
-    info!(
-        "  Mode: {} (window size: {})",
-        if transfer_params.window_size == 1 {
-            "Sequential"
-        } else {
-            "Windowed"
-        },
-        transfer_params.window_size
-    );
-    if transfer_params.max_speed > 0 {
-        info!(
-            "  Speed limit: {}",
-            p2p_core::bandwidth::format_bandwidth(transfer_params.max_speed)
-        );
-    }
-
     if !path.exists() {
         anyhow::bail!("Path does not exist: {}", path.display());
     }
@@ -74,6 +68,13 @@ async fn handle_single_send(
     let device_id = Uuid::new_v4();
     let capabilities = Capabilities::all();
 
+    let peer_label = session_params
+        .peer
+        .as_deref()
+        .unwrap_or("(discovery)")
+        .to_string();
+    let sp = make_spinner(&format!("Connecting to {}...", peer_label));
+
     let mut session = P2PSession::establish(
         &session_params.get_role("client"),
         session_params.peer.clone(),
@@ -85,9 +86,8 @@ async fn handle_single_send(
     )
     .await?;
 
-    info!("✅ Session established");
-    info!("    Peer: {}", session.peer_device_id());
-    info!("    Capabilities: {:?}", session.capabilities());
+    sp.finish_and_clear();
+    eprintln!("✓ Connected  peer={}", session.peer_device_id());
 
     let result = tokio::select! {
         result = send_path(&mut session, &path, max_retries) => result,
@@ -104,36 +104,63 @@ async fn handle_parallel_send(
     max_retries: u32,
     parallel: usize,
 ) -> Result<()> {
-    info!(
-        "🔀 Parallel mode: {} simultaneous connections",
-        parallel
-    );
-
-    // Scan the folder once on the main thread
-    info!("Scanning folder: {}", path.display());
+    let sp = make_spinner(&format!("Scanning {}...", path.display()));
     let (base_path, all_files) = scan_folder_for_parallel(&path).await?;
     let total_files = all_files.len();
     let total_bytes: u64 = all_files.iter().map(|f| f.size).sum();
-    info!(
-        "Found {} files ({} bytes total)",
+    sp.finish_and_clear();
+    eprintln!(
+        "✓ Scan complete  {} files  {}  ({} connections)",
         total_files,
-        p2p_core::bandwidth::format_bandwidth(total_bytes)
+        format_bandwidth(total_bytes),
+        parallel
     );
 
-    // Split file list into balanced groups
     let groups = split_files_for_parallel(all_files, parallel);
     let actual_parallel = groups.len();
-    info!(
-        "Distributing across {} connection(s)",
-        actual_parallel
+    info!("Distributing across {} connection(s)", actual_parallel);
+
+    // --- build dynamic multi-progress display ---
+    let multi = MultiProgress::new();
+
+    // Overall bar across all connections
+    let overall_bar = multi.add(ProgressBar::new(total_bytes));
+    overall_bar.set_style(
+        ProgressStyle::with_template(
+            "  [Total ] {bar:35.yellow/white} {bytes}/{total_bytes} ({bytes_per_sec}, ETA: {eta})",
+        )
+        .unwrap()
+        .progress_chars("█▉▊▋▌▍▎▏ "),
     );
+    overall_bar.enable_steady_tick(std::time::Duration::from_millis(100));
+
+    // One bar per connection
+    let conn_bars: Vec<ProgressBar> = groups
+        .iter()
+        .enumerate()
+        .map(|(i, g)| {
+            let g_bytes: u64 = g.iter().map(|f| f.size).sum();
+            let bar = multi.add(ProgressBar::new(g_bytes));
+            bar.set_style(
+                ProgressStyle::with_template(&format!(
+                    "  [Conn {:>2}] {{bar:35.cyan/blue}} {{bytes}}/{{total_bytes}} ({{bytes_per_sec}}) {{msg}}",
+                    i + 1
+                ))
+                .unwrap()
+                .progress_chars("█▉▊▋▌▍▎▏ "),
+            );
+            bar.enable_steady_tick(std::time::Duration::from_millis(100));
+            bar
+        })
+        .collect();
+
     for (i, g) in groups.iter().enumerate() {
         let g_bytes: u64 = g.iter().map(|f| f.size).sum();
-        info!(
-            "  Connection {}: {} files, {}",
+        eprintln!(
+            "  conn {:>2}: {} files  {}",
             i + 1,
             g.len(),
-            p2p_core::bandwidth::format_bandwidth(g_bytes)
+            format_bandwidth(g_bytes)
         );
     }
 
@@ -142,13 +169,13 @@ async fn handle_parallel_send(
     let role = session_params.get_role("client");
     let discover = session_params.discover;
 
-    // Spawn one task per group
     let mut handles = Vec::new();
-    for (idx, group) in groups.into_iter().enumerate() {
+    for (idx, (group, conn_bar)) in groups.into_iter().zip(conn_bars).enumerate() {
         let config_clone = config.clone();
         let peer_clone = peer_addr.clone();
         let role_clone = role.clone();
         let base_path_clone = base_path.clone();
+        let overall_clone = overall_bar.clone();
         let _max_retries = max_retries;
 
         let handle = tokio::spawn(async move {
@@ -167,10 +194,10 @@ async fn handle_parallel_send(
             .await
             .map_err(|e| anyhow::anyhow!("Connection {}: {}", idx + 1, e))?;
 
-            info!("✅ Connection {} established (peer: {})", idx + 1, session.peer_device_id());
+            let mut progress = ProgressState::from_bars(conn_bar, overall_clone);
 
             session
-                .send_file_group(&base_path_clone, group, None)
+                .send_file_group(&base_path_clone, group, Some(&mut progress))
                 .await
                 .map_err(|e| anyhow::anyhow!("Connection {} transfer failed: {}", idx + 1, e))
         });
@@ -178,7 +205,6 @@ async fn handle_parallel_send(
         handles.push(handle);
     }
 
-    // Wait for all parallel transfers and collect errors
     let mut errors = Vec::new();
     for (idx, handle) in handles.into_iter().enumerate() {
         match handle.await {
@@ -193,6 +219,8 @@ async fn handle_parallel_send(
             }
         }
     }
+
+    overall_bar.finish_with_message("all done");
 
     if errors.is_empty() {
         info!("✅ All parallel transfers complete!");
@@ -213,32 +241,16 @@ async fn handle_parallel_send(
 async fn send_path(session: &mut P2PSession, path: &Path, max_retries: u32) -> Result<()> {
     let base_name = path.file_name().unwrap().to_string_lossy().to_string();
 
-    if path.is_file() {
-        info!("📄 Sending file: {}", base_name);
-    } else {
-        info!("📁 Sending folder: {}", base_name);
-    }
-
     let config = session.config();
-    if config.window_size == 1 {
-        info!("   Using sequential transfer (window size: 1)");
-    } else {
-        info!(
-            "   Using windowed transfer protocol (window size: {})",
-            config.window_size
-        );
-    }
+    let mode = if config.window_size == 1 { "sequential" } else { "windowed" };
+    let retry_label = match max_retries {
+        0 => "unlimited retries".to_string(),
+        1 => "no retry".to_string(),
+        n => format!("max {} retries", n),
+    };
 
-    if max_retries == 0 {
-        info!("   Auto-reconnect: enabled (unlimited retries)");
-    } else if max_retries == 1 {
-        info!("   Auto-reconnect: disabled (no retry)");
-    } else {
-        info!("   Auto-reconnect: enabled (max {} retries)", max_retries);
-    }
+    eprintln!("↑ {}  mode={}  w={}  {}", base_name, mode, config.window_size, retry_label);
 
-    let transfer_id = Uuid::new_v4();
-    let state_file = PathBuf::from(format!("transfer_{}.json", transfer_id));
     let mut progress = p2p_core::progress::ProgressState::new(0);
 
     let reconnect_config = p2p_core::reconnect::ReconnectConfig {
@@ -248,33 +260,9 @@ async fn send_path(session: &mut P2PSession, path: &Path, max_retries: u32) -> R
         exponential: true,
     };
 
-    let result = session
-        .send_path(
-            path,
-            &reconnect_config,
-            Some(&state_file),
-            Some(&mut progress),
-        )
-        .await;
-
-    match result {
-        Ok(_) => {
-            if state_file.exists() {
-                let _ = tokio::fs::remove_file(&state_file).await;
-            }
-            info!("✅ Transfer complete!");
-            Ok(())
-        }
-        Err(e) => {
-            if state_file.exists() {
-                warn!("  ⚠️  Transfer interrupted after {} attempts", max_retries);
-                warn!("  📝 State saved to: {}", state_file.display());
-                warn!(
-                    "  💡 Resume with: p2p-transfer resume {}",
-                    state_file.display()
-                );
-            }
-            Err(e.into())
-        }
-    }
+    session
+        .send_path(path, &reconnect_config, Some(&mut progress))
+        .await
+        .map(|_| eprintln!("✓ Transfer complete"))
+        .map_err(|e| e.into())
 }

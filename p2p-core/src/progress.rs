@@ -1,92 +1,130 @@
 //! Unified progress tracking for file transfers
-//!
-//! This module provides a unified progress tracking system for both single-file
-//! and folder transfers. It tracks bytes transferred and manages the progress bar display.
 
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
-/// Unified progress state for tracking transfer progress
 pub struct ProgressState {
-    /// Total bytes to transfer
     total_bytes: u64,
-    /// Bytes transferred so far
     transferred_bytes: u64,
-    /// Progress bar from indicatif
     progress_bar: ProgressBar,
+    /// Optional shared bar (parallel mode: overall total across all connections)
+    global_bar: Option<ProgressBar>,
+    /// True when bar is owned by a MultiProgress — skip draw-target manipulation.
+    managed: bool,
 }
 
 impl ProgressState {
-    /// Create a new progress state with a progress bar
     pub fn new(total_bytes: u64) -> Self {
         let progress_bar = ProgressBar::new(total_bytes);
         progress_bar.set_style(
-            ProgressStyle::default_bar()
-                .template("[{elapsed_precise}] {bar:40.cyan/blue} {bytes}/{total_bytes} ({bytes_per_sec}, ETA: {eta})")
-                .unwrap()
-                .progress_chars("=>-"),
+            ProgressStyle::with_template(
+                "[{elapsed_precise}] {bar:40.cyan/blue} {bytes}/{total_bytes} ({bytes_per_sec}, ETA: {eta})",
+            )
+            .unwrap()
+            .progress_chars("█▉▊▋▌▍▎▏ "),
         );
 
-        // If total_bytes is 0, hide the progress bar until we know the actual size
         if total_bytes == 0 {
             progress_bar.set_draw_target(indicatif::ProgressDrawTarget::hidden());
         } else {
-            // Enable steady tick for smooth updates (every 250ms)
-            progress_bar.enable_steady_tick(std::time::Duration::from_millis(250));
+            progress_bar.enable_steady_tick(std::time::Duration::from_millis(100));
         }
 
         Self {
             total_bytes,
             transferred_bytes: 0,
             progress_bar,
+            global_bar: None,
+            managed: false,
         }
     }
 
-    /// Update progress by adding bytes transferred
-    pub fn add_bytes(&mut self, bytes: u64) {
-        self.transferred_bytes += bytes;
-        self.progress_bar.set_position(self.transferred_bytes);
-        // Force a draw/tick to ensure the bar updates immediately
-        self.progress_bar.tick();
+    /// Wrap pre-created bars that are already attached to a `MultiProgress`.
+    ///
+    /// `local` is this connection's bar; `global` is the shared overall bar.
+    /// The bars must already have their style and steady-tick configured by the caller.
+    /// Draw-target changes are skipped so the MultiProgress stays in control.
+    pub fn from_bars(local: ProgressBar, global: ProgressBar) -> Self {
+        let total = local.length().unwrap_or(0);
+        Self {
+            total_bytes: total,
+            transferred_bytes: 0,
+            progress_bar: local,
+            global_bar: Some(global),
+            managed: true,
+        }
     }
 
-    /// Set the total bytes (useful when total is initially unknown)
+    /// Create a child progress bar, add it to `multi`, and return the wrapped state.
+    ///
+    /// `label` is shown as a fixed prefix (e.g. `"[Conn  1]"`).
+    /// `global` is an optional shared overall bar incremented alongside this one.
+    pub fn new_child(
+        label: &str,
+        total_bytes: u64,
+        multi: &MultiProgress,
+        global: Option<ProgressBar>,
+    ) -> Self {
+        let bar = multi.add(ProgressBar::new(total_bytes));
+        bar.set_style(
+            ProgressStyle::with_template(&format!(
+                "  {label} {{bar:35.cyan/blue}} {{bytes}}/{{total_bytes}} ({{bytes_per_sec}}) {{msg}}"
+            ))
+            .unwrap()
+            .progress_chars("█▉▊▋▌▍▎▏ "),
+        );
+        bar.enable_steady_tick(std::time::Duration::from_millis(100));
+
+        Self {
+            total_bytes,
+            transferred_bytes: 0,
+            progress_bar: bar,
+            global_bar: global,
+            managed: true,
+        }
+    }
+
+    pub fn add_bytes(&mut self, bytes: u64) {
+        self.transferred_bytes += bytes;
+        self.progress_bar.inc(bytes);
+        if let Some(ref gb) = self.global_bar {
+            gb.inc(bytes);
+        }
+    }
+
     pub fn set_total_bytes(&mut self, total_bytes: u64) {
         if self.total_bytes == total_bytes {
             return;
         }
 
-        // If we're transitioning from 0 to a real value, show the progress bar now
-        if self.total_bytes == 0 && total_bytes > 0 {
-            // Set draw target to default (stderr) to make it visible
+        if self.total_bytes == 0 && total_bytes > 0 && !self.managed {
             self.progress_bar
                 .set_draw_target(indicatif::ProgressDrawTarget::stderr());
-            // Enable steady tick for smooth updates (every 250ms)
             self.progress_bar
-                .enable_steady_tick(std::time::Duration::from_millis(250));
+                .enable_steady_tick(std::time::Duration::from_millis(100));
         }
 
         self.total_bytes = total_bytes;
         self.progress_bar.set_length(total_bytes);
-        // Force a tick to show the updated total
         self.progress_bar.tick();
     }
 
-    /// Finish the progress bar
-    pub fn finish(&self) {
-        self.progress_bar.finish_with_message("Transfer complete!");
+    /// Update the message shown alongside the bar (e.g. current filename).
+    pub fn set_message(&mut self, msg: String) {
+        self.progress_bar.set_message(msg);
     }
 
-    /// Get total bytes
+    pub fn finish(&self) {
+        self.progress_bar.finish_with_message("done");
+    }
+
     pub fn total_bytes(&self) -> u64 {
         self.total_bytes
     }
 
-    /// Get transferred bytes
     pub fn transferred_bytes(&self) -> u64 {
         self.transferred_bytes
     }
 
-    /// Get progress percentage
     pub fn progress_percent(&self) -> f64 {
         if self.total_bytes > 0 {
             (self.transferred_bytes as f64 / self.total_bytes as f64) * 100.0
@@ -95,7 +133,6 @@ impl ProgressState {
         }
     }
 
-    /// Check if transfer is complete
     pub fn is_complete(&self) -> bool {
         self.transferred_bytes >= self.total_bytes
     }

@@ -421,7 +421,6 @@ impl P2PSession {
         &mut self,
         path: &Path,
         reconnect_config: &crate::reconnect::ReconnectConfig,
-        state_path: Option<&Path>,
         mut progress: Option<&mut ProgressState>,
     ) -> Result<()> {
         use crate::reconnect::is_transient_error;
@@ -434,48 +433,10 @@ impl P2PSession {
         }
 
         let mut attempt = 0;
+        let transfer_id = Uuid::new_v4();
+        let mut state = FolderTransferState::new(Uuid::new_v4(), String::new(), vec![]);
 
-        // Create or load state (empty state for fresh transfers, loaded state for resume)
-        let mut state = if let Some(state_file) = state_path {
-            if state_file.exists() {
-                info!("Loading existing transfer state from {:?}", state_file);
-                match FolderTransferState::load_from_file(state_file).await {
-                    Ok(loaded_state) => {
-                        info!(
-                            "Loaded state: {} files total, {} completed ({:.1}% done)",
-                            loaded_state.files.len(),
-                            loaded_state.completed_files.len(),
-                            loaded_state.progress_percentage()
-                        );
-                        loaded_state
-                    }
-                    Err(e) => {
-                        warn!("Failed to load state file: {}", e);
-                        // Create empty state (will be initialized during send())
-                        FolderTransferState::new(Uuid::new_v4(), String::new(), vec![])
-                    }
-                }
-            } else {
-                // No state file, create empty state
-                FolderTransferState::new(Uuid::new_v4(), String::new(), vec![])
-            }
-        } else {
-            // No state path provided, create empty state
-            FolderTransferState::new(Uuid::new_v4(), String::new(), vec![])
-        };
-
-        // Use transfer_id from state if it exists, or create new one
-        let transfer_id = if state.files.is_empty() {
-            Uuid::new_v4()
-        } else {
-            state.transfer_id
-        };
-
-        if !state.files.is_empty() {
-            info!("Resuming transfer with ID: {}", transfer_id);
-        } else {
-            info!("Starting new transfer with ID: {}", transfer_id);
-        }
+        info!("Starting new transfer with ID: {}", transfer_id);
 
         loop {
             let result = {
@@ -501,45 +462,24 @@ impl P2PSession {
                     }
                 );
 
-                // Use the unified send() method with mutable state
                 folder_session
                     .send(path, &mut state, progress.as_deref_mut())
                     .await
             };
 
             match result {
-                Ok(_) => {
-                    // Clean up state file on success
-                    if let Some(state_file) = state_path {
-                        if state_file.exists() {
-                            let _ = tokio::fs::remove_file(state_file).await;
-                        }
-                    }
-                    return Ok(());
-                }
+                Ok(_) => return Ok(()),
                 Err(e) => {
-                    // Check if error is transient
                     if !is_transient_error(&e) {
                         warn!("Non-transient error, not retrying: {}", e);
-                        // Save state to disk for manual resume
-                        if let Some(state_file) = state_path {
-                            let _ = state.save_to_file(state_file).await;
-                            info!("Saved state to disk for manual resume");
-                        }
                         return Err(e);
                     }
 
-                    // Check if we should retry
                     if !reconnect_config.should_retry(attempt) {
                         warn!(
                             "Max reconnection attempts ({}) reached",
                             reconnect_config.max_attempts
                         );
-                        // Save state to disk for manual resume
-                        if let Some(state_file) = state_path {
-                            let _ = state.save_to_file(state_file).await;
-                            info!("Saved state to disk after max retries");
-                        }
                         return Err(Error::Protocol(format!(
                             "Transfer failed after {} attempts: {}",
                             attempt + 1,
@@ -547,10 +487,9 @@ impl P2PSession {
                         )));
                     }
 
-                    // Calculate backoff delay
                     let delay = reconnect_config.backoff_delay(attempt);
                     warn!(
-                        "Transient error occurred (attempt {}/{}): {}. Retrying in {:?}...",
+                        "Transient error (attempt {}/{}): {}. Retrying in {:?}...",
                         attempt + 1,
                         if reconnect_config.max_attempts == 0 {
                             "∞".to_string()
@@ -561,28 +500,11 @@ impl P2PSession {
                         delay
                     );
 
-                    // Save current state to disk before attempting reconnection
-                    // This captures all completed chunks in memory at the moment of disconnection
-                    if let Some(state_file) = state_path {
-                        if let Err(save_err) = state.save_to_file(state_file).await {
-                            warn!("Failed to save state to disk: {}", save_err);
-                        } else {
-                            debug!("Saved current state to disk for chunk-level resume");
-                        }
-                    }
-
-                    // State is already up-to-date in memory (chunks were marked complete during transfer)
-                    // No need to reload - just use the existing state for retry
-
-                    // Wait before retrying
                     tokio::time::sleep(delay).await;
 
-                    // Re-establish connection before retry
                     info!("Re-establishing connection...");
                     match self.reconnect().await {
-                        Ok(_) => {
-                            info!("Connection re-established successfully");
-                        }
+                        Ok(_) => info!("Connection re-established successfully"),
                         Err(reconnect_err) => {
                             warn!("Failed to reconnect: {}", reconnect_err);
                             attempt += 1;
@@ -591,7 +513,7 @@ impl P2PSession {
                     }
 
                     attempt += 1;
-                    info!("Retrying transfer after backoff delay...");
+                    info!("Retrying transfer...");
                 }
             }
         }
