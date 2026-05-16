@@ -184,14 +184,32 @@ impl<'a> FileTransferSession<'a> {
             self.compressed_bytes_sent += chunk_msg.data.len() as u64;
             self.uncompressed_bytes_sent += uncompressed_size;
 
-            self.connection
-                .send_message(&Message::Chunk(chunk_msg))
-                .await?;
+            // Send chunk and retry up to MAX_CHUNK_RETRIES times on ACK timeout
+            const MAX_CHUNK_RETRIES: u32 = 5;
+            let mut attempts = 0u32;
+            let ack = loop {
+                self.connection
+                    .send_message(&Message::Chunk(chunk_msg.clone()))
+                    .await?;
 
-            // Wait for acknowledgment
-            let ack = timeout(Duration::from_secs(10), self.receive_ack())
-                .await
-                .map_err(|_| Error::Protocol("Chunk ack timeout".to_string()))??;
+                match timeout(Duration::from_secs(10), self.receive_ack()).await {
+                    Ok(Ok(ack)) => break ack,
+                    Ok(Err(e)) => return Err(e),
+                    Err(_) => {
+                        attempts += 1;
+                        if attempts >= MAX_CHUNK_RETRIES {
+                            return Err(Error::Protocol(format!(
+                                "Chunk {} ack timeout after {} retries",
+                                chunk_index, attempts
+                            )));
+                        }
+                        warn!(
+                            "Chunk {} ack timeout, retrying ({}/{})",
+                            chunk_index, attempts, MAX_CHUNK_RETRIES
+                        );
+                    }
+                }
+            };
 
             if ack != chunk_index {
                 return Err(Error::Protocol(format!(
@@ -673,6 +691,60 @@ impl ChunkWriter {
             path: path.to_path_buf(), // Store original path
             chunk_size,
             hasher: sha2::Sha256::new(),
+        })
+    }
+
+    /// Open an existing `.partial` file for resuming a partial transfer.
+    ///
+    /// Reads the already-received chunks in index order to reconstruct the running
+    /// SHA-256 state so the final checksum will be correct over the whole file.
+    pub async fn open_for_resume(
+        path: &Path,
+        chunk_size: usize,
+        completed_chunks: &[u64],
+    ) -> Result<Self> {
+        // Build the .partial path
+        let mut partial_os = path.as_os_str().to_os_string();
+        partial_os.push(".partial");
+        let partial_path = PathBuf::from(partial_os);
+
+        // Open for writing without truncating existing content
+        let file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .open(&partial_path)
+            .await
+            .map_err(|e| {
+                Error::Network(std::io::Error::new(
+                    e.kind(),
+                    format!("Failed to open partial file {:?}: {}", partial_path, e),
+                ))
+            })?;
+
+        // Re-hash already-received chunks in order so the running SHA-256 is consistent
+        let mut hasher = sha2::Sha256::new();
+        if !completed_chunks.is_empty() {
+            let mut sorted = completed_chunks.to_vec();
+            sorted.sort_unstable();
+
+            let mut read_file = File::open(&partial_path).await?;
+            for chunk_idx in sorted {
+                read_file
+                    .seek(SeekFrom::Start(chunk_idx * chunk_size as u64))
+                    .await?;
+                let mut buf = vec![0u8; chunk_size];
+                let n = read_file.read(&mut buf).await?;
+                if n > 0 {
+                    hasher.update(&buf[..n]);
+                }
+            }
+        }
+
+        Ok(Self {
+            file,
+            path: path.to_path_buf(),
+            chunk_size,
+            hasher,
         })
     }
 

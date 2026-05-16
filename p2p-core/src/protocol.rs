@@ -71,6 +71,9 @@ pub enum Message {
     // File list streaming (for large folders that exceed message size limits)
     FileListChunk(FileListChunk),
 
+    // Sync negotiation — receiver reports which files it already has
+    SyncStatus(SyncStatus),
+
     // Control
     Pause,
     Cancel,
@@ -156,6 +159,30 @@ pub struct TransferInfo {
     /// Total number of files (only valid when chunked=true)
     #[serde(default)]
     pub total_file_count: u32,
+}
+
+/// Sync status sent by the receiver after receiving TransferInfo.
+///
+/// Replaces the old `Ready` message. The sender uses this to skip files
+/// the receiver already has and to resume partially-received files from
+/// the exact chunk where the receiver left off.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncStatus {
+    /// Transfer identifier (echoed back from TransferInfo)
+    pub transfer_id: Uuid,
+    /// Files the receiver already has complete and verified — sender skips these
+    pub complete_files: Vec<u32>,
+    /// Files the receiver has partially received — sender resumes from missing chunks
+    pub partial_files: Vec<PartialFileStatus>,
+}
+
+/// Partial receive status for a single file
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PartialFileStatus {
+    /// File index within the transfer
+    pub file_index: u32,
+    /// Chunk indices the receiver already has on disk
+    pub received_chunks: Vec<u64>,
 }
 
 /// Streaming chunk of a large file list (sent when folder has too many files for one message)

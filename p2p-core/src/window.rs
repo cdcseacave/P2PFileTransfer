@@ -39,8 +39,8 @@ impl Default for WindowConfig {
     fn default() -> Self {
         Self {
             max_window_size: 16,
-            ack_timeout: Duration::from_secs(10),
-            max_retries: 3,
+            ack_timeout: Duration::from_secs(30),
+            max_retries: 10,
         }
     }
 }
