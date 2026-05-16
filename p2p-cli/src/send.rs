@@ -100,18 +100,23 @@ async fn handle_single_send(
     result
 }
 
-/// Work-stealing batch size: ~512 MB per pull from the queue.
-/// Large files (> threshold) are taken one at a time.
-/// Small files are grouped until the threshold is reached.
+/// Work-stealing batch size: ~512 MB or 200 files per pull from the queue.
+/// Large files (> byte threshold) are taken one at a time.
+/// Small files are grouped until either limit is reached, whichever comes first.
+/// The file count cap prevents one connection from monopolising thousands of tiny files
+/// while other connections sit idle.
 const BATCH_TARGET_BYTES: u64 = 512 * 1024 * 1024;
+const BATCH_MAX_FILES: usize = 200;
 
 fn take_batch(queue: &mut VecDeque<FileMetadata>) -> Vec<FileMetadata> {
     let mut batch = Vec::new();
     let mut total = 0u64;
 
     while let Some(file) = queue.front() {
-        // Always take at least 1 file; stop if adding next would exceed target
-        if !batch.is_empty() && total + file.size > BATCH_TARGET_BYTES {
+        // Stop if either the byte budget or the file count cap is reached
+        if !batch.is_empty()
+            && (total + file.size > BATCH_TARGET_BYTES || batch.len() >= BATCH_MAX_FILES)
+        {
             break;
         }
         total += file.size;
