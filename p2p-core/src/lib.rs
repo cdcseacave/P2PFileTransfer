@@ -25,6 +25,7 @@ pub mod window; // Sliding window protocol
 
 pub use error::{Error, Result};
 pub use protocol::Message;
+pub use transfer_folder::{scan_folder_for_parallel, split_files_for_parallel};
 
 // Re-export commonly used types
 pub use uuid::Uuid;

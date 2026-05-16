@@ -68,6 +68,9 @@ pub enum Message {
     Chunk(ChunkMessage),
     ChunkAck(ChunkAck),
 
+    // File list streaming (for large folders that exceed message size limits)
+    FileListChunk(FileListChunk),
+
     // Control
     Pause,
     Cancel,
@@ -143,10 +146,29 @@ impl Default for ConfigMessage {
 pub struct TransferInfo {
     /// Unique transfer identifier
     pub transfer_id: Uuid,
-    /// List of files to transfer
+    /// List of files to transfer (empty when chunked=true)
     pub items: Vec<FileMetadata>,
     /// Resume point if applicable
     pub resume_from: Option<ResumePoint>,
+    /// When true, file list is too large for one message and will follow as FileListChunk messages
+    #[serde(default)]
+    pub chunked: bool,
+    /// Total number of files (only valid when chunked=true)
+    #[serde(default)]
+    pub total_file_count: u32,
+}
+
+/// Streaming chunk of a large file list (sent when folder has too many files for one message)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileListChunk {
+    /// Transfer identifier
+    pub transfer_id: Uuid,
+    /// Index of this chunk (0-based)
+    pub chunk_index: u32,
+    /// Total number of chunks
+    pub total_chunks: u32,
+    /// File metadata for this batch
+    pub items: Vec<FileMetadata>,
 }
 
 /// File metadata

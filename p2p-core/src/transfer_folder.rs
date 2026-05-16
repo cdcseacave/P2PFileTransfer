@@ -15,11 +15,15 @@ use crate::{
     error::{Error, Result},
     network::tcp::TcpConnection,
     progress::ProgressState,
-    protocol::{CompleteMessage, ConfigMessage, FileMetadata, Message, TransferInfo},
+    protocol::{CompleteMessage, ConfigMessage, FileListChunk, FileMetadata, Message, TransferInfo},
     transfer_file::FileTransferSession,
     verification,
     window::WindowConfig,
 };
+
+/// Maximum number of files per TransferInfo/FileListChunk message.
+/// Prevents individual messages from growing too large on directories with many files.
+const FILE_LIST_BATCH_SIZE: usize = 5_000;
 use std::{
     path::{Path, PathBuf},
     time::SystemTime,
@@ -299,17 +303,43 @@ impl<'a> FolderTransferSession<'a> {
             progress.set_total_bytes(total_bytes);
         }
 
-        // Send transfer info with file list and optional resume point
+        // Send transfer info with file list and optional resume point.
+        // When the file list is very large, stream it as batched FileListChunk messages
+        // to avoid hitting the per-message size limit.
         let is_resuming = resume_point.is_some();
+        let chunked = state.files.len() > FILE_LIST_BATCH_SIZE;
         let transfer_info = TransferInfo {
             transfer_id: self.transfer_id,
-            items: state.files.clone(),
+            items: if chunked { vec![] } else { state.files.clone() },
             resume_from: resume_point,
+            chunked,
+            total_file_count: state.files.len() as u32,
         };
 
         self.connection
             .send_message(&Message::TransferInfo(transfer_info))
             .await?;
+
+        if chunked {
+            let total_chunks =
+                (state.files.len() + FILE_LIST_BATCH_SIZE - 1) / FILE_LIST_BATCH_SIZE;
+            info!(
+                "Sending file list in {} batches ({} files total)",
+                total_chunks,
+                state.files.len()
+            );
+            for (chunk_index, batch) in state.files.chunks(FILE_LIST_BATCH_SIZE).enumerate() {
+                let chunk_msg = FileListChunk {
+                    transfer_id: self.transfer_id,
+                    chunk_index: chunk_index as u32,
+                    total_chunks: total_chunks as u32,
+                    items: batch.to_vec(),
+                };
+                self.connection
+                    .send_message(&Message::FileListChunk(chunk_msg))
+                    .await?;
+            }
+        }
 
         // Wait for ready acknowledgment
         let msg = self.connection.recv_message().await?;
@@ -419,7 +449,38 @@ impl<'a> FolderTransferSession<'a> {
                 )))
             }
         };
-        if transfer_info.items.is_empty() {
+        // Collect the full file list — may arrive in batched FileListChunk messages
+        // when the sender has too many files to fit in a single TransferInfo message.
+        let all_items: Vec<FileMetadata> = if transfer_info.chunked {
+            let total_chunks = (transfer_info.total_file_count as usize
+                + FILE_LIST_BATCH_SIZE
+                - 1)
+                / FILE_LIST_BATCH_SIZE;
+            info!(
+                "Receiving chunked file list ({} files in {} batches)",
+                transfer_info.total_file_count, total_chunks
+            );
+            let mut items = Vec::with_capacity(transfer_info.total_file_count as usize);
+            for _ in 0..total_chunks {
+                let msg = self.connection.recv_message().await?;
+                match msg {
+                    Message::FileListChunk(chunk) => {
+                        items.extend(chunk.items);
+                    }
+                    _ => {
+                        return Err(Error::Protocol(format!(
+                            "Expected FileListChunk, got {:?}",
+                            msg
+                        )))
+                    }
+                }
+            }
+            items
+        } else {
+            transfer_info.items.clone()
+        };
+
+        if all_items.is_empty() {
             return Err(Error::Protocol("No files in transfer".to_string()));
         }
 
@@ -461,17 +522,17 @@ impl<'a> FolderTransferSession<'a> {
         if is_resume {
             info!(
                 "Receiving resumed transfer with {} files",
-                transfer_info.items.len()
+                all_items.len()
             );
         } else {
             info!(
                 "Receiving new transfer with {} files",
-                transfer_info.items.len()
+                all_items.len()
             );
         }
 
         // Calculate total size
-        let total_bytes: u64 = transfer_info.items.iter().map(|f| f.size).sum();
+        let total_bytes: u64 = all_items.iter().map(|f| f.size).sum();
 
         // Calculate already-transferred bytes from resume information
         let mut already_transferred = 0u64;
@@ -479,13 +540,13 @@ impl<'a> FolderTransferSession<'a> {
             let file_index = resume_point.file_index as usize;
             // Add bytes from all completed files before the resume point
             for i in 0..file_index {
-                if i < transfer_info.items.len() {
-                    already_transferred += transfer_info.items[i].size;
+                if i < all_items.len() {
+                    already_transferred += all_items[i].size;
                 }
             }
             // Add bytes from completed chunks in the current file
-            if file_index < transfer_info.items.len() {
-                let current_file_size = transfer_info.items[file_index].size;
+            if file_index < all_items.len() {
+                let current_file_size = all_items[file_index].size;
                 let chunk_size = self.config.chunk_size as u64;
                 let total_chunks = (current_file_size + chunk_size - 1) / chunk_size;
                 let completed_chunks = resume_point.completed_chunks.len() as u64;
@@ -521,9 +582,9 @@ impl<'a> FolderTransferSession<'a> {
         self.connection.send_message(&Message::Ready).await?;
 
         // Receive each file
-        let total_files = transfer_info.items.len();
+        let total_files = all_items.len();
 
-        for (file_index, file_meta) in transfer_info.items.iter().enumerate() {
+        for (file_index, file_meta) in all_items.iter().enumerate() {
             let relative_path = PathBuf::from(&file_meta.path);
             let full_path = output_dir.join(&relative_path);
 
@@ -820,8 +881,93 @@ impl<'a> FolderTransferSession<'a> {
             .await
     }
 
+    /// Send a pre-determined group of files to the peer (used for parallel transfers).
+    ///
+    /// Unlike `send()`, this method does not scan the filesystem — the caller provides
+    /// the exact file list and the base path under which they live.
+    pub async fn send_group(
+        &mut self,
+        base_path: &Path,
+        files: Vec<FileMetadata>,
+        mut progress: Option<&mut ProgressState>,
+    ) -> Result<()> {
+        self.transfer_start = Some(std::time::Instant::now());
+        self.total_compressed_bytes = 0;
+
+        let total_files = files.len();
+        let total_bytes: u64 = files.iter().map(|f| f.size).sum();
+
+        if let Some(ref mut p) = progress {
+            p.set_total_bytes(total_bytes);
+        }
+
+        // Stream the file list (may be large — use batching)
+        let chunked = files.len() > FILE_LIST_BATCH_SIZE;
+        let transfer_info = TransferInfo {
+            transfer_id: self.transfer_id,
+            items: if chunked { vec![] } else { files.clone() },
+            resume_from: None,
+            chunked,
+            total_file_count: files.len() as u32,
+        };
+        self.connection
+            .send_message(&Message::TransferInfo(transfer_info))
+            .await?;
+
+        if chunked {
+            let total_chunks = (files.len() + FILE_LIST_BATCH_SIZE - 1) / FILE_LIST_BATCH_SIZE;
+            for (chunk_index, batch) in files.chunks(FILE_LIST_BATCH_SIZE).enumerate() {
+                let chunk_msg = FileListChunk {
+                    transfer_id: self.transfer_id,
+                    chunk_index: chunk_index as u32,
+                    total_chunks: total_chunks as u32,
+                    items: batch.to_vec(),
+                };
+                self.connection
+                    .send_message(&Message::FileListChunk(chunk_msg))
+                    .await?;
+            }
+        }
+
+        // Wait for receiver ready
+        let msg = self.connection.recv_message().await?;
+        if !matches!(msg, Message::Ready) {
+            return Err(Error::Protocol(format!("Expected Ready, got {:?}", msg)));
+        }
+
+        for (file_index, file_meta) in files.iter().enumerate() {
+            let relative_path = PathBuf::from(&file_meta.path);
+            let full_path = base_path.join(&relative_path);
+
+            self.send_single_file(
+                &full_path,
+                file_index as u32,
+                &[],
+                progress.as_deref_mut(),
+                None::<fn(u64)>,
+            )
+            .await?;
+        }
+
+        let duration = self.transfer_start.map(|s| s.elapsed()).unwrap_or_default();
+        let complete_msg = CompleteMessage {
+            transfer_id: self.transfer_id,
+            total_bytes,
+            duration_ms: duration.as_millis() as u64,
+        };
+        self.connection
+            .send_message(&Message::Complete(complete_msg))
+            .await?;
+
+        if let Some(ref mut p) = progress {
+            p.finish();
+        }
+        self.display_transfer_stats(total_files, total_bytes, duration.as_secs_f64(), true);
+        Ok(())
+    }
+
     /// Scan a folder and build file metadata list
-    async fn scan_folder(&self, folder_path: &Path) -> Result<Vec<(PathBuf, FileMetadata)>> {
+    pub async fn scan_folder(&self, folder_path: &Path) -> Result<Vec<(PathBuf, FileMetadata)>> {
         let mut files = Vec::new();
         // Use parent as base so folder name is included in relative paths
         let base_path = folder_path.parent().unwrap_or(folder_path);
@@ -878,6 +1024,49 @@ impl<'a> FolderTransferSession<'a> {
             Ok(())
         })
     }
+}
+
+/// Scan a folder recursively and return `(base_path, Vec<FileMetadata>)`.
+///
+/// `base_path` is the parent of `folder_path` so that the folder name itself
+/// is included in the relative paths stored in `FileMetadata.path`.
+pub async fn scan_folder_for_parallel(
+    folder_path: &Path,
+) -> Result<(PathBuf, Vec<FileMetadata>)> {
+    let base_path = folder_path.parent().unwrap_or(folder_path).to_path_buf();
+    let mut raw: Vec<(PathBuf, FileMetadata)> = Vec::new();
+    FolderTransferSession::scan_folder_recursive(&base_path, folder_path, &mut raw).await?;
+    let files = raw.into_iter().map(|(_, m)| m).collect();
+    Ok((base_path, files))
+}
+
+/// Split a file list into `n` balanced groups (by total bytes) for parallel transfer.
+///
+/// Uses a greedy bin-packing heuristic: sort files largest-first, then assign
+/// each file to the group with the smallest current total.
+pub fn split_files_for_parallel(files: Vec<FileMetadata>, n: usize) -> Vec<Vec<FileMetadata>> {
+    if n <= 1 || files.is_empty() {
+        return vec![files];
+    }
+
+    let mut sorted = files;
+    sorted.sort_by(|a, b| b.size.cmp(&a.size));
+
+    let mut groups: Vec<Vec<FileMetadata>> = (0..n).map(|_| Vec::new()).collect();
+    let mut group_bytes: Vec<u64> = vec![0u64; n];
+
+    for file in sorted {
+        let min_idx = group_bytes
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, &b)| b)
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        group_bytes[min_idx] += file.size;
+        groups[min_idx].push(file);
+    }
+
+    groups.into_iter().filter(|g| !g.is_empty()).collect()
 }
 
 /// Folder transfer state for resume capability

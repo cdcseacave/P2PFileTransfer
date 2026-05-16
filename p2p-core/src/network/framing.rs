@@ -6,8 +6,8 @@ use crate::PROTOCOL_MAGIC;
 use bytes::{BufMut, BytesMut};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-/// Maximum message size (10 MB)
-const MAX_MESSAGE_SIZE: u32 = 10 * 1024 * 1024;
+/// Maximum message size (128 MB) — large enough for chunked file-list batches plus data chunks
+const MAX_MESSAGE_SIZE: u32 = 128 * 1024 * 1024;
 
 /// Write a message to an async writer
 pub async fn write_message<W>(writer: &mut W, message: &Message) -> Result<()>

@@ -44,7 +44,7 @@ use crate::{
     handshake::{HandshakeClient, HandshakeResult, HandshakeServer},
     network::tcp::{TcpConnection, TcpServer},
     progress::ProgressState,
-    protocol::{Capabilities, ConfigMessage},
+    protocol::{Capabilities, ConfigMessage, FileMetadata},
     transfer_folder::{FolderTransferSession, FolderTransferState},
 };
 use std::{net::SocketAddr, path::Path};
@@ -595,6 +595,27 @@ impl P2PSession {
                 }
             }
         }
+    }
+
+    /// Send a pre-determined group of files to the peer.
+    ///
+    /// Used by the parallel transfer feature: the caller scans the folder once,
+    /// splits the file list into groups, and calls this on each independent session.
+    ///
+    /// `base_path` is the directory under which `files[i].path` is relative.
+    pub async fn send_file_group(
+        &mut self,
+        base_path: &std::path::Path,
+        files: Vec<FileMetadata>,
+        progress: Option<&mut ProgressState>,
+    ) -> Result<()> {
+        let transfer_id = Uuid::new_v4();
+        let mut folder_session = FolderTransferSession::new(
+            &mut self.connection,
+            self.handshake.config.clone(),
+            transfer_id,
+        );
+        folder_session.send_group(base_path, files, progress).await
     }
 
     /// Receive a file or folder from the peer

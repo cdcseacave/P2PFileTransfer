@@ -128,9 +128,10 @@ async fn run_cli_async(cli: Cli) -> Result<()> {
         Some(cli::Commands::Receive {
             output,
             auto_accept,
+            parallel,
             session,
         }) => {
-            receive::handle_receive(output, auto_accept, session).await?;
+            receive::handle_receive(output, auto_accept, parallel, session).await?;
         }
         Some(cli::Commands::Discover { timeout, port }) => {
             discover::handle_discover(timeout, port).await?;

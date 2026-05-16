@@ -1,0 +1,94 @@
+name: Build Artifacts
+
+on:
+  push:
+    branches: ["main"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write  # criar release em push para main
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.compute.outputs.version }}
+    steps:
+      - name: Compute version
+        id: compute
+        run: |
+          # v0.0-<UTC timestamp YYYYMMDDHHMM>. Compartilhado entre os 3 jobs
+          # de build para que os artifacts saiam com o mesmo nome de versao.
+          VERSION="v0.0-$(date -u +%Y%m%d%H%M)"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Computed VERSION=$VERSION"
+
+  build:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install FLTK system deps (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev libxext-dev libxft-dev libxinerama-dev \
+            libxcursor-dev libxrender-dev libxfixes-dev libpango1.0-dev libgl1-mesa-dev \
+            libglu1-mesa-dev libfontconfig1-dev libcairo2-dev
+
+      - name: Setup MSVC env (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release
+        run: cargo build --release
+
+      - name: Smoke test — p2p-transfer run (JIT)
+        run: target/release/p2p-transfer run bench/pi_machin.ts
+        shell: bash
+
+      - name: Rename artifact (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/release/p2p-transfer.exe "dist/p2p-transfer-${{ needs.version.outputs.version }}-${{ runner.os }}-${{ runner.arch }}.exe"
+
+      - name: Rename artifact (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/release/p2p-transfer "dist/p2p-transfer-${{ needs.version.outputs.version }}-${{ runner.os }}-${{ runner.arch }}"
+
+      - name: Upload artifact (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: p2p-transfer-${{ needs.version.outputs.version }}-${{ runner.os }}-${{ runner.arch }}
+          path: dist/*.exe
+          if-no-files-found: error
+
+      - name: Upload artifact (Unix)
+        if: runner.os != 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: p2p-transfer-${{ needs.version.outputs.version }}-${{ runner.os }}-${{ runner.arch }}
+          path: dist/p2p-transfer-*
+          if-no-files-found: error

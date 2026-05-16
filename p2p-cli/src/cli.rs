@@ -83,6 +83,13 @@ pub struct TransferParams {
     /// Maximum reconnection attempts on network failures (0 = unlimited, 1 = no retry)
     #[arg(long, default_value = "5")]
     pub max_retries: u32,
+
+    /// Number of parallel connections for concurrent file transfers (default: 1)
+    ///
+    /// When > 1, the sender opens N simultaneous connections and distributes files
+    /// evenly across them. The receiver must be started with the same --parallel value.
+    #[arg(long, default_value = "1")]
+    pub parallel: usize,
 }
 
 #[derive(Parser)]
@@ -129,6 +136,10 @@ pub enum Commands {
         /// Auto-accept transfers without prompting
         #[arg(short = 'a', long)]
         auto_accept: bool,
+
+        /// Number of parallel sender connections to accept (must match sender --parallel)
+        #[arg(long, default_value = "1")]
+        parallel: usize,
 
         #[command(flatten)]
         session: SessionParams,
