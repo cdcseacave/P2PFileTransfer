@@ -191,15 +191,44 @@ async fn handle_parallel_receive(
             );
             conn_bar.enable_steady_tick(std::time::Duration::from_millis(100));
 
-            let transfer_id = Uuid::new_v4();
-            let mut folder_session =
-                FolderTransferSession::new(&mut conn, handshake.config.clone(), transfer_id);
+            let mut progress = ProgressState::from_bars_persistent(conn_bar, overall_clone);
+            let mut batch_count = 0usize;
 
-            let mut progress = ProgressState::from_bars(conn_bar, overall_clone);
-            folder_session
-                .receive_folder(&output_clone, None, Some(&mut progress))
-                .await
-                .map_err(|e| anyhow::anyhow!("Connection {} receive failed: {}", idx + 1, e))
+            loop {
+                let transfer_id = Uuid::new_v4();
+                let mut folder_session =
+                    FolderTransferSession::new(&mut conn, handshake.config.clone(), transfer_id);
+
+                match folder_session
+                    .receive_folder(&output_clone, None, Some(&mut progress))
+                    .await
+                {
+                    Ok(()) => {
+                        batch_count += 1;
+                        // Connection still open — sender may send another batch
+                    }
+                    Err(P2PError::Disconnected) => break,
+                    Err(P2PError::Network(ref io_err))
+                        if io_err.kind() == std::io::ErrorKind::UnexpectedEof
+                            || io_err.kind() == std::io::ErrorKind::ConnectionReset
+                            || io_err.kind() == std::io::ErrorKind::BrokenPipe =>
+                    {
+                        // Sender closed connection after last batch
+                        break;
+                    }
+                    Err(e) => {
+                        return Err(anyhow::anyhow!(
+                            "Connection {} receive failed (batch {}): {}",
+                            idx + 1,
+                            batch_count + 1,
+                            e
+                        ));
+                    }
+                }
+            }
+
+            info!("Connection {} finished ({} batch(es))", idx + 1, batch_count);
+            Ok::<(), anyhow::Error>(())
         });
 
         handles.push(handle);
