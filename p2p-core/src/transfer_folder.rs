@@ -77,12 +77,29 @@ impl ReceiverSyncState {
     }
 
     /// Returns `true` if the receiver already has this file complete and verified.
-    /// Uses size + mtime as a fast "rsync-style" check.
-    pub fn is_complete(&self, rel_path: &str, size: u64, mtime: u64) -> bool {
-        self.files
-            .get(rel_path)
-            .map(|info| info.size == size && info.mtime == mtime)
-            .unwrap_or(false)
+    ///
+    /// If `sender_sha256` is non-zero and the stored state has a SHA-256 for this file,
+    /// the decision is based on hash comparison (reliable, mtime-independent).
+    /// Otherwise falls back to size + mtime (rsync-style fast check).
+    pub fn is_complete(&self, rel_path: &str, size: u64, mtime: u64, sender_sha256: &[u8; 32]) -> bool {
+        match self.files.get(rel_path) {
+            None => false,
+            Some(info) => {
+                if info.size != size {
+                    return false;
+                }
+                let sender_has_hash = sender_sha256 != &[0u8; 32];
+                if sender_has_hash && !info.sha256.is_empty() {
+                    // Compare stored SHA-256 hex with sender's bytes
+                    let stored = info.sha256.as_str();
+                    let sender_hex: String = sender_sha256.iter().map(|b| format!("{:02x}", b)).collect();
+                    stored == sender_hex
+                } else {
+                    // Fast path: size already matches, check mtime
+                    info.mtime == mtime
+                }
+            }
+        }
     }
 
     /// Returns the chunk indices the receiver already has for a partial file.
@@ -112,8 +129,65 @@ impl ReceiverSyncState {
     }
 }
 use tokio::fs;
+use tokio::io::AsyncReadExt;
 use tracing::{debug, info, trace, warn};
 use uuid::Uuid;
+
+/// Compute the SHA-256 of a file, returning it as a lowercase hex string.
+async fn hash_file(path: &Path) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    let mut file = fs::File::open(path).await?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 256 * 1024];
+    loop {
+        let n = file.read(&mut buf).await?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect())
+}
+
+/// Compute SHA-256 for a batch of files concurrently (bounded to 8 tasks).
+/// Fills `FileMetadata.checksum` in-place.
+pub async fn compute_file_checksums(base_path: &Path, files: &mut Vec<FileMetadata>) -> Result<()> {
+    use futures::stream::{self, StreamExt};
+
+    let results: Vec<(usize, [u8; 32])> = stream::iter(files.iter().enumerate())
+        .map(|(idx, meta)| {
+            let full = base_path.join(&meta.path);
+            async move {
+                use sha2::{Digest, Sha256};
+                let mut file = match fs::File::open(&full).await {
+                    Ok(f) => f,
+                    Err(_) => return (idx, [0u8; 32]),
+                };
+                let mut hasher = Sha256::new();
+                let mut buf = vec![0u8; 256 * 1024];
+                loop {
+                    let n = match file.read(&mut buf).await {
+                        Ok(n) => n,
+                        Err(_) => break,
+                    };
+                    if n == 0 {
+                        break;
+                    }
+                    hasher.update(&buf[..n]);
+                }
+                let hash: [u8; 32] = hasher.finalize().into();
+                (idx, hash)
+            }
+        })
+        .buffer_unordered(8)
+        .collect()
+        .await;
+
+    for (idx, hash) in results {
+        files[idx].checksum = hash;
+    }
+    Ok(())
+}
 
 /// Transfer statistics
 #[derive(Debug, Clone)]
@@ -360,13 +434,17 @@ impl<'a> FolderTransferSession<'a> {
                 vec![(PathBuf::from(file_name), file_meta)]
             } else if path.is_dir() {
                 info!("Scanning {}...", path.display());
-                let files = self.scan_folder(path).await?;
-                if files.is_empty() {
+                let raw = self.scan_folder(path).await?;
+                if raw.is_empty() {
                     return Err(Error::Protocol("Folder is empty".to_string()));
                 }
-                let scan_bytes: u64 = files.iter().map(|(_, m)| m.size).sum();
-                info!("Found {} files ({})", files.len(), crate::bandwidth::format_bandwidth(scan_bytes));
-                files
+                let scan_bytes: u64 = raw.iter().map(|(_, m)| m.size).sum();
+                info!("Found {} files ({})", raw.len(), crate::bandwidth::format_bandwidth(scan_bytes));
+                // Compute SHA-256 upfront so receiver can deduplicate without re-reading files
+                let base = path.parent().unwrap_or(path);
+                let mut metas: Vec<FileMetadata> = raw.into_iter().map(|(_, m)| m).collect();
+                compute_file_checksums(base, &mut metas).await?;
+                metas.into_iter().map(|m| (PathBuf::from(&m.path), m)).collect()
             } else {
                 return Err(Error::Protocol(
                     "Path is neither a file nor a directory".to_string(),
@@ -611,10 +689,32 @@ impl<'a> FolderTransferSession<'a> {
         let mut partial_files: Vec<PartialFileStatus> = Vec::new();
 
         for (idx, file_meta) in all_items.iter().enumerate() {
-            if sync_state.is_complete(&file_meta.path, file_meta.size, file_meta.modified) {
+            if sync_state.is_complete(&file_meta.path, file_meta.size, file_meta.modified, &file_meta.checksum) {
                 complete_files.push(idx as u32);
                 info!("  ✅ Already have: {}", file_meta.path);
             } else {
+                // If sender provided a SHA-256 and the file exists on disk (but isn't in our
+                // stored state), compute its hash and compare — avoids re-sending files that
+                // arrived through another channel or survived a state-file deletion.
+                let sender_has_hash = file_meta.checksum != [0u8; 32];
+                if sender_has_hash && !sync_state.files.contains_key(&file_meta.path) {
+                    let full_path = output_dir.join(&file_meta.path);
+                    if let Ok(meta) = fs::metadata(&full_path).await {
+                        if meta.len() == file_meta.size {
+                            if let Ok(hash) = hash_file(&full_path).await {
+                                let sender_hex: String = file_meta.checksum.iter().map(|b| format!("{:02x}", b)).collect();
+                                if hash == sender_hex {
+                                    info!("  ✅ Hash match (no state): {}", file_meta.path);
+                                    // Record in sync state so future runs use the fast path
+                                    sync_state.mark_complete(&file_meta.path, file_meta.size, file_meta.modified, file_meta.checksum);
+                                    complete_files.push(idx as u32);
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                }
+
                 let chunks = sync_state.partial_chunks(&file_meta.path).to_vec();
                 if !chunks.is_empty() {
                     info!("  🔄 Partial ({} chunks): {}", chunks.len(), file_meta.path);
@@ -1188,13 +1288,17 @@ impl<'a> FolderTransferSession<'a> {
 ///
 /// `base_path` is the parent of `folder_path` so that the folder name itself
 /// is included in the relative paths stored in `FileMetadata.path`.
+///
+/// SHA-256 checksums are computed for every file so the receiver can skip files
+/// it already has (even if mtime differs or the state file is missing).
 pub async fn scan_folder_for_parallel(
     folder_path: &Path,
 ) -> Result<(PathBuf, Vec<FileMetadata>)> {
     let base_path = folder_path.parent().unwrap_or(folder_path).to_path_buf();
     let mut raw: Vec<(PathBuf, FileMetadata)> = Vec::new();
     FolderTransferSession::scan_folder_recursive(&base_path, folder_path, &mut raw).await?;
-    let files = raw.into_iter().map(|(_, m)| m).collect();
+    let mut files: Vec<FileMetadata> = raw.into_iter().map(|(_, m)| m).collect();
+    compute_file_checksums(&base_path, &mut files).await?;
     Ok((base_path, files))
 }
 
