@@ -147,7 +147,7 @@ async fn handle_parallel_receive(
     let overall_bar = multi.add(ProgressBar::new_spinner());
     overall_bar.set_style(
         ProgressStyle::with_template(
-            "  [Total ] {spinner:.yellow} {bytes} received ({bytes_per_sec})",
+            "  [Recv  ] {spinner:.green} {bytes} received ({bytes_per_sec})",
         )
         .unwrap(),
     );
@@ -194,7 +194,7 @@ async fn handle_parallel_receive(
             let conn_bar = multi_clone.add(ProgressBar::new(0));
             conn_bar.set_style(
                 ProgressStyle::with_template(&format!(
-                    "  [Conn {:>2}] {{bar:35.green/white}} {{bytes}}/{{total_bytes}} ({{bytes_per_sec}}) {{msg}}",
+                    "  [Conn {:>3}] {{bar:32.green/white}} {{bytes}}/{{total_bytes}} ({{bytes_per_sec}}) {{msg}}",
                     idx + 1
                 ))
                 .unwrap()
