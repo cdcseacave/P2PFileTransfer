@@ -149,7 +149,14 @@ async fn hash_file(path: &Path) -> Result<String> {
     Ok(hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect())
 }
 
-/// Compute SHA-256 for a batch of files concurrently (bounded to 8 tasks).
+/// Files larger than this threshold skip pre-scan SHA-256; receiver falls back to size+mtime.
+/// Large files (archives, ISOs, etc.) would dominate scan time with no real benefit since
+/// size+mtime is already reliable for them. Small files (game assets, configs) get reliable
+/// hash-based dedup even when mtime differs.
+const CHECKSUM_SIZE_THRESHOLD: u64 = 100 * 1024 * 1024; // 100 MB
+
+/// Compute SHA-256 for files under `CHECKSUM_SIZE_THRESHOLD`, concurrently (bounded to 8 tasks).
+/// Large files keep `checksum = [0u8; 32]` — receiver uses size+mtime for those.
 /// Fills `FileMetadata.checksum` in-place.
 pub async fn compute_file_checksums(base_path: &Path, files: &mut Vec<FileMetadata>) -> Result<()> {
     use futures::stream::{self, StreamExt};
@@ -157,7 +164,11 @@ pub async fn compute_file_checksums(base_path: &Path, files: &mut Vec<FileMetada
     let results: Vec<(usize, [u8; 32])> = stream::iter(files.iter().enumerate())
         .map(|(idx, meta)| {
             let full = base_path.join(&meta.path);
+            let size = meta.size;
             async move {
+                if size > CHECKSUM_SIZE_THRESHOLD {
+                    return (idx, [0u8; 32]);
+                }
                 use sha2::{Digest, Sha256};
                 let mut file = match fs::File::open(&full).await {
                     Ok(f) => f,
