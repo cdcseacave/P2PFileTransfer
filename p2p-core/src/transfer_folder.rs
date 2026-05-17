@@ -112,10 +112,10 @@ impl ReceiverSyncState {
 
     /// Record a completed chunk for a partial file.
     pub fn record_chunk(&mut self, rel_path: &str, chunk_index: u64) {
-        self.partial
-            .entry(rel_path.to_string())
-            .or_default()
-            .push(chunk_index);
+        let chunks = self.partial.entry(rel_path.to_string()).or_default();
+        if !chunks.contains(&chunk_index) {
+            chunks.push(chunk_index);
+        }
     }
 
     /// Mark a file as fully received.
@@ -1043,7 +1043,10 @@ impl<'a> FolderTransferSession<'a> {
                     received += 1;
                 }
                 _ => {
-                    warn!("Unexpected message during transfer: {:?}", msg);
+                    return Err(Error::Protocol(format!(
+                        "Expected Chunk for file {}, got {:?}",
+                        file_index, msg
+                    )));
                 }
             }
         }

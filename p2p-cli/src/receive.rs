@@ -156,8 +156,19 @@ async fn handle_parallel_receive(
     let output = Arc::new(output);
     let mut handles = Vec::new();
 
+    // Each sender task connects once. If a sender task fails before connecting,
+    // we would hang here forever. Apply a generous per-connection accept timeout.
     for idx in 0..parallel {
-        let conn = server.accept().await?;
+        let conn = tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            server.accept(),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!(
+            "Timed out waiting for connection {} of {} (120 s). \
+             Sender may have failed to establish all {} connections.",
+            idx + 1, parallel, parallel
+        ))??;
         let device_id = Uuid::new_v4();
         let capabilities = Capabilities::all();
         let output_clone = Arc::clone(&output);
