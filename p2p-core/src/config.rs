@@ -43,18 +43,14 @@ impl Default for NetworkConfig {
 /// Transfer configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransferConfig {
-    /// Chunk size in kilobytes
+    /// Chunk size in kilobytes. 1 MiB by default — under QUIC the chunk
+    /// is no longer the ACK unit (packets are), so chunk size now only
+    /// affects per-chunk overhead and resume granularity.
     pub chunk_size_kb: u32,
     /// Enable compression by default
     pub compression_enabled: bool,
     /// Zstd compression level (-7 to 22)
     pub compression_level: i32,
-    /// Maximum chunks in flight (sliding window)
-    pub max_chunks_in_flight: usize,
-    /// Chunk acknowledgment timeout (milliseconds)
-    pub chunk_timeout_ms: u64,
-    /// Maximum chunk retry attempts
-    pub max_chunk_retries: u32,
     /// Bandwidth limit in bytes per second (0 = unlimited)
     pub bandwidth_limit: u64,
 }
@@ -62,13 +58,10 @@ pub struct TransferConfig {
 impl Default for TransferConfig {
     fn default() -> Self {
         Self {
-            chunk_size_kb: 64,
+            chunk_size_kb: 1024,
             compression_enabled: true,
             compression_level: 3,
-            max_chunks_in_flight: 16,
-            chunk_timeout_ms: 5000,
-            max_chunk_retries: 3,
-            bandwidth_limit: 0, // Unlimited by default
+            bandwidth_limit: 0,
         }
     }
 }

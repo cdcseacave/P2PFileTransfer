@@ -37,8 +37,11 @@ pub const PROTOCOL_VERSION: u8 = 2;
 /// Minimum supported protocol version. Equal to PROTOCOL_VERSION — no v1 compat.
 pub const MIN_PROTOCOL_VERSION: u8 = 2;
 
-/// Default chunk size (64 KB)
-pub const DEFAULT_CHUNK_SIZE: u32 = 65536;
+/// Default chunk size (1 MiB). Sized for QUIC, where the chunk is not
+/// the ACK unit — retransmits happen at the packet layer regardless,
+/// so the larger chunk just amortizes per-chunk overhead (one
+/// unidirectional stream, one progress event, one SHA-256 segment).
+pub const DEFAULT_CHUNK_SIZE: u32 = 1024 * 1024;
 
 /// Default discovery port (UDP LAN beacons)
 pub const DEFAULT_DISCOVERY_PORT: u16 = 14566;

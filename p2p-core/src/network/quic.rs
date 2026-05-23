@@ -27,7 +27,7 @@ use std::time::Duration;
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use quinn::{
     ClientConfig, Endpoint, EndpointConfig, RecvStream, SendStream, ServerConfig, TokioRuntime,
-    TransportConfig,
+    TransportConfig, VarInt,
 };
 use tracing::debug;
 
@@ -43,6 +43,16 @@ const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 
 /// Maximum idle before quinn tears down a connection.
 const MAX_IDLE_TIMEOUT_SECS: u64 = 60;
+
+/// Per-stream receive window. Sized to comfortably hold one in-flight
+/// chunk at the new 1 MiB default with room for the next one to start
+/// streaming before the previous one drains.
+const STREAM_RECEIVE_WINDOW: u32 = 8 * 1024 * 1024;
+
+/// Connection-level receive window. Sized for high-BDP links (gigabit
+/// at ~30 ms RTT is ~3.75 MB; 64 MiB leaves ample headroom and is
+/// well below the 2^62 VarInt limit).
+const RECEIVE_WINDOW: u32 = 64 * 1024 * 1024;
 
 /// A QUIC endpoint bound to one UDP socket. Acts as both client and server.
 ///
@@ -264,6 +274,9 @@ fn transport_config() -> TransportConfig {
             .try_into()
             .expect("idle timeout fits"),
     ));
+    t.stream_receive_window(VarInt::from_u32(STREAM_RECEIVE_WINDOW));
+    t.receive_window(VarInt::from_u32(RECEIVE_WINDOW));
+    t.send_window(RECEIVE_WINDOW as u64);
     t
 }
 

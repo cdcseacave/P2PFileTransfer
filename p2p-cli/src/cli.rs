@@ -114,7 +114,7 @@ pub struct TransferParams {
     pub adaptive: bool,
 
     /// Chunk size in KB
-    #[arg(long, default_value = "64")]
+    #[arg(long, default_value = "1024")]
     pub chunk_size: u32,
 
     /// Maximum transfer speed (e.g., "10M", "1G", "512K", "unlimited"). Default: unlimited
