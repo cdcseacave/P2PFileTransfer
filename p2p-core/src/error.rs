@@ -72,25 +72,49 @@ pub enum Error {
     #[error("Capability not supported: {0}")]
     UnsupportedCapability(String),
 
+    /// QUIC transport error (connection, stream, congestion control, ...)
+    #[error("QUIC error: {0}")]
+    Quic(String),
+
+    /// TLS / identity / certificate error
+    #[error("TLS error: {0}")]
+    Tls(String),
+
+    /// Rendezvous server protocol error
+    #[error("Rendezvous error: {0}")]
+    Rendezvous(String),
+
+    /// UDP hole punching failed (e.g. peer behind symmetric NAT, relay required)
+    #[error("Hole punch failed: {0}")]
+    HolePunchFailed(String),
+
+    /// Peer certificate fingerprint did not match the pinned value
+    #[error("Peer fingerprint mismatch")]
+    FingerprintMismatch,
+
     /// Generic error
     #[error("{0}")]
     Other(String),
 }
 
 impl Error {
-    /// Check if this error is recoverable
+    /// Check if this error is recoverable (transient — caller should reconnect)
     pub fn is_recoverable(&self) -> bool {
         matches!(
             self,
-            Error::Network(_) | Error::Timeout | Error::Disconnected
+            Error::Network(_)
+                | Error::Timeout
+                | Error::Disconnected
+                | Error::Quic(_)
+                | Error::HolePunchFailed(_)
         )
     }
 
-    /// Check if this error should trigger a retry
+    /// Check if this error should trigger a retry of the same operation
     pub fn should_retry(&self) -> bool {
         matches!(
             self,
-            Error::Network(_) | Error::Timeout | Error::InvalidChunk(_)
+            Error::Network(_) | Error::Timeout | Error::InvalidChunk(_) | Error::Quic(_)
         )
     }
 }

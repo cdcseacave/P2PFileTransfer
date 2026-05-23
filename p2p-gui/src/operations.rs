@@ -306,10 +306,6 @@ pub fn handle_message(state: &mut AppState, message: Message) -> Command<Message
             state.settings.chunk_size_kb = size;
             Command::none()
         }
-        Message::WindowSizeChanged(size) => {
-            state.settings.window_size = size;
-            Command::none()
-        }
         Message::BandwidthLimitChanged(limit) => {
             state.settings.bandwidth_input = limit.clone();
             if let Ok(bw) = p2p_core::bandwidth::parse_bandwidth(&limit) {
@@ -594,22 +590,24 @@ async fn start_listener_once(
     cancel_flag: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<(String, bool, usize)> {
     let capabilities = Capabilities::all();
+    let identity = Arc::new(p2p_core::identity::Identity::load_or_generate()?);
 
     info!(
-        "[Transfer #{}] Waiting for incoming connection on port {}...",
+        "[Transfer #{}] Waiting for incoming connection on port {} (fp={})...",
         transfer_count + 1,
-        port
+        port,
+        identity.fingerprint_hex(),
     );
 
-    // Create output directory
     tokio::fs::create_dir_all(&output_dir).await?;
 
-    // Establish session in server mode with periodic cancel checks
     let session_fut = P2PSession::establish(
         "server",
-        None,  // No peer address for server mode
-        false, // Discovery not needed for server
+        None,
+        None,
+        false,
         port,
+        identity,
         device_id,
         capabilities,
         Some(config),
@@ -660,8 +658,12 @@ async fn connect_to_peer(
     config: ConfigMessage,
 ) -> Result<(P2PSession, String)> {
     let capabilities = Capabilities::all();
+    let identity = Arc::new(p2p_core::identity::Identity::load_or_generate()?);
 
-    info!("Connecting to peer...");
+    info!(
+        "Connecting to peer (local fp={})...",
+        identity.fingerprint_hex()
+    );
 
     let peer_addr_opt = if !address.is_empty() {
         Some(address)
@@ -669,11 +671,18 @@ async fn connect_to_peer(
         None
     };
 
+    // Direct `--peer` mode in the GUI needs an explicit fingerprint in a future
+    // pass; for now only the discovery path (which pulls the fingerprint from
+    // the beacon inside session::establish) works without UI changes.
+    let peer_fingerprint = None;
+
     let session = P2PSession::establish(
         "client",
         peer_addr_opt,
+        peer_fingerprint,
         use_discovery,
         port,
+        identity,
         device_id,
         capabilities,
         Some(config),
@@ -683,7 +692,7 @@ async fn connect_to_peer(
     let peer_id = session.peer_device_id();
     info!("Connection established with peer: {}", peer_id);
 
-    Ok((session, format!("✅ Connected to peer: {}", peer_id)))
+    Ok((session, format!("Connected to peer: {}", peer_id)))
 }
 
 async fn send_path(

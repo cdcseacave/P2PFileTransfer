@@ -50,7 +50,6 @@ pub enum Message {
     CompressionLevelChanged(i32),
     AdaptiveCompressionToggled(bool),
     ChunkSizeChanged(u32),
-    WindowSizeChanged(usize),
     BandwidthLimitChanged(String),
     MaxRetriesChanged(u32),
 

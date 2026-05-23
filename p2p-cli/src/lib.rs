@@ -141,9 +141,10 @@ async fn run_cli_async(cli: Cli) -> Result<()> {
         Some(cli::Commands::Resume {
             transfer_id,
             to,
+            peer_fingerprint,
             path,
         }) => {
-            resume::handle_resume(transfer_id, to, path).await?;
+            resume::handle_resume(transfer_id, to, peer_fingerprint, path).await?;
         }
         Some(cli::Commands::History {
             limit,

@@ -139,8 +139,6 @@ pub struct AppSettings {
     pub adaptive_compression: bool,
     /// Chunk size in KB
     pub chunk_size_kb: u32,
-    /// Window size
-    pub window_size: usize,
     /// Bandwidth limit (0 = unlimited)
     pub bandwidth_limit: u64,
     /// Max retries
@@ -156,7 +154,6 @@ impl Default for AppSettings {
             compression_level: 3,
             adaptive_compression: true,
             chunk_size_kb: 64,
-            window_size: 16,
             bandwidth_limit: 0,
             max_retries: 5,
             bandwidth_input: String::from("unlimited"),
@@ -171,7 +168,6 @@ impl AppSettings {
             compression_level: self.compression_level,
             adaptive_compression: self.adaptive_compression,
             chunk_size: self.chunk_size_kb * 1024,
-            window_size: self.window_size,
             bandwidth_limit: self.bandwidth_limit,
         }
     }

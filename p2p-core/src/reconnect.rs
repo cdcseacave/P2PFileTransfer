@@ -143,22 +143,8 @@ where
     }
 }
 
-/// Check if an error is a transient network error that should trigger retry
-pub fn is_transient_error(error: &crate::error::Error) -> bool {
-    use crate::error::Error;
-
-    match error {
-        Error::Network(_) => true, // All network errors are transient
-        Error::Protocol(msg) => {
-            // Some protocol errors are transient
-            msg.contains("timeout")
-                || msg.contains("connection")
-                || msg.contains("reset")
-                || msg.contains("broken pipe")
-        }
-        _ => false, // Other errors are not transient
-    }
-}
+// `is_transient_error` removed: callers should use `Error::is_recoverable()`,
+// which now covers all the QUIC-era transport error variants in one place.
 
 #[cfg(test)]
 mod tests {

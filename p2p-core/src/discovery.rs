@@ -1,6 +1,7 @@
 //! Peer discovery module
 
 use crate::error::Result;
+use crate::identity::Fingerprint;
 use crate::network::udp::{DiscoveryService, PeerInfo};
 use crate::protocol::Capabilities;
 use std::collections::HashMap;
@@ -19,14 +20,19 @@ pub struct DiscoveryManager {
 }
 
 impl DiscoveryManager {
-    /// Create a new discovery manager
+    /// Create a new discovery manager. `cert_fingerprint` is the SHA-256
+    /// of our local cert; receivers use it to pin our TLS identity when
+    /// initiating a QUIC connection.
     pub async fn new(
         device_name: String,
         transfer_port: u16,
         capabilities: Capabilities,
+        cert_fingerprint: Fingerprint,
         peer_ttl: Duration,
     ) -> Result<Self> {
-        let service = DiscoveryService::new(device_name, transfer_port, capabilities).await?;
+        let service =
+            DiscoveryService::new(device_name, transfer_port, capabilities, cert_fingerprint)
+                .await?;
 
         Ok(Self {
             service: Arc::new(service),
@@ -176,6 +182,7 @@ mod tests {
             "Test Device".to_string(),
             crate::DEFAULT_TRANSFER_PORT,
             Capabilities::all(),
+            [0u8; 32],
             Duration::from_secs(10),
         )
         .await;
@@ -192,6 +199,7 @@ mod tests {
             "Test".to_string(),
             crate::DEFAULT_TRANSFER_PORT,
             Capabilities::all(),
+            [0u8; 32],
             Duration::from_secs(10),
         )
         .await;

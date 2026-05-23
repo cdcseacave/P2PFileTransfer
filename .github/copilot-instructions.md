@@ -2,15 +2,16 @@
 
 ## Project Overview
 
-**P2P File Transfer** is a high-performance, production-ready peer-to-peer file transfer system built in Rust. It enables direct device-to-device file and folder transfers on local networks with automatic peer discovery, fault-tolerant resume capability, and performance optimization through a sliding window protocol.
+**P2P File Transfer** is a peer-to-peer file transfer system built in Rust. Peers connect over **QUIC** (TLS 1.3, cert-pinned) on a single UDP socket and stream files chunk-by-chunk over per-chunk unidirectional QUIC streams. Includes automatic LAN peer discovery, fault-tolerant resume, and an optional Iced GUI.
 
 ### Key Features
-- **Windowed Transfer Protocol**: Parallel chunk transfers with sliding window (5-15x speedup on high-latency networks)
-- **Automatic Resume**: Chunk-level resume support with state persistence
-- **Smart Compression**: Adaptive Zstd compression with automatic incompressible data detection
-- **Fault Tolerance**: Auto-reconnect, retry logic, and graceful interruption handling
-- **Data Integrity**: Multi-layer verification (CRC32 per chunk + SHA256 per file)
-- **Session-Based Architecture**: Connection reuse for multiple operations
+- **QUIC transport** (quinn 0.11): mandatory TLS 1.3, per-stream flow control replaces a sliding window
+- **Cert-pinned identity**: per-device Ed25519 + self-signed cert, pinned by SHA-256 fingerprint
+- **Per-chunk unidirectional streams**: `[u64 LE index | u8 flags | payload]`; no per-chunk ACKs/CRC (TLS AEAD authenticates every byte)
+- **Automatic resume**: chunk-level bitmap with state persistence
+- **Adaptive Zstd compression**: auto-disables on incompressible data
+- **Bandwidth throttling**: token bucket
+- **Session-based architecture**: bidirectional symmetric `P2PSession` reusable for many transfers
 
 ### Project Type
 - **Primary**: Command-line tool (CLI)
@@ -31,14 +32,14 @@
 ### Key Dependencies
 
 #### Networking
-- `tokio` - Async I/O, TCP/UDP
-- `socket2` - Low-level socket configuration
-- `mio` - Cross-platform I/O event notification
+- `tokio` - Async I/O, UDP
+- `quinn` (`0.11`) - QUIC transport
+- `rustls` (`0.23`) - TLS 1.3
+- `rcgen` (`0.13`) - self-signed cert generation
 
 #### Compression & Verification
 - `zstd` (`0.13.3`) - Zstandard compression
 - `sha2` - SHA256 hashing
-- `crc32fast` - CRC32 checksums
 
 #### CLI & UX
 - `clap` (`4.5.48`) - Command-line argument parsing with derive macros
@@ -74,7 +75,7 @@
 
 #### CLI Parameter Naming
 - Use `--verbosity` (not `--log-level`) for logging configuration
-- Global flags: `--verbosity`, `--compress`, `--window-size`
+- Global flag: `--verbosity`. Shared transfer flags (`--compress`, `--chunk-size`, `--max-speed`, ...) live in the `TransferParams` `Args` group; session-establishment flags (`--peer`, `--peer-fingerprint`, `--port`, `--discover`, `--role`) live in `SessionParams`.
 
 #### Documentation Requirements
 - **Each module must have documentation** describing its purpose and functionality
@@ -106,29 +107,33 @@ Use `tracing` macros for structured logging:
 P2PFileTransfer/
 ├── .github/
 │   └── copilot-instructions.md    # This file
-├── p2p-core/                       # Core library (protocol, networking, transfer logic)
+├── p2p-core/                       # Core library (protocol, transport, transfer logic)
 │   ├── src/
-│   │   ├── lib.rs                  # Library entry point
-│   │   ├── protocol.rs             # Message definitions
-│   │   ├── window.rs               # Sliding window protocol
-│   │   ├── transfer_file.rs        # File transfer engine
+│   │   ├── lib.rs                  # Library entry point + constants
+│   │   ├── error.rs                # Error types
+│   │   ├── identity.rs             # Ed25519 keypair + self-signed cert (persistent)
+│   │   ├── tls.rs                  # rustls configs + fingerprint-pinning verifier
+│   │   ├── known_peers.rs          # TOFU fingerprint trust store
+│   │   ├── protocol.rs             # Control-plane Message definitions
+│   │   ├── handshake.rs            # HELLO/CONFIG over QUIC bidi control stream
+│   │   ├── session.rs              # P2PSession (symmetric, bidirectional)
+│   │   ├── transfer_file.rs        # Single-file transfer (one uni stream per chunk)
 │   │   ├── transfer_folder.rs      # Folder transfer orchestration
-│   │   ├── session.rs              # Session management
-│   │   ├── handshake.rs            # Connection handshake
 │   │   ├── compression.rs          # Adaptive Zstd compression
-│   │   ├── verification.rs         # CRC32 + SHA256 verification
+│   │   ├── verification.rs         # File-level SHA256
 │   │   ├── bandwidth.rs            # Token bucket rate limiting
-│   │   ├── reconnect.rs            # Auto-reconnect with backoff
-│   │   ├── state.rs                # Transfer state persistence
+│   │   ├── reconnect.rs            # Exponential-backoff retry loop
+│   │   ├── state.rs                # Chunk bitmap for resume
 │   │   ├── history.rs              # Transfer history tracking
 │   │   ├── config.rs               # Configuration types
-│   │   ├── error.rs                # Error types
 │   │   ├── discovery.rs            # UDP peer discovery
-│   │   ├── nat.rs                  # STUN NAT traversal
+│   │   ├── traversal/              # STUN + future hole-punch/rendezvous
+│   │   │   ├── mod.rs
+│   │   │   └── stun.rs             # Async STUN on a borrowed UdpSocket
 │   │   └── network/
-│   │       ├── mod.rs              # Network module re-exports
-│   │       ├── tcp.rs              # TCP connection
-│   │       ├── udp.rs              # UDP socket
+│   │       ├── mod.rs              # Re-exports
+│   │       ├── quic.rs             # QuicEndpoint + QuicConnection (only transport)
+│   │       ├── udp.rs              # LAN beacon socket helpers
 │   │       └── framing.rs          # MessagePack framing
 │   └── Cargo.toml
 ├── p2p-cli/                        # CLI wrapper
@@ -169,26 +174,23 @@ P2PFileTransfer/
 
 #### Core Library (`p2p-core/src/`)
 
-**`protocol.rs`** - Protocol message definitions
-- `HandshakeMessage` - Capability negotiation
-- `TransferInfo` - File/folder metadata
-- `ChunkMessage` - Chunk data with checksum (7 fields after optimization)
-- `ChunkAck` - Acknowledgment messages
-- `CompleteMessage` - Transfer completion with SHA256
+**`protocol.rs`** - Control-plane message definitions (chunk data does NOT go through this enum)
+- `HelloMessage` - Handshake hello (carries cert fingerprint)
+- `ConfigMessage` - Transfer configuration negotiation
+- `TransferInfo` - File/folder metadata + optional resume point
+- `CompleteMessage` - Transfer completion summary
+- `FileChecksumMessage` - Bidirectional file SHA256 exchange
 - `ErrorMessage` - Error reporting
 
-**`window.rs`** - Sliding window flow control
-- `SlidingWindow` - Manages parallel chunk transfers (7 fields)
-- `InFlightChunk` - Tracks sent chunks (message + metadata)
-- `WindowConfig` - Configuration (window size, timeout, retries)
-- **Current Usage**: Single file at a time
-- **Future**: Can be extended for connection pooling and concurrent transfers
+**`network/quic.rs`** - QUIC transport (the only transport)
+- `QuicEndpoint` - wraps `quinn::Endpoint`; one UDP socket; acts as both client and server
+- `QuicConnection` - wraps `quinn::Connection` + the bidi control stream; exposes `open_uni`/`accept_uni` for per-chunk streams
 
 **`transfer_file.rs`** - File transfer engine
-- `FileTransferSession` - Single file transfer
-- Supports both windowed and sequential modes
-- Handles compression, verification, progress tracking
-- Resume support with chunk-level granularity
+- `FileTransferSession` - opens one unidirectional QUIC stream per chunk
+- Wire format: `[u64 LE chunk_index | u8 flags | payload]`
+- Handles compression, file-level SHA256, progress tracking
+- Resume support with chunk-level granularity (skip indices already in the bitmap)
 
 **`transfer_folder.rs`** - Folder transfer orchestration
 - `FolderTransferSession` - Multi-file transfers
@@ -209,16 +211,15 @@ P2PFileTransfer/
 - **Critical**: Must use `chunk_data.len()` for uncompressed size tracking
 
 **`verification.rs`** - Data integrity
-- CRC32 per chunk (fast, catches corruption)
-- SHA256 per file (cryptographic, final verification)
-- Two-tier verification strategy
+- File-level SHA256 only (per-chunk CRC removed — TLS 1.3 AEAD authenticates every byte)
+- Sender computes SHA256 incrementally as chunks are read; receiver computes from the finalized file
 
 #### CLI Layer (`p2p-cli/src/`)
 
 **`cli.rs`** - Clap argument parsing
 - Uses derive macros for clean definitions
 - **Parameter naming**: Use `verbosity` (not `log-level`)
-- Global flags: `--verbosity`, `--compress`, `--window-size`
+- Global flag: `--verbosity`. Shared `Args` groups: `SessionParams` (`--peer`, `--peer-fingerprint`, `--port`, `--discover`, `--role`) and `TransferParams` (`--compress`, `--compress-level`, `--adaptive`, `--chunk-size`, `--max-speed`).
 
 **`send.rs`**, **`receive.rs`**, etc. - Command implementations
 - Bridge between CLI args and core library

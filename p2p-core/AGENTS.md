@@ -10,39 +10,44 @@ The crate is layered. Higher layers depend on lower layers, not the other way ar
 
 | Layer | Modules | Role |
 |---|---|---|
-| Constants | `lib.rs` | `PROTOCOL_VERSION`, `DEFAULT_CHUNK_SIZE = 65536`, `DEFAULT_DISCOVERY_PORT = 14566`, `DEFAULT_TRANSFER_PORT = 14567`, `PROTOCOL_MAGIC = b"P2PF"` |
-| Errors | `error.rs` | `Error`/`Result` — every fallible API in this crate returns these |
-| Protocol | `protocol.rs`, `config.rs` | `Message` enum, `HandshakeMessage`, `ChunkMessage`, `ChunkAck`, `CompleteMessage`, `TransferInfo`, `FileMetadata`, `Capabilities`, `ConfigMessage` |
-| Transport | `network/framing.rs`, `network/tcp.rs`, `network/udp.rs` | MessagePack length-prefixed framing with magic bytes; `TcpConnection`/`TcpServer` (TCP_NODELAY + keepalive); UDP socket helpers |
-| Crypto/check | `verification.rs`, `compression.rs` | CRC32 (per-chunk), streaming SHA256 (per-file); `AdaptiveCompressor` (Zstd levels -7..22, auto-disables under 1.05x ratio after sampling 3 chunks) |
-| Flow control | `window.rs`, `bandwidth.rs` | `SlidingWindow`, `InFlightChunk`, `WindowConfig`; token-bucket throttle with `K`/`M`/`G` suffix parser |
-| Discovery / NAT | `discovery.rs`, `nat.rs` | UDP beacon-based `DiscoveryManager`; STUN RFC 5389 client |
-| Handshake | `handshake.rs` | `HandshakeClient`/`HandshakeServer`, produce `HandshakeResult { config, capabilities, peer_id }` |
-| Transfer engine | `transfer_file.rs`, `transfer_folder.rs`, `transfer.rs` | `FileTransferSession` (single file, sequential or windowed), `FolderTransferSession` (walks tree, orchestrates per-file sessions, aggregates `TransferStats`) |
-| Session | `session.rs` | `P2PSession` — bidirectional, symmetric facade combining handshake + transfer; the GUI and CLI both drive this |
-| Cross-cutting | `state.rs`, `history.rs`, `progress.rs`, `reconnect.rs` | Resume-state JSON; transfer-history log; shared `ProgressState` consumed by CLI bars and GUI updates; exponential-backoff reconnect (2→4→8→16→32→60s) |
+| Constants | `lib.rs` | `PROTOCOL_VERSION = 2`, `DEFAULT_CHUNK_SIZE = 65536`, `DEFAULT_DISCOVERY_PORT = 14566`, `DEFAULT_TRANSFER_PORT = 14567`, `DEFAULT_RENDEZVOUS_PORT = 14570`, `PROTOCOL_MAGIC = b"P2PF"`, `ALPN_PROTOCOL = b"p2pf/2"` |
+| Errors | `error.rs` | `Error`/`Result` — every fallible API in this crate returns these (`Quic`, `Tls`, `Rendezvous`, `HolePunchFailed`, `FingerprintMismatch`, ...) |
+| Identity & TLS | `identity.rs`, `tls.rs`, `known_peers.rs` | `Identity` = persistent Ed25519 keypair + self-signed cert (rcgen); `tls::FingerprintVerifier` pins the peer cert by SHA-256; `KnownPeers` = TOFU store at `<config_dir>/p2p-transfer/known_peers.json` |
+| Protocol | `protocol.rs`, `config.rs` | `Message` enum (control-plane only — chunks ride raw on per-chunk uni streams), `HelloMessage`, `ConfigMessage`, `TransferInfo`, `FileMetadata`, `Capabilities` |
+| Transport | `network/quic.rs`, `network/framing.rs`, `network/udp.rs` | `QuicEndpoint` + `QuicConnection` (the only transport — one UDP socket per endpoint, acts as both client and server); MessagePack length-prefixed framing over the QUIC control stream; UDP socket helpers for LAN beacons |
+| Crypto/check | `verification.rs`, `compression.rs` | File-level SHA256 only (per-chunk CRC is gone — TLS AEAD authenticates every byte); `AdaptiveCompressor` (Zstd levels -7..22, auto-disables under 1.05x ratio after sampling 3 chunks) |
+| Throttle | `bandwidth.rs` | Token-bucket with `K`/`M`/`G` suffix parser; applied before each `open_uni().write` |
+| Discovery / NAT | `discovery.rs`, `traversal/stun.rs`, `traversal/mod.rs` | UDP beacon-based `DiscoveryManager` carrying `cert_fingerprint`; async STUN on a borrowed `tokio::net::UdpSocket` + `classify_nat` (Cone vs Symmetric); `traversal/mod.rs` is a Phase-1 stub for the rendezvous orchestrator |
+| Handshake | `handshake.rs` | `HandshakeClient`/`HandshakeServer` over the bidi control stream — HELLO/HELLO_ACK with cert-fingerprint cross-check + CONFIG/CONFIG_ACK, produces `HandshakeResult { peer_device_id, peer_fingerprint, agreed_capabilities, config }` |
+| Transfer engine | `transfer_file.rs`, `transfer_folder.rs` | `FileTransferSession` (one unidirectional QUIC stream per chunk with `[u64 LE index | u8 flags | payload]`); `FolderTransferSession` (walks tree, orchestrates per-file sessions, aggregates `TransferStats`) |
+| Session | `session.rs` | `P2PSession` — bidirectional, symmetric facade combining QUIC endpoint + handshake + transfer; the GUI and CLI both drive this |
+| Cross-cutting | `state.rs`, `history.rs`, `progress.rs`, `reconnect.rs` | Resume-state JSON (chunk bitmap); transfer-history log; shared `ProgressState` consumed by CLI bars and GUI updates; exponential-backoff reconnect loop |
 
 ## Design points you can't see from one file
 
 ### `P2PSession` is symmetric
 
-After `connect()`/`accept()` complete, the connection is fully bidirectional. `ConnectionRole::{Initiator, Responder}` is retained for **logging only** — every operation (`send_path`, `receive_to`, multiple in sequence, interleaved) works from either side. Don't reintroduce client/server asymmetry into the session layer; the asymmetry is confined to establishment.
+After `connect()`/`accept()` complete, the connection is fully bidirectional. `ConnectionRole::{Initiator, Responder}` is retained only so the initiator side knows where to reconnect to — every operation (`send_path`, `receive_to`, multiple in sequence, interleaved) works from either side. Don't reintroduce client/server asymmetry into the session layer; the asymmetry is confined to establishment.
+
+### One UDP socket, one transport
+
+`QuicEndpoint::bind` (or `::from_socket`) takes ownership of a UDP socket and uses it for **both** outbound `connect` and inbound `accept`. The bidi control stream and per-chunk uni streams all multiplex over this single socket. This is also the socket that STUN + (future) hole-punching will run on; the order is: bind socket → STUN on the socket → hand it to `QuicEndpoint::from_socket`.
+
+### Chunks bypass `Message`
+
+`Message` is the control plane only. Chunk data rides raw on per-chunk unidirectional QUIC streams with the wire layout `[u64 LE chunk_index | u8 flags | payload bytes (zstd if flags&1)]`. There is no per-chunk ACK / retry / CRC — QUIC's per-stream flow control and packet retransmission cover loss recovery, and TLS 1.3 AEAD authenticates every byte. A finalized `SendStream` is end-to-end acked by QUIC itself.
 
 ### Transfer engine composition
 
-`FolderTransferSession` does **not** reimplement chunk logic — it walks the directory tree and runs a `FileTransferSession` per file, then aggregates results. When adding folder-level behavior, decide whether it belongs:
-- per-file (compression, verification, windowing) → `transfer_file.rs`
+`FolderTransferSession` does **not** reimplement chunk logic — it walks the directory tree and runs a `FileTransferSession` per file, reusing the same `QuicConnection`, then aggregates results. When adding folder-level behavior, decide whether it belongs:
+- per-file (compression, file-level SHA256, per-chunk stream wire format) → `transfer_file.rs`
 - per-folder (file enumeration, structure preservation, aggregate stats, state saves between files) → `transfer_folder.rs`
 
-State is persisted **after each file completes** (not mid-file), so resume granularity is "skip completed files, start partial files from their last completed chunk." The chunk-level resume within a file is handled by `FileTransferSession` checking `state.completed_chunks` (bitvec) against the file on disk.
+State is persisted **after each file completes** (not mid-file), so resume granularity is "skip completed files, start partial files from their last completed chunk." The chunk-level resume within a file is handled by `FileTransferSession` checking the chunk bitmap and only opening uni streams for missing indices.
 
-### Windowed vs sequential mode
+### Identity persistence
 
-Single switch: `WindowConfig::window_size`. `1` = sequential (one chunk, wait for ACK, next chunk), `>=2` = windowed. The sliding window:
-- keeps up to N chunks in flight
-- handles out-of-order ACKs (ACKs carry the chunk index)
-- per-chunk timeout (10s) with exponential backoff on retry
-- memory ≈ `window_size * chunk_size`
+`Identity::load_or_generate` reads PEM-encoded PKCS#8 key + PEM cert from `<config_dir>/p2p-transfer/identity.{key,cert}` (created on first run with mode 0600 on Unix). The SHA-256 of the cert DER is the stable per-device fingerprint and is what peers pin. The cert is persisted alongside the key so the fingerprint stays stable across restarts — TOFU pinning in `known_peers.json` depends on it.
 
 ### Adaptive compression accounting
 
@@ -50,9 +55,7 @@ Single switch: `WindowConfig::window_size`. `1` = sequential (one chunk, wait fo
 
 ### Protocol versioning
 
-`PROTOCOL_VERSION = 1`, `MIN_PROTOCOL_VERSION = 1` (in `lib.rs`). Bump `PROTOCOL_VERSION` when adding fields to messages; bump `MIN_PROTOCOL_VERSION` only on a hard break. The handshake refuses peers below `MIN_PROTOCOL_VERSION`.
-
-`ChunkMessage` checksums use a custom hex-string serde (`checksum_hex` in `protocol.rs`) — this is on purpose for human-readable wire dumps; the old array format is rejected explicitly.
+`PROTOCOL_VERSION = 2`, `MIN_PROTOCOL_VERSION = 2` (in `lib.rs`). Equality check only — no v1 compat code. v1 used TCP and a different protocol; v1 peers can't even reach a v2 endpoint (which is UDP/QUIC), so the failure is clean. Bump both constants together for any future hard break.
 
 ## Tests
 
@@ -73,15 +76,19 @@ cargo test -p p2p-core -- --nocapture
 cargo test -p p2p-core --doc
 ```
 
-Unit tests are `#[cfg(test)] mod tests { ... }` inline in each module. Cross-module workflow tests (handshake + TCP + discovery end-to-end) live in the workspace `tests/integration_test.rs`, not in this crate.
+Unit tests are `#[cfg(test)] mod tests { ... }` inline in each module. Cross-module workflow tests (full QUIC handshake end-to-end) live in the workspace `tests/integration_test.rs`, not in this crate.
 
 `dev-dependencies` available here: `tokio-test`, `tempfile`.
+
+### Test gotcha — keep the connection alive
+
+The QUIC bidi control stream is only materialised on the responder when the initiator writes to it. Tests that exchange handshake messages naturally satisfy this; tests that *don't* (e.g. the artificial uni-stream test in `network/quic.rs`) must send a marker first. Likewise, when a server task finishes a handshake and immediately drops its `QuicConnection`, the connection close races the client's last `recv_message` — use the `oneshot` "hold the connection until the client signals done" pattern from `handshake::tests::handshake_round_trip_over_quic` for any new test that exchanges messages.
 
 ## Conventions specific to this crate
 
 - **No CLI/UI concerns.** No `clap`, no `indicatif`, no `iced`. Progress is surfaced via `progress::ProgressState` callbacks; UI layers translate them.
 - **All I/O is async (`tokio`).** Never block; use `tokio::select!` for timeouts/cancellation.
-- **Hot paths** = the chunk loops in `window.rs` and `transfer_file.rs`. Avoid per-chunk allocations; reuse buffers; prefer `&[u8]` over `Vec<u8>` where possible.
+- **Hot path** = the per-chunk loop in `transfer_file.rs`. Avoid per-chunk allocations; reuse buffers; prefer `&[u8]` over `Vec<u8>` where possible.
 - **Logging via `tracing`.** Targets default to `p2p_core`; the CLI's `EnvFilter` keys off this prefix.
 - **Errors**: return `crate::Result<T>` (= `Result<T, crate::Error>`); don't sprinkle `anyhow` here — that's the user-facing layer's job.
 - **Public items are documented** with `///`; modules have `//!` headers.

@@ -20,9 +20,15 @@ pub struct SessionParams {
     #[arg(long, value_parser = ["client", "server"])]
     pub role: Option<String>,
 
-    /// Peer address (IP:PORT) - required when role is 'client'
+    /// Peer address (IP:PORT) - required when role is 'client' and not using discovery
     #[arg(long)]
     pub peer: Option<String>,
+
+    /// Hex-encoded SHA-256 fingerprint of the peer's TLS cert (64 hex chars).
+    /// Required when --peer is used; populated automatically from LAN beacons
+    /// when --discover is used.
+    #[arg(long)]
+    pub peer_fingerprint: Option<String>,
 
     /// Port to use - for 'client' role, this is the destination port; for 'server' role, this is the listen port
     #[arg(short = 'p', long, default_value = "14567")]
@@ -31,6 +37,26 @@ pub struct SessionParams {
     /// Use peer discovery to find the peer address (only for 'client' role)
     #[arg(short = 'd', long)]
     pub discover: bool,
+}
+
+impl SessionParams {
+    /// Decode `--peer-fingerprint` into a 32-byte array, if provided.
+    pub fn parsed_fingerprint(&self) -> anyhow::Result<Option<[u8; 32]>> {
+        let Some(hex_str) = self.peer_fingerprint.as_deref() else {
+            return Ok(None);
+        };
+        if hex_str.len() != 64 {
+            anyhow::bail!(
+                "--peer-fingerprint must be 64 hex chars, got {} chars",
+                hex_str.len()
+            );
+        }
+        let bytes = hex::decode(hex_str)
+            .map_err(|e| anyhow::anyhow!("--peer-fingerprint hex decode: {e}"))?;
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&bytes);
+        Ok(Some(out))
+    }
 }
 
 impl SessionParams {
@@ -72,17 +98,9 @@ pub struct TransferParams {
     #[arg(long, default_value = "64")]
     pub chunk_size: u32,
 
-    /// Window size (number of chunks in-flight). Use 1 for sequential mode, 2+ for windowed mode
-    #[arg(long, default_value = "16")]
-    pub window_size: usize,
-
     /// Maximum transfer speed (e.g., "10M", "1G", "512K", "unlimited"). Default: unlimited
     #[arg(long, value_parser = parse_bandwidth_arg, default_value = "0")]
     pub max_speed: u64,
-
-    /// Maximum reconnection attempts on network failures (0 = unlimited, 1 = no retry)
-    #[arg(long, default_value = "5")]
-    pub max_retries: u32,
 }
 
 #[derive(Parser)]
@@ -160,6 +178,10 @@ pub enum Commands {
         /// Peer address (IP:PORT) to reconnect to
         #[arg(long)]
         to: String,
+
+        /// SHA-256 fingerprint (64 hex chars) of the peer's TLS cert
+        #[arg(long)]
+        peer_fingerprint: String,
 
         /// Original folder path to resume from
         #[arg(long)]

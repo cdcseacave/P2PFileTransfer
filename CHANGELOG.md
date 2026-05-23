@@ -5,6 +5,48 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added — 2026-05-23 — Clean QUIC rewrite (Phase 0)
+- **QUIC transport** via `quinn` 0.11 on a single UDP socket per endpoint
+  (`p2p-core/src/network/quic.rs`: `QuicEndpoint`, `QuicConnection`).
+- **Mandatory TLS 1.3** with per-device self-signed certs (rcgen) and
+  fingerprint-pinning verifier (`p2p-core/src/{identity.rs, tls.rs}`).
+- **TOFU trust store** at `<config_dir>/p2p-transfer/known_peers.json`
+  (`p2p-core/src/known_peers.rs`).
+- **STUN primitives** on the shared UDP socket
+  (`p2p-core/src/traversal/stun.rs`): async `query` +
+  `classify_nat` (Cone vs Symmetric).
+- **`--peer-fingerprint` CLI flag** on `send` / `receive` / `resume`;
+  required for direct-IP connections.
+- **`cert_fingerprint` in discovery beacons** so LAN-discovered peers
+  can pin TLS without an extra round trip.
+- New error variants `Quic`, `Tls`, `Rendezvous`, `HolePunchFailed`,
+  `FingerprintMismatch`; `Error::is_recoverable` updated for QUIC.
+
+### Changed
+- `PROTOCOL_VERSION` bumped to 2; equality check only (no v1 compat).
+- Chunks now travel on per-chunk unidirectional QUIC streams
+  (`[u64 LE index | u8 flags | payload]`) instead of `ProtocolMessage`
+  frames — `transfer_file.rs` / `transfer_folder.rs` collapsed.
+- `nat-test` CLI now classifies NAT via two STUN servers on a real
+  `tokio::net::UdpSocket` (the same socket type quinn owns).
+
+### Removed
+- TCP transport (`p2p-core/src/network/tcp.rs`).
+- Sliding-window protocol (`p2p-core/src/window.rs`,
+  `send_file_windowed`, `InFlightChunk`, etc.) — QUIC stream
+  multiplexing replaces it.
+- Per-chunk CRC32 (`crc32fast` dependency) — TLS AEAD authenticates
+  every byte.
+- Per-chunk ACK protocol (`ChunkAck`, `AckStatus`,
+  `ChunkMessage`/`ChunkMessage.checksum`/`ChunkMessage.flags`).
+- Capability bits `ENCRYPTION` (always on) and `WINDOWED` (one mode).
+- CLI flags `--window-size`, `--max-retries`.
+- Legacy blocking `p2p-core/src/nat.rs` (collapsed into `traversal/stun.rs`).
+- The TCP-specific `is_transient_error` matrix in `reconnect.rs` (now
+  one `Error::is_recoverable`).
+
 ### Added
 - **GUI Implementation** (2025-10-10): Complete graphical user interface using Iced framework
   - Tabbed interface with Connection, Send, Receive, Settings, and History tabs

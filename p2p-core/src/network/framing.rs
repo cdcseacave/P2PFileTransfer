@@ -77,10 +77,11 @@ mod tests {
     #[tokio::test]
     async fn test_write_read_message() {
         let msg = Message::Hello(HelloMessage {
-            protocol_version: 1,
-            min_version: 1,
+            protocol_version: crate::PROTOCOL_VERSION,
+            min_version: crate::MIN_PROTOCOL_VERSION,
             device_id: Uuid::new_v4(),
             capabilities: Capabilities::all(),
+            cert_fingerprint: [0u8; 32],
         });
 
         let mut buffer = Vec::new();
