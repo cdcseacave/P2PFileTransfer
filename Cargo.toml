@@ -18,7 +18,7 @@ keywords = ["p2p", "file-transfer", "compression", "networking"]
 categories = ["command-line-utilities", "network-programming"]
 
 [workspace]
-members = [".", "p2p-core", "p2p-cli", "p2p-gui"]
+members = [".", "p2p-core", "p2p-cli", "p2p-gui", "p2p-rendezvous"]
 
 [dependencies]
 p2p-core = { path = "./p2p-core" }
@@ -31,6 +31,12 @@ thiserror = "1.0"
 log = "0.4"
 env_logger = "0.11"
 tracing = "0.1"
+
+[dev-dependencies]
+# Used by tests/traversal_loopback_test.rs to drive the rendezvous +
+# punch primitives directly (no STUN, no NAT — pure localhost smoke).
+p2p-rendezvous = { path = "./p2p-rendezvous" }
+tokio = { version = "1.40", features = ["full"] }
 
 [features]
 # Default: CLI only (small binary, ~5-10 MB)

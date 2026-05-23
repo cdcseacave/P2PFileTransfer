@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — 2026-05-23 — Rendezvous + UDP hole punching (Phase 1)
+- New `p2p-rendezvous` workspace crate with a tiny pairing-by-code
+  rendezvous protocol (MessagePack-over-TCP) and a `rendezvousd` binary.
+- `p2p-core::traversal::establish_via_rendezvous` orchestrator: binds a
+  UDP socket, runs STUN on it, registers with the rendezvous + code,
+  and on match races `QuicEndpoint::connect`/`accept` as the hole
+  punch (`traversal::punch::race_connect_and_accept`).
+- CLI flags `--rendezvous <host:port>` and `--code <code>` on
+  `send` / `receive`. When `--rendezvous` is set, `--peer` and
+  `--discover` are ignored.
+- Symmetric-NAT detection up front via `stun::classify_nat` (two
+  servers, compare mapped ports); surfaces `Error::HolePunchFailed`
+  before any handshake attempt.
+- Loopback regression test in `tests/traversal_loopback_test.rs`
+  exercising the rendezvous + punch primitives end-to-end without STUN.
+
 ### Added — 2026-05-23 — Clean QUIC rewrite (Phase 0)
 - **QUIC transport** via `quinn` 0.11 on a single UDP socket per endpoint
   (`p2p-core/src/network/quic.rs`: `QuicEndpoint`, `QuicConnection`).

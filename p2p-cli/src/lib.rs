@@ -12,6 +12,7 @@ mod discover;
 mod history;
 mod nat_test;
 mod receive;
+mod rendezvous;
 mod resume;
 mod send;
 

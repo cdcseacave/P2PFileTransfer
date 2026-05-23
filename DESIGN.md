@@ -16,7 +16,10 @@ Cargo workspace
 ├── p2p-core/                core library: protocol + transport + transfer engine
 ├── p2p-cli/                 clap-based CLI
 ├── p2p-gui/                 Iced 0.12 GUI
-└── tests/integration_test.rs  workspace-level QUIC handshake smoke test
+├── p2p-rendezvous/          rendezvous library + `rendezvousd` binary
+└── tests/                   workspace integration tests
+    ├── integration_test.rs            QUIC handshake smoke test
+    └── traversal_loopback_test.rs     rendezvous + race-connect-and-accept
 ```
 
 `p2p-core` module map:
@@ -134,12 +137,20 @@ each `open_uni().write_all`.
 
 ## NAT traversal (phased)
 
-* **Phase 0 (this rewrite, shipped):** LAN discovery and direct `--peer`
-  only. `traversal/stun.rs` exposes async `query(&UdpSocket, server)` and
-  `classify_nat(&UdpSocket, a, b)` primitives the next phases will use.
-* **Phase 1 (planned):** new crate `p2p-rendezvous` + `rendezvousd`
-  binary. Two peers exchange public endpoints and cert fingerprints over
-  a short base32 code; QUIC `Initial` packets serve as the hole punch.
+* **Phase 0 (shipped):** LAN discovery and direct `--peer` only.
+  `traversal/stun.rs` exposes async `query(&UdpSocket, server)` and
+  `classify_nat(&UdpSocket, a, b)` primitives the next phases use.
+* **Phase 1 (shipped):** new crate `p2p-rendezvous` + `rendezvousd`
+  binary; CLI flags `--rendezvous` + `--code`;
+  `traversal::establish_via_rendezvous` orchestrator. Both peers bind a
+  UDP socket, run STUN on it (the same socket quinn will later own),
+  register at the rendezvous with a short shared code, and on match race
+  `quinn::Endpoint::connect` against `accept` — QUIC `Initial` packets
+  themselves serve as the hole-punch. Symmetric NAT is detected up
+  front by comparing mapped ports across two STUN servers and surfaces
+  `Error::HolePunchFailed`. The rendezvous server never sees user data
+  — it only stores the (endpoint, fingerprint, device_id) tuple long
+  enough to deliver each peer's address to the other.
 * **Phase 2 (planned):** `rendezvousd --relay-bind` opens a second QUIC
   endpoint that byte-pipes two `quinn::Connection`s when both peers are
   behind symmetric NAT. End-to-end TLS still holds because cert

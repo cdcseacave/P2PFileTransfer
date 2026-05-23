@@ -8,23 +8,28 @@
   bit + `--window-size` / `--max-retries` CLI flags all removed.
   `cargo test --all` and `cargo clippy --all-targets --all-features --
   -D warnings` green.
+* **Phase 1 — Rendezvous + UDP hole punching** — **done** (2026-05).
+  New `p2p-rendezvous` crate + `rendezvousd` binary; CLI flags
+  `--rendezvous` and `--code` on `send` / `receive`;
+  `traversal::establish_via_rendezvous` orchestrates STUN +
+  registration + race-connect-and-accept punch. Symmetric NAT is
+  detected up front by querying two STUN servers and surfaces
+  `Error::HolePunchFailed`. `tests/traversal_loopback_test.rs` covers
+  the rendezvous + punch primitives end-to-end on localhost (real
+  cross-NAT requires a netns harness / two laptops + VPS).
 
 ## Active work
 
-### Phase 1 — Rendezvous server + UDP hole punching
+### Phase 1.5 — IPv6 + real-world traversal validation
 
-* New workspace member crate `p2p-rendezvous`: MessagePack-over-TCP
-  protocol, `rendezvousd` binary, and a `RendezvousClient` used by
-  `p2p-core/src/traversal/`.
-* CLI flags `--rendezvous <addr>` + `--code <code>` + `--peer-id <hex>`
-  on `send` / `receive`.
-* `traversal::establish_via_rendezvous(...)` orchestrates: bind UDP →
-  STUN on that socket → register code at rendezvous → wait for peer →
-  race `quinn::Endpoint::connect` vs `accept` as the hole punch.
-* Symmetric-NAT detection: two STUN servers, compare mapped ports;
-  surface `Error::HolePunchFailed` cleanly when relay is needed.
-* IPv6 in the same phase if timeline allows (one `quinn::Endpoint` per
-  family, race both targets).
+* IPv6: bind a second `quinn::Endpoint` per address family and race the
+  punch against both peer endpoints simultaneously (~80 LoC delta in
+  `traversal/mod.rs`).
+* Linux netns harness in `tests/traversal/`: two namespaces behind
+  `iptables -t nat -A POSTROUTING -j MASQUERADE`, rendezvous in a third.
+* Real-world: two laptops on different home networks, rendezvous on a
+  free-tier VPS, target time-to-pair ≤ 10 s after both sides enter the
+  code.
 
 ### Phase 2 — QUIC relay fallback
 

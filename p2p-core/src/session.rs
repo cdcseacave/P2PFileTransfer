@@ -20,6 +20,7 @@ use crate::identity::{Fingerprint, Identity};
 use crate::network::quic::{QuicConnection, QuicEndpoint};
 use crate::progress::ProgressState;
 use crate::protocol::{Capabilities, ConfigMessage};
+use crate::traversal::{establish_via_rendezvous, RendezvousParams, DEFAULT_STUN_SERVERS};
 use crate::transfer_folder::{FolderTransferSession, FolderTransferState};
 
 /// An established connection plus the parameters needed to resurrect it.
@@ -87,6 +88,86 @@ impl P2PSession {
             handshake,
             role: ConnectionRole::Initiator,
             initiator_target: Some((peer_addr, peer_fingerprint)),
+        })
+    }
+
+    /// Establish a session via a rendezvous server + shared code.
+    ///
+    /// Both peers run this with the same `code` and the same
+    /// `rendezvous` address. The function binds a UDP socket, runs STUN
+    /// on it, exchanges public endpoints + cert fingerprints over the
+    /// rendezvous, then races `QuicEndpoint::connect`/`accept` as the
+    /// hole-punch. After the QUIC connection is up, both peers run the
+    /// application handshake — initiator role is decided by lexical
+    /// comparison of cert fingerprints so it's deterministic without
+    /// extra coordination.
+    pub async fn from_rendezvous(
+        rendezvous: SocketAddr,
+        code: String,
+        identity: Arc<Identity>,
+        device_id: Uuid,
+        capabilities: Capabilities,
+        config: ConfigMessage,
+    ) -> Result<Self> {
+        let our_fp = identity.fingerprint();
+
+        let session = establish_via_rendezvous(RendezvousParams {
+            rendezvous,
+            code,
+            identity: identity.clone(),
+            device_id,
+            stun_servers: [
+                DEFAULT_STUN_SERVERS[0].to_string(),
+                DEFAULT_STUN_SERVERS[1].to_string(),
+            ],
+        })
+        .await?;
+
+        let crate::traversal::EstablishedSession {
+            endpoint,
+            mut connection,
+            peer_endpoint,
+            peer_fingerprint,
+            peer_device_id: _,
+        } = session;
+
+        // Deterministic initiator/responder split. The peer with the
+        // numerically smaller fingerprint runs the handshake as client;
+        // the other side runs it as server. Both peers see the same
+        // ordering so neither has to be told the role out of band.
+        let handshake = if our_fp < peer_fingerprint {
+            HandshakeClient::new(device_id, capabilities, &identity)
+                .perform_handshake(&mut connection, config)
+                .await?
+        } else {
+            HandshakeServer::new(device_id, capabilities, &identity)
+                .perform_handshake(&mut connection)
+                .await?
+        };
+
+        info!(
+            "rendezvous session established (peer device {}, addr {peer_endpoint}, capabilities {:?})",
+            handshake.peer_device_id, handshake.agreed_capabilities,
+        );
+
+        let role = if our_fp < peer_fingerprint {
+            ConnectionRole::Initiator
+        } else {
+            ConnectionRole::Responder
+        };
+
+        Ok(Self {
+            endpoint,
+            connection,
+            identity,
+            session_id: Uuid::new_v4(),
+            device_id,
+            handshake,
+            role,
+            // Rendezvous codes are single-use and expire; reconnect()
+            // would need a fresh code re-coordinated with the peer.
+            // Skip auto-reconnect for traversal sessions in Phase 1.
+            initiator_target: None,
         })
     }
 

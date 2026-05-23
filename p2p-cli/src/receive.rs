@@ -39,18 +39,29 @@ pub async fn handle_receive(
     let capabilities = Capabilities::all();
     let peer_fp = session_params.parsed_fingerprint()?;
 
-    let mut session = P2PSession::establish(
-        &role,
-        session_params.peer.clone(),
-        peer_fp,
-        session_params.discover,
-        session_params.port,
-        identity,
-        device_id,
-        capabilities,
-        Some(ConfigMessage::default()),
-    )
-    .await?;
+    let mut session = if crate::rendezvous::is_rendezvous_mode(&session_params) {
+        crate::rendezvous::establish(
+            &session_params,
+            identity,
+            device_id,
+            capabilities,
+            ConfigMessage::default(),
+        )
+        .await?
+    } else {
+        P2PSession::establish(
+            &role,
+            session_params.peer.clone(),
+            peer_fp,
+            session_params.discover,
+            session_params.port,
+            identity,
+            device_id,
+            capabilities,
+            Some(ConfigMessage::default()),
+        )
+        .await?
+    };
 
     info!("Session established");
     info!("    Peer: {}", session.peer_device_id());

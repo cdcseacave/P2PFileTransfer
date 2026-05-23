@@ -82,6 +82,41 @@ p2p-transfer nat-test --stun-server stun.cloudflare.com:3478
 Queries two STUN servers on the same UDP socket and reports `Cone` (UDP
 hole-punching will work) or `Symmetric` (relay required — Phase 2).
 
+### Cross-NAT pairing through a rendezvous
+
+When the two peers are on different networks and you don't want to (or
+can't) port-forward, run a small rendezvous server somewhere reachable
+to both sides (a free-tier VPS, a docker-compose stack, your home
+router):
+
+```
+# On the rendezvous host:
+rendezvousd --bind 0.0.0.0:14570
+```
+
+Then both peers run:
+
+```
+# Sender
+p2p-transfer send ./bigfile.bin \
+    --rendezvous rendezvous.example.com:14570 \
+    --code ABC123
+
+# Receiver
+p2p-transfer receive --output ./received \
+    --rendezvous rendezvous.example.com:14570 \
+    --code ABC123
+```
+
+Whichever peer types the same `--code` first waits up to 5 minutes for
+the other; once both have arrived they exchange public endpoints + cert
+fingerprints and complete the QUIC handshake by UDP hole-punching. The
+rendezvous never sees the file data — it only matches peers.
+
+Symmetric NATs cannot be punched through and the receiver/sender will
+print `Hole punch failed: symmetric NAT detected — enable relay
+fallback (Phase 2)`.
+
 ### Resume
 
 ```

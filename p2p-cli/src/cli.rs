@@ -37,6 +37,18 @@ pub struct SessionParams {
     /// Use peer discovery to find the peer address (only for 'client' role)
     #[arg(short = 'd', long)]
     pub discover: bool,
+
+    /// Rendezvous server (host:port) for cross-NAT pairing. When set,
+    /// `--peer` and `--discover` are ignored and pairing happens via
+    /// `--code` instead.
+    #[arg(long)]
+    pub rendezvous: Option<String>,
+
+    /// Shared pairing code (4–32 ASCII alphanumeric). Required when
+    /// `--rendezvous` is set. Use `p2p-transfer pair --new` to generate
+    /// a fresh one, or accept one the other peer hands you.
+    #[arg(long)]
+    pub code: Option<String>,
 }
 
 impl SessionParams {
