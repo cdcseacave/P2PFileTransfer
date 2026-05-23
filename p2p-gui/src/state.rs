@@ -68,14 +68,22 @@ impl Tab {
 pub struct ConnectionState {
     /// Connection mode
     pub mode: ConnectionMode,
-    /// Peer address input
+    /// Peer address input (Connect mode)
     pub peer_address: String,
+    /// Hex-encoded SHA-256 cert fingerprint of the peer (Connect mode).
+    /// 64 hex chars; pulled from beacons in Discovery mode and from the
+    /// rendezvous in Rendezvous mode.
+    pub peer_fingerprint: String,
     /// Port input
     pub port: String,
     /// Device ID
     pub device_id: Option<Uuid>,
-    /// Use peer discovery
+    /// Use peer discovery (Connect mode only)
     pub use_discovery: bool,
+    /// Rendezvous server (host[:port]) for cross-NAT pairing
+    pub rendezvous_address: String,
+    /// Shared pairing code for the rendezvous
+    pub code: String,
     /// Connection status message
     pub status_message: String,
     /// Is currently connecting/listening
@@ -88,11 +96,14 @@ pub enum ConnectionMode {
     #[default]
     Listen,
     Connect,
+    /// Pair with another peer through a rendezvous server using a short
+    /// shared code (works across NATs).
+    Rendezvous,
 }
 
 impl ConnectionMode {
     pub fn all() -> Vec<ConnectionMode> {
-        vec![ConnectionMode::Listen, ConnectionMode::Connect]
+        vec![ConnectionMode::Listen, ConnectionMode::Connect, ConnectionMode::Rendezvous]
     }
 }
 
@@ -100,7 +111,8 @@ impl std::fmt::Display for ConnectionMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ConnectionMode::Listen => write!(f, "Listen for connections"),
-            ConnectionMode::Connect => write!(f, "Connect to peer"),
+            ConnectionMode::Connect => write!(f, "Connect to peer (direct)"),
+            ConnectionMode::Rendezvous => write!(f, "Pair with code (cross-NAT)"),
         }
     }
 }

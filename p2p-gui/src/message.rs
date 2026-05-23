@@ -18,8 +18,12 @@ pub enum Message {
     // Connection tab
     ModeSelected(ConnectionMode),
     PeerAddressChanged(String),
+    PeerFingerprintChanged(String),
     PortChanged(String),
     DiscoveryToggled(bool),
+    RendezvousAddressChanged(String),
+    CodeChanged(String),
+    GenerateCode,
     StartConnection,
     StopConnection,
     ConnectionEstablished(String), // Success message (for Listen mode)

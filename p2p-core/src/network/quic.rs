@@ -155,12 +155,21 @@ pub struct QuicConnection {
 }
 
 impl QuicConnection {
-    /// Initiator side: open the control stream and use it.
+    /// Initiator side: open the control stream and prime it with the
+    /// `PROTOCOL_MAGIC` so the peer's `accept_bi` unblocks immediately.
+    /// quinn's `open_bi` itself is a local operation — the responder's
+    /// `accept_bi` only resolves once the initiator writes *something*
+    /// to the stream, so the magic doubles as the wake-up.
     async fn open_control_initiator(connection: quinn::Connection) -> Result<Self> {
-        let (control_send, control_recv) = connection
+        let (mut control_send, control_recv) = connection
             .open_bi()
             .await
             .map_err(|e| Error::Quic(format!("open_bi: {e}")))?;
+        // quinn::SendStream has an inherent write_all (not via AsyncWriteExt).
+        control_send
+            .write_all(&crate::PROTOCOL_MAGIC)
+            .await
+            .map_err(|e| Error::Quic(format!("control stream prime: {e}")))?;
         Ok(Self {
             connection,
             control_send,
@@ -168,12 +177,25 @@ impl QuicConnection {
         })
     }
 
-    /// Responder side: accept the control stream the initiator opened.
+    /// Responder side: accept the control stream the initiator opened
+    /// and consume the priming magic.
     async fn open_control_responder(connection: quinn::Connection) -> Result<Self> {
-        let (control_send, control_recv) = connection
+        let (control_send, mut control_recv) = connection
             .accept_bi()
             .await
             .map_err(|e| Error::Quic(format!("accept_bi: {e}")))?;
+        let mut magic = [0u8; 4];
+        // quinn::RecvStream has an inherent read_exact that returns
+        // `Result<(), ReadExactError>`.
+        control_recv
+            .read_exact(&mut magic)
+            .await
+            .map_err(|e| Error::Quic(format!("control stream prime read: {e}")))?;
+        if magic != crate::PROTOCOL_MAGIC {
+            return Err(Error::Protocol(format!(
+                "control stream priming magic mismatch: got {magic:?}",
+            )));
+        }
         Ok(Self {
             connection,
             control_send,

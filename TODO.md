@@ -42,19 +42,17 @@
   free-tier VPS, target time-to-pair ≤ 10 s after both sides enter the
   code.
 
-### Phase 3 — GUI pairing + polish
-
-* GUI Connection tab: "Pair with code" sub-flow. `pairing_mode: {
-  Discovery, Direct, Rendezvous }`.
-* **Fix the GUI mutex deadlock:** today the establish call runs inside
-  the `Arc<tokio::Mutex<P2PSession>>` lock; a 30-second pairing wait
-  would freeze the message loop. Build the session outside the lock,
-  then assign it.
-* `nat-test --rendezvous <URL>` performs a real self-loop punch test
-  (not just STUN).
-* Refresh `README.md`, `DESIGN.md`, `CHANGELOG.md` with rendezvous +
-  relay usage and the docker-compose stanza for self-hosting
-  `rendezvousd`.
+* **Phase 3 — GUI pairing + polish** — **done** (2026-05).
+  Connection tab has a third mode "Pair with code (cross-NAT)" that
+  takes a rendezvous server + shared code (with a Generate button);
+  Connect mode now exposes the `--peer-fingerprint` field needed for
+  direct mode. The session is built off the iced thread (no mutex
+  deadlock — connect/from_rendezvous run inside `Command::perform`
+  and only the resulting `P2PSession` is wrapped in `Arc<Mutex<...>>`
+  via `ConnectionEstablishedWithSession`). `nat-test --rendezvous URL`
+  runs a real self-loop punch and reports `direct` / `relay` / `failed`
+  with latency. Docs (README/DESIGN/TODO/CHANGELOG) describe rendezvous
+  + relay end-to-end.
 
 ## Nice-to-have / parking lot
 

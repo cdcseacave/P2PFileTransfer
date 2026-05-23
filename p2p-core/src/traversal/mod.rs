@@ -126,21 +126,27 @@ pub async fn establish_via_rendezvous(params: RendezvousParams) -> Result<Establ
 
     match outcome {
         MatchOutcome::Direct(peer) => {
+            let peer_id = Uuid::from_bytes(peer.device_id);
             info!(
-                "traversal: direct match with peer device {} at {}",
-                Uuid::from_bytes(peer.device_id),
+                "traversal: direct match with peer device {peer_id} at {}",
                 peer.endpoint,
             );
             let std_socket = socket.into_std().map_err(Error::Network)?;
             let endpoint = QuicEndpoint::from_socket(std_socket, identity.clone())?;
-            let connection =
-                punch::race_connect_and_accept(&endpoint, peer.endpoint, peer.fingerprint).await?;
+            let connection = punch::race_connect_and_accept(
+                &endpoint,
+                peer.endpoint,
+                peer.fingerprint,
+                device_id,
+                peer_id,
+            )
+            .await?;
             Ok(EstablishedSession {
                 endpoint,
                 connection,
                 peer_endpoint: peer.endpoint,
                 peer_fingerprint: peer.fingerprint,
-                peer_device_id: Uuid::from_bytes(peer.device_id),
+                peer_device_id: peer_id,
             })
         }
         MatchOutcome::Relay(relay) => {
@@ -149,7 +155,7 @@ pub async fn establish_via_rendezvous(params: RendezvousParams) -> Result<Establ
                 relay.relay_endpoint,
                 Uuid::from_bytes(relay.peer_device_id),
             );
-            establish_via_relay(socket, identity.clone(), relay, our_fp).await
+            establish_via_relay(socket, identity.clone(), relay, our_fp, device_id).await
         }
     }
 }
@@ -164,6 +170,7 @@ async fn establish_via_relay(
     identity: Arc<Identity>,
     relay: p2p_rendezvous::RelayInfo,
     our_fp: [u8; FINGERPRINT_LEN],
+    device_id: Uuid,
 ) -> Result<EstablishedSession> {
     let hello = RelayHello {
         token: relay.session_token,
@@ -183,10 +190,13 @@ async fn establish_via_relay(
     let std_socket = socket.into_std().map_err(Error::Network)?;
     let endpoint = QuicEndpoint::from_socket(std_socket, identity)?;
 
+    let peer_id = Uuid::from_bytes(relay.peer_device_id);
     let conn = punch::race_connect_and_accept(
         &endpoint,
         relay.relay_endpoint,
         relay.peer_fingerprint,
+        device_id,
+        peer_id,
     )
     .await?;
 
@@ -195,7 +205,7 @@ async fn establish_via_relay(
         connection: conn,
         peer_endpoint: relay.relay_endpoint,
         peer_fingerprint: relay.peer_fingerprint,
-        peer_device_id: Uuid::from_bytes(relay.peer_device_id),
+        peer_device_id: peer_id,
     })
 }
 

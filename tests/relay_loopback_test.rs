@@ -19,6 +19,7 @@ use p2p_core::{
     identity::Identity,
     network::quic::QuicEndpoint,
     traversal::punch::race_connect_and_accept,
+    Uuid,
 };
 use p2p_rendezvous::{
     client::{register_full, MatchOutcome},
@@ -132,8 +133,10 @@ async fn loopback_pair_via_relay() {
     let ep_a = QuicEndpoint::from_socket(std_a, id_a).unwrap();
     let ep_b = QuicEndpoint::from_socket(std_b, id_b).unwrap();
 
-    let fut_a = race_connect_and_accept(&ep_a, relay_for_a.relay_endpoint, relay_for_a.peer_fingerprint);
-    let fut_b = race_connect_and_accept(&ep_b, relay_for_b.relay_endpoint, relay_for_b.peer_fingerprint);
+    let our_id_a = Uuid::from_bytes([0xA1; 16]);
+    let our_id_b = Uuid::from_bytes([0xB2; 16]);
+    let fut_a = race_connect_and_accept(&ep_a, relay_for_a.relay_endpoint, relay_for_a.peer_fingerprint, our_id_a, our_id_b);
+    let fut_b = race_connect_and_accept(&ep_b, relay_for_b.relay_endpoint, relay_for_b.peer_fingerprint, our_id_b, our_id_a);
 
     let (conn_a, conn_b) = timeout(Duration::from_secs(20), async {
         tokio::try_join!(fut_a, fut_b)
@@ -144,8 +147,14 @@ async fn loopback_pair_via_relay() {
 
     assert_eq!(conn_a.peer_addr(), relay_for_a.relay_endpoint);
     assert_eq!(conn_b.peer_addr(), relay_for_b.relay_endpoint);
+    // Only the QUIC client side sees the server's cert directly via
+    // `peer_identity()` (the server config uses `with_no_client_auth`).
+    // A.device_id ([0xA1; 16]) < B.device_id ([0xB2; 16]) so A is the
+    // client and observes B's cert; B is the server and observes None.
+    // The application-layer HELLO message carries fingerprints both
+    // ways for cross-checking — see handshake.rs.
     assert_eq!(conn_a.peer_fingerprint(), Some(fp_b));
-    assert_eq!(conn_b.peer_fingerprint(), Some(fp_a));
+    assert_eq!(conn_b.peer_fingerprint(), None);
 
     let bytes = relay.bytes_forwarded().await;
     assert!(bytes > 0, "relay should have forwarded the QUIC handshake bytes");

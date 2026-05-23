@@ -43,6 +43,22 @@ pub fn handle_message(state: &mut AppState, message: Message) -> Command<Message
             state.connection_state.use_discovery = enabled;
             Command::none()
         }
+        Message::PeerFingerprintChanged(fp) => {
+            state.connection_state.peer_fingerprint = fp;
+            Command::none()
+        }
+        Message::RendezvousAddressChanged(addr) => {
+            state.connection_state.rendezvous_address = addr;
+            Command::none()
+        }
+        Message::CodeChanged(code) => {
+            state.connection_state.code = code;
+            Command::none()
+        }
+        Message::GenerateCode => {
+            state.connection_state.code = p2p_core::traversal::generate_code();
+            Command::none()
+        }
         Message::StartConnection => handle_start_connection(state),
         Message::StopConnection => {
             // Signal listener to stop
@@ -411,10 +427,48 @@ fn handle_start_connection(state: &mut AppState) -> Command<Message> {
                 |msg| msg,
             )
         }
+        ConnectionMode::Rendezvous => {
+            let rendezvous = state.connection_state.rendezvous_address.trim().to_string();
+            let code = state.connection_state.code.trim().to_string();
+
+            if rendezvous.is_empty() || code.is_empty() {
+                state.connection_state.is_active = false;
+                state.connection_state.status_message = String::from("Idle");
+                state.add_console_message(
+                    String::from("Enter both a rendezvous server and a code before pairing"),
+                    ConsoleIcon::Error,
+                );
+                return Command::none();
+            }
+
+            state.connection_state.status_message = String::from("Pairing...");
+            state.connection_state.is_active = true;
+            state.add_console_message(
+                format!("Pairing through {rendezvous} with code '{code}' (this may take a moment)..."),
+                ConsoleIcon::Info,
+            );
+
+            let device_id = state.connection_state.device_id.unwrap();
+            let config = state.settings.to_config_message();
+
+            Command::perform(
+                async move {
+                    match pair_via_rendezvous(rendezvous, code, device_id, config).await {
+                        Ok((session, msg)) => Message::ConnectionEstablishedWithSession(
+                            Arc::new(Mutex::new(session)),
+                            msg,
+                        ),
+                        Err(e) => Message::ConnectionFailed(e.to_string()),
+                    }
+                },
+                |msg| msg,
+            )
+        }
         ConnectionMode::Connect => {
             let address = state.connection_state.peer_address.clone();
             let port = state.connection_state.port.parse::<u16>().unwrap_or(14567);
             let use_discovery = state.connection_state.use_discovery;
+            let peer_fp_hex = state.connection_state.peer_fingerprint.trim().to_string();
 
             state.connection_state.status_message = String::from("Connecting...");
             state.connection_state.is_active = true;
@@ -438,7 +492,7 @@ fn handle_start_connection(state: &mut AppState) -> Command<Message> {
 
             Command::perform(
                 async move {
-                    match connect_to_peer(address, port, use_discovery, device_id, config).await {
+                    match connect_to_peer(address, port, use_discovery, peer_fp_hex, device_id, config).await {
                         Ok((session, msg)) => {
                             // Wrap session in Arc<Mutex> and return with message
                             Message::ConnectionEstablishedWithSession(
@@ -654,6 +708,7 @@ async fn connect_to_peer(
     address: String,
     port: u16,
     use_discovery: bool,
+    peer_fp_hex: String,
     device_id: Uuid,
     config: ConfigMessage,
 ) -> Result<(P2PSession, String)> {
@@ -671,10 +726,20 @@ async fn connect_to_peer(
         None
     };
 
-    // Direct `--peer` mode in the GUI needs an explicit fingerprint in a future
-    // pass; for now only the discovery path (which pulls the fingerprint from
-    // the beacon inside session::establish) works without UI changes.
-    let peer_fingerprint = None;
+    let peer_fingerprint = if peer_fp_hex.is_empty() {
+        None
+    } else if peer_fp_hex.len() != 64 {
+        return Err(anyhow::anyhow!(
+            "peer fingerprint must be 64 hex chars, got {}",
+            peer_fp_hex.len()
+        ));
+    } else {
+        let bytes = hex::decode(&peer_fp_hex)
+            .map_err(|e| anyhow::anyhow!("invalid peer fingerprint hex: {e}"))?;
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        Some(arr)
+    };
 
     let session = P2PSession::establish(
         "client",
@@ -693,6 +758,51 @@ async fn connect_to_peer(
     info!("Connection established with peer: {}", peer_id);
 
     Ok((session, format!("Connected to peer: {}", peer_id)))
+}
+
+async fn pair_via_rendezvous(
+    rendezvous: String,
+    code: String,
+    device_id: Uuid,
+    config: ConfigMessage,
+) -> Result<(P2PSession, String)> {
+    use std::net::SocketAddr;
+    use tokio::net::lookup_host;
+
+    let capabilities = Capabilities::all();
+    let identity = Arc::new(p2p_core::identity::Identity::load_or_generate()?);
+
+    // Default the rendezvous port when only a hostname was supplied.
+    let host_port = if rendezvous.contains(':') {
+        rendezvous.clone()
+    } else {
+        format!("{rendezvous}:{}", p2p_core::DEFAULT_RENDEZVOUS_PORT)
+    };
+    let rendezvous_addr: SocketAddr = lookup_host(&host_port)
+        .await
+        .map_err(|e| anyhow::anyhow!("resolving rendezvous '{host_port}': {e}"))?
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("rendezvous host '{host_port}' resolved to no addresses"))?;
+
+    info!(
+        "Pairing through rendezvous {rendezvous_addr} with code '{code}' (local fp={})",
+        identity.fingerprint_hex(),
+    );
+
+    let session = P2PSession::from_rendezvous(
+        rendezvous_addr,
+        code,
+        identity,
+        device_id,
+        capabilities,
+        config,
+        false,
+    )
+    .await?;
+
+    let peer_id = session.peer_device_id();
+    info!("Rendezvous pairing established with peer: {peer_id}");
+    Ok((session, format!("Paired with peer: {peer_id}")))
 }
 
 async fn send_path(

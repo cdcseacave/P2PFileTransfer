@@ -77,10 +77,17 @@ addresses, device IDs, and cert fingerprints.
 ```
 p2p-transfer nat-test
 p2p-transfer nat-test --stun-server stun.cloudflare.com:3478
+p2p-transfer nat-test --rendezvous rendezvous.example.com:14570
 ```
 
-Queries two STUN servers on the same UDP socket and reports `Cone` (UDP
-hole-punching will work) or `Symmetric` (relay required — Phase 2).
+* Without `--rendezvous`: queries two STUN servers on the same UDP
+  socket and reports `Cone` (UDP hole-punching will work) or
+  `Symmetric` (relay required).
+* With `--rendezvous`: stands up two local peers, registers both at
+  the given rendezvous with a fresh code, and races a QUIC handshake
+  between them. Reports `direct` / `relay` / `failed` plus latency —
+  the cleanest end-to-end check that your rendezvous + (optional)
+  relay setup actually works.
 
 ### Cross-NAT pairing through a rendezvous
 
@@ -155,7 +162,13 @@ p2p-transfer            # if built with --features gui|full
 p2p-transfer gui
 ```
 
-Tabs: Connection (listen or connect), Send, Receive, Settings, History.
+Tabs: Connection (Listen / Connect / Pair-with-code), Send, Receive,
+Settings, History.
+
+The Connection tab's "Pair with code (cross-NAT)" mode takes a
+rendezvous server + shared code (with a Generate button) and pairs the
+two peers through it; the UI stays responsive during the wait because
+session establishment runs off the message loop.
 
 ## Performance
 

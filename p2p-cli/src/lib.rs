@@ -136,8 +136,8 @@ async fn run_cli_async(cli: Cli) -> Result<()> {
         Some(cli::Commands::Discover { timeout, port }) => {
             discover::handle_discover(timeout, port).await?;
         }
-        Some(cli::Commands::NatTest { stun_server }) => {
-            nat_test::handle_nat_test(stun_server).await?;
+        Some(cli::Commands::NatTest { stun_server, rendezvous }) => {
+            nat_test::handle_nat_test(stun_server, rendezvous).await?;
         }
         Some(cli::Commands::Resume {
             transfer_id,

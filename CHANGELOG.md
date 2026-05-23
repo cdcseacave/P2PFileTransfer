@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — 2026-05-23 — GUI pair-with-code + nat-test self-loop (Phase 3)
+- GUI Connection tab gains a third mode `Pair with code (cross-NAT)`:
+  inputs for rendezvous server (host:port) and shared code, with a
+  Generate button that mints a fresh 6-char code. Connect mode now
+  exposes the `--peer-fingerprint` field needed for direct mode.
+- Session establishment runs inside `Command::perform` and only the
+  resulting `P2PSession` is wrapped in `Arc<tokio::Mutex<...>>` and
+  installed in app state — the message loop stays responsive even
+  during a multi-second rendezvous wait.
+- `p2p-transfer nat-test --rendezvous <host[:port]>` now runs a real
+  self-loop punch test: spawns two local peers, registers both at the
+  rendezvous with a fresh code, races a QUIC handshake between them,
+  and reports `direct` / `relay` / `failed` plus latency.
+
 ### Added — 2026-05-23 — QUIC relay fallback (Phase 2)
 - `p2p_rendezvous::relay::Relay`: a tiny UDP packet forwarder. Each
   session is reserved by the rendezvous and joined by both peers via

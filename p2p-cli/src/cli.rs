@@ -181,11 +181,20 @@ pub enum Commands {
         port: u16,
     },
 
-    /// Test NAT traversal - discover public IP and port
+    /// Test NAT traversal — STUN-based by default; with `--rendezvous`,
+    /// runs a real self-loop punch test through a live rendezvous server.
     NatTest {
-        /// STUN server to use (default: Google's public STUN)
+        /// STUN server to use (defaults to two of Google's public servers
+        /// so symmetric-vs-cone classification is possible)
         #[arg(long)]
         stun_server: Option<String>,
+
+        /// Rendezvous server (host[:port]) to self-loop punch against.
+        /// When present, the tool spawns two local peers that pair
+        /// through the rendezvous and races a QUIC handshake between
+        /// them — reports `direct`, `relay`, or `failed`.
+        #[arg(long)]
+        rendezvous: Option<String>,
     },
 
     /// Resume a previous transfer

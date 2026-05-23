@@ -110,8 +110,6 @@ impl P2PSession {
         config: ConfigMessage,
         force_relay: bool,
     ) -> Result<Self> {
-        let our_fp = identity.fingerprint();
-
         let session = establish_via_rendezvous(RendezvousParams {
             rendezvous,
             code,
@@ -130,14 +128,16 @@ impl P2PSession {
             mut connection,
             peer_endpoint,
             peer_fingerprint,
-            peer_device_id: _,
+            peer_device_id,
         } = session;
 
-        // Deterministic initiator/responder split. The peer with the
-        // numerically smaller fingerprint runs the handshake as client;
-        // the other side runs it as server. Both peers see the same
-        // ordering so neither has to be told the role out of band.
-        let handshake = if our_fp < peer_fingerprint {
+        // Deterministic initiator/responder split. Compare device IDs
+        // (fresh UUIDs per process — always unique even when both
+        // peers run on the same machine with a shared identity).
+        // Fingerprints would alias when a user pairs themselves;
+        // device_id is always fresh.
+        let we_initiate = device_id < peer_device_id;
+        let handshake = if we_initiate {
             HandshakeClient::new(device_id, capabilities, &identity)
                 .perform_handshake(&mut connection, config)
                 .await?
@@ -152,11 +152,15 @@ impl P2PSession {
             handshake.peer_device_id, handshake.agreed_capabilities,
         );
 
-        let role = if our_fp < peer_fingerprint {
+        let role = if we_initiate {
             ConnectionRole::Initiator
         } else {
             ConnectionRole::Responder
         };
+
+        // Suppress unused warning when peer_fingerprint isn't needed beyond
+        // the handshake result.
+        let _ = peer_fingerprint;
 
         Ok(Self {
             endpoint,
