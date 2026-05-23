@@ -61,7 +61,8 @@ pub async fn register(server: SocketAddr, req: RegisterRequest) -> Result<PeerIn
     match register_full(server, req).await? {
         MatchOutcome::Direct(p) => Ok(p),
         MatchOutcome::Relay(_) => Err(ClientError::UnexpectedFromServer(
-            "rendezvous returned RelayMatch but caller used the direct-only register() helper".to_string(),
+            "rendezvous returned RelayMatch but caller used the direct-only register() helper"
+                .to_string(),
         )),
     }
 }
@@ -72,7 +73,9 @@ pub async fn register_full(
     server: SocketAddr,
     req: RegisterRequest,
 ) -> Result<MatchOutcome, ClientError> {
-    let mut stream = TcpStream::connect(server).await.map_err(ClientError::Connect)?;
+    let mut stream = TcpStream::connect(server)
+        .await
+        .map_err(ClientError::Connect)?;
     let _ = stream.set_nodelay(true);
 
     framing::write_message(&mut stream, &Message::Register(req))

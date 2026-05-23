@@ -110,7 +110,11 @@ impl<'a> FileTransferSession<'a> {
         }
 
         let mut compressor: Option<AdaptiveCompressor> = if self.config.compression_enabled {
-            let sample_size = if self.config.adaptive_compression { 3 } else { 0 };
+            let sample_size = if self.config.adaptive_compression {
+                3
+            } else {
+                0
+            };
             Some(AdaptiveCompressor::new(
                 self.config.compression_level,
                 sample_size,
@@ -231,7 +235,12 @@ impl<'a> FileTransferSession<'a> {
                 cb(chunk_index);
             }
 
-            trace!("Received chunk {} ({}/{})", chunk_index, received, total_chunks);
+            trace!(
+                "Received chunk {} ({}/{})",
+                chunk_index,
+                received,
+                total_chunks
+            );
         }
 
         let checksum = writer.finalize().await?;

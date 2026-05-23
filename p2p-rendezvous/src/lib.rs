@@ -38,7 +38,10 @@ mod framing {
     /// codes + endpoints + fingerprints; nothing legitimate is large.
     const MAX_FRAME_BYTES: u32 = 4096;
 
-    pub(crate) async fn write_message<W>(w: &mut W, msg: &Message) -> Result<(), RendezvousProtoError>
+    pub(crate) async fn write_message<W>(
+        w: &mut W,
+        msg: &Message,
+    ) -> Result<(), RendezvousProtoError>
     where
         W: AsyncWriteExt + Unpin,
     {
@@ -52,7 +55,9 @@ mod framing {
         w.write_all(&(payload.len() as u32).to_be_bytes())
             .await
             .map_err(RendezvousProtoError::Io)?;
-        w.write_all(&payload).await.map_err(RendezvousProtoError::Io)?;
+        w.write_all(&payload)
+            .await
+            .map_err(RendezvousProtoError::Io)?;
         w.flush().await.map_err(RendezvousProtoError::Io)?;
         Ok(())
     }
@@ -62,7 +67,9 @@ mod framing {
         R: AsyncReadExt + Unpin,
     {
         let mut len_buf = [0u8; 4];
-        r.read_exact(&mut len_buf).await.map_err(RendezvousProtoError::Io)?;
+        r.read_exact(&mut len_buf)
+            .await
+            .map_err(RendezvousProtoError::Io)?;
         let len = u32::from_be_bytes(len_buf);
         if len > MAX_FRAME_BYTES {
             return Err(RendezvousProtoError::FrameTooLarge {
@@ -71,7 +78,9 @@ mod framing {
             });
         }
         let mut payload = vec![0u8; len as usize];
-        r.read_exact(&mut payload).await.map_err(RendezvousProtoError::Io)?;
+        r.read_exact(&mut payload)
+            .await
+            .map_err(RendezvousProtoError::Io)?;
         rmp_serde::from_slice(&payload).map_err(RendezvousProtoError::Decode)
     }
 }

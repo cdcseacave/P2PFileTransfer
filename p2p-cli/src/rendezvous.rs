@@ -64,12 +64,7 @@ pub async fn establish(
 }
 
 async fn resolve_first(host_port: &str) -> Result<SocketAddr> {
-    // If the user passed bare "host" with no port, fill in the default.
-    let with_port = if host_port.contains(':') {
-        host_port.to_string()
-    } else {
-        format!("{host_port}:{}", p2p_core::DEFAULT_RENDEZVOUS_PORT)
-    };
+    let with_port = p2p_core::with_default_port(host_port, p2p_core::DEFAULT_RENDEZVOUS_PORT);
     let mut iter = lookup_host(&with_port).await?;
     iter.next()
         .ok_or_else(|| anyhow!("could not resolve rendezvous address '{with_port}'"))

@@ -79,7 +79,10 @@ pub async fn handle_send(
 
     info!("Session established");
     info!("    Peer: {}", session.peer_device_id());
-    info!("    Peer fingerprint: {}", hex::encode(session.peer_fingerprint()));
+    info!(
+        "    Peer fingerprint: {}",
+        hex::encode(session.peer_fingerprint())
+    );
     info!("    Capabilities: {:?}", session.capabilities());
 
     tokio::select! {

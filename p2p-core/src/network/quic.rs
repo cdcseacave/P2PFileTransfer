@@ -213,7 +213,9 @@ impl QuicConnection {
     /// application HELLO message.
     pub fn peer_fingerprint(&self) -> Option<Fingerprint> {
         let identity = self.connection.peer_identity()?;
-        let certs = identity.downcast::<Vec<rustls_pki_types::CertificateDer<'static>>>().ok()?;
+        let certs = identity
+            .downcast::<Vec<rustls_pki_types::CertificateDer<'static>>>()
+            .ok()?;
         let first = certs.first()?;
         Some(crate::identity::fingerprint_of(first))
     }
@@ -267,7 +269,10 @@ fn transport_config() -> TransportConfig {
 
 /// Convenience: bind a wildcard IPv4 endpoint on `port` (0 = ephemeral).
 pub fn bind_wildcard(port: u16, identity: Arc<Identity>) -> Result<QuicEndpoint> {
-    QuicEndpoint::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port), identity)
+    QuicEndpoint::bind(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port),
+        identity,
+    )
 }
 
 #[cfg(test)]

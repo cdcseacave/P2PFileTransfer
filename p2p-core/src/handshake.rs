@@ -31,10 +31,7 @@ pub struct HandshakeResult {
 /// so `observed` is always `Some` — any mismatch (including a missing
 /// observation, which means the peer presented no cert at all and the
 /// responder shouldn't have accepted the handshake) is fatal.
-fn cross_check_fingerprint(
-    claimed: Fingerprint,
-    observed: Option<Fingerprint>,
-) -> Result<()> {
+fn cross_check_fingerprint(claimed: Fingerprint, observed: Option<Fingerprint>) -> Result<()> {
     match observed {
         Some(actual) if actual == claimed => Ok(()),
         _ => Err(Error::FingerprintMismatch),
@@ -293,7 +290,10 @@ mod tests {
         // cert. The HELLO cross-check on the responder side would have
         // failed if the observation didn't match the claim, so this
         // just confirms the value made it out into the result.
-        assert_eq!(server_result.peer_fingerprint, client_identity.fingerprint());
+        assert_eq!(
+            server_result.peer_fingerprint,
+            client_identity.fingerprint()
+        );
     }
 
     #[test]

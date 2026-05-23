@@ -63,9 +63,11 @@ pub fn view_connection_tab(state: &AppState) -> Element<'_, Message> {
             ]
             .align_items(iced::Alignment::Start);
 
-            let discovery_checkbox =
-                checkbox("Use peer discovery (LAN beacons)", state.connection_state.use_discovery)
-                    .on_toggle(Message::DiscoveryToggled);
+            let discovery_checkbox = checkbox(
+                "Use peer discovery (LAN beacons)",
+                state.connection_state.use_discovery,
+            )
+            .on_toggle(Message::DiscoveryToggled);
 
             content = content
                 .push(inputs_row)

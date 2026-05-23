@@ -103,7 +103,11 @@ pub enum ConnectionMode {
 
 impl ConnectionMode {
     pub fn all() -> Vec<ConnectionMode> {
-        vec![ConnectionMode::Listen, ConnectionMode::Connect, ConnectionMode::Rendezvous]
+        vec![
+            ConnectionMode::Listen,
+            ConnectionMode::Connect,
+            ConnectionMode::Rendezvous,
+        ]
     }
 }
 

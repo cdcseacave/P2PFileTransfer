@@ -29,10 +29,7 @@ use self::stun::{classify_nat, NatClass};
 /// Default pair of STUN servers used when the caller does not supply
 /// their own. Two are needed so [`stun::classify_nat`] can spot
 /// symmetric-NAT mappings (different mapped port per destination).
-pub const DEFAULT_STUN_SERVERS: [&str; 2] = [
-    "stun.l.google.com:19302",
-    "stun1.l.google.com:19302",
-];
+pub const DEFAULT_STUN_SERVERS: [&str; 2] = ["stun.l.google.com:19302", "stun1.l.google.com:19302"];
 
 /// Result of a rendezvous-mediated session establishment.
 pub struct EstablishedSession {
@@ -88,7 +85,10 @@ pub async fn establish_via_rendezvous(params: RendezvousParams) -> Result<Establ
 
     let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
     let socket = UdpSocket::bind(bind).await.map_err(Error::Network)?;
-    info!("traversal: bound UDP socket at {}", socket.local_addr().map_err(Error::Network)?);
+    info!(
+        "traversal: bound UDP socket at {}",
+        socket.local_addr().map_err(Error::Network)?
+    );
 
     let stun_a = resolve_first(&stun_servers[0]).await?;
     let stun_b = resolve_first(&stun_servers[1]).await?;
@@ -108,7 +108,11 @@ pub async fn establish_via_rendezvous(params: RendezvousParams) -> Result<Establ
     };
     info!(
         "traversal: public endpoint {public_endpoint} ({})",
-        if want_relay { "relay requested" } else { "direct punch" },
+        if want_relay {
+            "relay requested"
+        } else {
+            "direct punch"
+        },
     );
 
     let our_fp = identity.fingerprint();
@@ -229,7 +233,9 @@ pub fn generate_code() -> String {
     const ALPHABET: &[u8] = b"ABCDEFGHJKMNPQRSTVWXYZ23456789";
     use rand::Rng;
     let mut rng = rand::thread_rng();
-    (0..6).map(|_| ALPHABET[rng.gen_range(0..ALPHABET.len())] as char).collect()
+    (0..6)
+        .map(|_| ALPHABET[rng.gen_range(0..ALPHABET.len())] as char)
+        .collect()
 }
 
 #[cfg(test)]

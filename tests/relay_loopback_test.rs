@@ -16,9 +16,7 @@ use tokio::net::UdpSocket;
 use tokio::time::timeout;
 
 use p2p_core::{
-    identity::Identity,
-    network::quic::QuicEndpoint,
-    traversal::punch::race_connect_and_accept,
+    identity::Identity, network::quic::QuicEndpoint, traversal::punch::race_connect_and_accept,
     Uuid,
 };
 use p2p_rendezvous::{
@@ -135,8 +133,20 @@ async fn loopback_pair_via_relay() {
 
     let our_id_a = Uuid::from_bytes([0xA1; 16]);
     let our_id_b = Uuid::from_bytes([0xB2; 16]);
-    let fut_a = race_connect_and_accept(&ep_a, relay_for_a.relay_endpoint, relay_for_a.peer_fingerprint, our_id_a, our_id_b);
-    let fut_b = race_connect_and_accept(&ep_b, relay_for_b.relay_endpoint, relay_for_b.peer_fingerprint, our_id_b, our_id_a);
+    let fut_a = race_connect_and_accept(
+        &ep_a,
+        relay_for_a.relay_endpoint,
+        relay_for_a.peer_fingerprint,
+        our_id_a,
+        our_id_b,
+    );
+    let fut_b = race_connect_and_accept(
+        &ep_b,
+        relay_for_b.relay_endpoint,
+        relay_for_b.peer_fingerprint,
+        our_id_b,
+        our_id_a,
+    );
 
     let (conn_a, conn_b) = timeout(Duration::from_secs(20), async {
         tokio::try_join!(fut_a, fut_b)
@@ -154,5 +164,8 @@ async fn loopback_pair_via_relay() {
     assert_eq!(conn_b.peer_fingerprint(), Some(fp_a));
 
     let bytes = relay.bytes_forwarded().await;
-    assert!(bytes > 0, "relay should have forwarded the QUIC handshake bytes");
+    assert!(
+        bytes > 0,
+        "relay should have forwarded the QUIC handshake bytes"
+    );
 }

@@ -13,7 +13,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
 use tokio::net::UdpSocket;
-use tokio::time::timeout;
+use tokio::time::{timeout_at, Instant};
 
 use crate::error::{Error, Result};
 
@@ -25,9 +25,11 @@ const ATTR_XOR_MAPPED_ADDRESS: u16 = 0x0020;
 const QUERY_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Query a single STUN server using `socket` and return the public address
-/// it reports for that socket. Times out after [`QUERY_TIMEOUT`]. Rejects
-/// responses whose transaction id doesn't match the request — a spoofed
-/// packet from another source can't bind the right tx and is dropped.
+/// it reports for that socket. Times out after [`QUERY_TIMEOUT`]. Drops
+/// (rather than fails on) packets that aren't from `server` or whose
+/// transaction id doesn't match the request — the socket may be shared
+/// with other traffic (rendezvous, prior STUN queries) and a stale or
+/// spoofed packet must not poison the in-flight query.
 pub async fn query(socket: &UdpSocket, server: SocketAddr) -> Result<SocketAddr> {
     let (request, expected_tx) = build_binding_request();
     socket
@@ -35,33 +37,27 @@ pub async fn query(socket: &UdpSocket, server: SocketAddr) -> Result<SocketAddr>
         .await
         .map_err(Error::Network)?;
 
+    let deadline = Instant::now() + QUERY_TIMEOUT;
     let mut buf = [0u8; 1024];
-    let (len, _from) = timeout(QUERY_TIMEOUT, socket.recv_from(&mut buf))
-        .await
-        .map_err(|_| Error::Timeout)?
-        .map_err(Error::Network)?;
-    let data = &buf[..len];
-    if data.len() < 20 {
-        return Err(Error::Protocol("STUN response too short".to_string()));
+    loop {
+        let (len, from) = match timeout_at(deadline, socket.recv_from(&mut buf)).await {
+            Ok(Ok(v)) => v,
+            Ok(Err(e)) => return Err(Error::Network(e)),
+            Err(_) => return Err(Error::Timeout),
+        };
+        let data = &buf[..len];
+        if from != server || data.len() < 20 || data[8..20] != expected_tx {
+            continue;
+        }
+        return parse_binding_response(data);
     }
-    let response_tx = &data[8..20];
-    if response_tx != expected_tx {
-        return Err(Error::Protocol(
-            "STUN response transaction id does not match request".to_string(),
-        ));
-    }
-    parse_binding_response(data)
 }
 
 /// Classify whether the path likely supports UDP hole punching by querying
 /// two distinct STUN servers and comparing the mapped ports. Cone NATs
 /// reuse the same source-port mapping for any destination; symmetric NATs
 /// pick a fresh source port per destination.
-pub async fn classify_nat(
-    socket: &UdpSocket,
-    a: SocketAddr,
-    b: SocketAddr,
-) -> Result<NatClass> {
+pub async fn classify_nat(socket: &UdpSocket, a: SocketAddr, b: SocketAddr) -> Result<NatClass> {
     let map_a = query(socket, a).await?;
     let map_b = query(socket, b).await?;
     Ok(if map_a.port() == map_b.port() {

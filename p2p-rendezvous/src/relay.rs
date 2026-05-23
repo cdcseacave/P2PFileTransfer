@@ -257,11 +257,7 @@ impl Relay {
     }
 }
 
-async fn forward_loop(
-    socket: UdpSocket,
-    state: Arc<Mutex<RelayState>>,
-    bandwidth_cap_bps: u64,
-) {
+async fn forward_loop(socket: UdpSocket, state: Arc<Mutex<RelayState>>, bandwidth_cap_bps: u64) {
     let mut buf = vec![0u8; RECV_BUF_BYTES];
     let mut bucket_tokens: f64 = bandwidth_cap_bps as f64;
     let mut bucket_last = Instant::now();
@@ -363,9 +359,7 @@ async fn forward_loop(
         let ready = session.peer_a.is_some() as u8 + session.peer_b.is_some() as u8;
         state_guard.sessions.insert(hello.token, session);
         state_guard.addr_to_token.insert(src, hello.token);
-        info!(
-            "relay: peer joined session (slot {assigned_slot}, {ready} of 2 ready)",
-        );
+        info!("relay: peer joined session (slot {assigned_slot}, {ready} of 2 ready)",);
     }
 }
 

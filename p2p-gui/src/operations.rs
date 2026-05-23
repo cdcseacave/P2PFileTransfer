@@ -444,7 +444,9 @@ fn handle_start_connection(state: &mut AppState) -> Command<Message> {
             state.connection_state.status_message = String::from("Pairing...");
             state.connection_state.is_active = true;
             state.add_console_message(
-                format!("Pairing through {rendezvous} with code '{code}' (this may take a moment)..."),
+                format!(
+                    "Pairing through {rendezvous} with code '{code}' (this may take a moment)..."
+                ),
                 ConsoleIcon::Info,
             );
 
@@ -492,7 +494,16 @@ fn handle_start_connection(state: &mut AppState) -> Command<Message> {
 
             Command::perform(
                 async move {
-                    match connect_to_peer(address, port, use_discovery, peer_fp_hex, device_id, config).await {
+                    match connect_to_peer(
+                        address,
+                        port,
+                        use_discovery,
+                        peer_fp_hex,
+                        device_id,
+                        config,
+                    )
+                    .await
+                    {
                         Ok((session, msg)) => {
                             // Wrap session in Arc<Mutex> and return with message
                             Message::ConnectionEstablishedWithSession(
@@ -773,11 +784,7 @@ async fn pair_via_rendezvous(
     let identity = Arc::new(p2p_core::identity::Identity::load_or_generate()?);
 
     // Default the rendezvous port when only a hostname was supplied.
-    let host_port = if rendezvous.contains(':') {
-        rendezvous.clone()
-    } else {
-        format!("{rendezvous}:{}", p2p_core::DEFAULT_RENDEZVOUS_PORT)
-    };
+    let host_port = p2p_core::with_default_port(&rendezvous, p2p_core::DEFAULT_RENDEZVOUS_PORT);
     let rendezvous_addr: SocketAddr = lookup_host(&host_port)
         .await
         .map_err(|e| anyhow::anyhow!("resolving rendezvous '{host_port}': {e}"))?

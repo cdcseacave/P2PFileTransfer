@@ -533,7 +533,10 @@ mod tests {
             framing::read_message(&mut third),
         )
         .await;
-        assert!(recv.is_err(), "third client should be queued by the cap, not served");
+        assert!(
+            recv.is_err(),
+            "third client should be queued by the cap, not served"
+        );
     }
 
     #[tokio::test]

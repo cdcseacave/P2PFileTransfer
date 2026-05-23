@@ -29,12 +29,12 @@ use p2p_rendezvous::protocol::{RegisterRequest, PROTOCOL_VERSION as RZV_PROTO};
 use p2p_rendezvous::relay::RelayHello;
 
 /// Default STUN servers used when the user does not pass `--stun-server`.
-const DEFAULT_STUN_SERVERS: &[&str] = &[
-    "stun.l.google.com:19302",
-    "stun1.l.google.com:19302",
-];
+const DEFAULT_STUN_SERVERS: &[&str] = &["stun.l.google.com:19302", "stun1.l.google.com:19302"];
 
-pub async fn handle_nat_test(stun_server: Option<String>, rendezvous: Option<String>) -> Result<()> {
+pub async fn handle_nat_test(
+    stun_server: Option<String>,
+    rendezvous: Option<String>,
+) -> Result<()> {
     if let Some(rendezvous) = rendezvous {
         run_self_loop_punch(&rendezvous).await
     } else {
@@ -85,11 +85,7 @@ async fn run_stun_only(stun_server: Option<String>) -> Result<()> {
 async fn run_self_loop_punch(rendezvous_host: &str) -> Result<()> {
     info!("Self-loop punch test through rendezvous '{rendezvous_host}'...");
 
-    let with_port = if rendezvous_host.contains(':') {
-        rendezvous_host.to_string()
-    } else {
-        format!("{rendezvous_host}:{}", p2p_core::DEFAULT_RENDEZVOUS_PORT)
-    };
+    let with_port = p2p_core::with_default_port(rendezvous_host, p2p_core::DEFAULT_RENDEZVOUS_PORT);
     let rendezvous_addr = resolve_first(&with_port)
         .await
         .with_context(|| format!("resolving rendezvous '{with_port}'"))?;
@@ -165,7 +161,11 @@ async fn run_self_loop_punch(rendezvous_host: &str) -> Result<()> {
             }
             ("relay", a.relay_endpoint, b.relay_endpoint)
         }
-        _ => return Err(anyhow!("rendezvous returned mixed Direct/Relay outcomes (unsupported)")),
+        _ => {
+            return Err(anyhow!(
+                "rendezvous returned mixed Direct/Relay outcomes (unsupported)"
+            ))
+        }
     };
 
     let std_a = sock_a.into_std()?;

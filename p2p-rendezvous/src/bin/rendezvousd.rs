@@ -51,7 +51,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     init_logging(&cli.verbosity);
 
-    let mut server = Server::bind_with_ttl(cli.bind, std::time::Duration::from_secs(cli.code_ttl_secs)).await?;
+    let mut server =
+        Server::bind_with_ttl(cli.bind, std::time::Duration::from_secs(cli.code_ttl_secs)).await?;
     if let Some(relay_addr) = cli.relay_bind {
         let cap_bps = cli.max_relay_mbps.saturating_mul(1_000_000 / 8);
         let relay = Relay::bind(relay_addr, cap_bps).await?;
@@ -65,10 +66,16 @@ fn init_logging(verbosity: &str) {
     let filter = if std::env::var("RUST_LOG").is_ok() {
         EnvFilter::from_default_env()
     } else {
-        EnvFilter::new(format!("p2p_rendezvous={verbosity},rendezvousd={verbosity}"))
+        EnvFilter::new(format!(
+            "p2p_rendezvous={verbosity},rendezvousd={verbosity}"
+        ))
     };
     tracing_subscriber::registry()
         .with(filter)
-        .with(tracing_subscriber::fmt::layer().with_target(false).compact())
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_target(false)
+                .compact(),
+        )
         .init();
 }

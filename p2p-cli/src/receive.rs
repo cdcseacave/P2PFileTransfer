@@ -65,7 +65,10 @@ pub async fn handle_receive(
 
     info!("Session established");
     info!("    Peer: {}", session.peer_device_id());
-    info!("    Peer fingerprint: {}", hex::encode(session.peer_fingerprint()));
+    info!(
+        "    Peer fingerprint: {}",
+        hex::encode(session.peer_fingerprint())
+    );
     info!("    Compression: {}", session.config().compression_enabled);
 
     info!("Session ready - waiting for incoming transfers... (Ctrl+C to exit)");

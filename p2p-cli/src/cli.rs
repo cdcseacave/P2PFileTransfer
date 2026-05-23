@@ -45,8 +45,9 @@ pub struct SessionParams {
     pub rendezvous: Option<String>,
 
     /// Shared pairing code (4–32 ASCII alphanumeric). Required when
-    /// `--rendezvous` is set. Use `p2p-transfer pair --new` to generate
-    /// a fresh one, or accept one the other peer hands you.
+    /// `--rendezvous` is set. Both peers must use the same value: agree
+    /// out-of-band, pick any conforming string, or generate one with the
+    /// GUI's "Generate" button.
     #[arg(long)]
     pub code: Option<String>,
 

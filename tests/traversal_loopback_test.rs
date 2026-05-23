@@ -17,9 +17,7 @@ use std::time::Duration;
 use tokio::time::timeout;
 
 use p2p_core::{
-    identity::Identity,
-    network::quic::QuicEndpoint,
-    traversal::punch::race_connect_and_accept,
+    identity::Identity, network::quic::QuicEndpoint, traversal::punch::race_connect_and_accept,
     Uuid,
 };
 use p2p_rendezvous::{
@@ -94,8 +92,20 @@ async fn loopback_pair_via_rendezvous_and_punch() {
     //    the QUIC-client role.
     let our_id_a = Uuid::from_bytes([0xA1; 16]);
     let our_id_b = Uuid::from_bytes([0xB2; 16]);
-    let conn_a_fut = race_connect_and_accept(&ep_a, peer_for_a.endpoint, peer_for_a.fingerprint, our_id_a, our_id_b);
-    let conn_b_fut = race_connect_and_accept(&ep_b, peer_for_b.endpoint, peer_for_b.fingerprint, our_id_b, our_id_a);
+    let conn_a_fut = race_connect_and_accept(
+        &ep_a,
+        peer_for_a.endpoint,
+        peer_for_a.fingerprint,
+        our_id_a,
+        our_id_b,
+    );
+    let conn_b_fut = race_connect_and_accept(
+        &ep_b,
+        peer_for_b.endpoint,
+        peer_for_b.fingerprint,
+        our_id_b,
+        our_id_a,
+    );
 
     let (conn_a, conn_b) = timeout(Duration::from_secs(15), async {
         tokio::try_join!(conn_a_fut, conn_b_fut)

@@ -20,8 +20,8 @@ use crate::identity::{Fingerprint, Identity};
 use crate::network::quic::{QuicConnection, QuicEndpoint};
 use crate::progress::ProgressState;
 use crate::protocol::{Capabilities, ConfigMessage};
-use crate::traversal::{establish_via_rendezvous, RendezvousParams, DEFAULT_STUN_SERVERS};
 use crate::transfer_folder::{FolderTransferSession, FolderTransferState};
+use crate::traversal::{establish_via_rendezvous, RendezvousParams, DEFAULT_STUN_SERVERS};
 
 /// An established connection plus the parameters needed to resurrect it.
 pub struct P2PSession {
@@ -478,10 +478,7 @@ impl P2PSession {
                     debug!("Transfer completed, awaiting next");
                 }
                 Err(e) => {
-                    if matches!(
-                        &e,
-                        Error::Disconnected | Error::Quic(_) | Error::Network(_)
-                    ) {
+                    if matches!(&e, Error::Disconnected | Error::Quic(_) | Error::Network(_)) {
                         debug!("Connection closed, ending event loop");
                         return Ok(());
                     }
@@ -498,9 +495,9 @@ impl P2PSession {
     /// Re-establish a dropped session. Only initiators can reconnect because
     /// they hold the peer's address + fingerprint.
     pub async fn reconnect(&mut self) -> Result<()> {
-        let (peer_addr, peer_fp) = self.initiator_target.ok_or_else(|| {
-            Error::Protocol("Only initiator sessions can reconnect".to_string())
-        })?;
+        let (peer_addr, peer_fp) = self
+            .initiator_target
+            .ok_or_else(|| Error::Protocol("Only initiator sessions can reconnect".to_string()))?;
 
         info!("Attempting to reconnect to {}", peer_addr);
         let endpoint = QuicEndpoint::bind(

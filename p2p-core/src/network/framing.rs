@@ -36,25 +36,27 @@ where
     Ok(())
 }
 
-/// Read a message from an async reader. A clean close on the magic
-/// read (peer finished without sending another frame) maps to
-/// [`Error::Disconnected`]; truncation inside a frame is
-/// [`Error::Protocol`].
+/// Read a message from an async reader. A clean close *between frames*
+/// (zero bytes available when the next frame would start) maps to
+/// [`Error::Disconnected`]; truncation mid-magic, or anywhere else
+/// inside a frame, is [`Error::Protocol`].
 pub async fn read_message<R>(reader: &mut R) -> Result<Message>
 where
     R: AsyncReadExt + Unpin,
 {
-    // Read magic bytes. UnexpectedEof here means the peer cleanly
-    // closed the stream between frames — that's a graceful disconnect,
-    // not a wire fault.
+    // Probe for the first byte of the magic. 0 bytes back == clean
+    // between-frames close. Anything <4 bytes after that is mid-frame
+    // truncation, not a graceful disconnect.
     let mut magic = [0u8; 4];
-    reader.read_exact(&mut magic).await.map_err(|e| {
-        if e.kind() == std::io::ErrorKind::UnexpectedEof {
-            Error::Disconnected
-        } else {
-            Error::Network(e)
-        }
-    })?;
+    match reader.read(&mut magic[..1]).await {
+        Ok(0) => return Err(Error::Disconnected),
+        Ok(_) => {}
+        Err(e) => return Err(Error::Network(e)),
+    }
+    reader
+        .read_exact(&mut magic[1..])
+        .await
+        .map_err(|e| Error::Protocol(format!("truncated magic: {e}")))?;
 
     if magic != PROTOCOL_MAGIC {
         return Err(Error::Protocol(format!("Invalid magic bytes: {:?}", magic)));
@@ -98,6 +100,19 @@ mod tests {
         assert!(
             matches!(err, Error::Disconnected),
             "expected Disconnected, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_partial_magic_returns_protocol_error() {
+        // One byte of magic, then EOF — peer crashed mid-frame, not a
+        // clean between-frames close.
+        let buf = [PROTOCOL_MAGIC[0]];
+        let mut cursor = &buf[..];
+        let err = read_message(&mut cursor).await.unwrap_err();
+        assert!(
+            matches!(err, Error::Protocol(_)),
+            "expected Protocol, got {err:?}"
         );
     }
 

@@ -192,7 +192,9 @@ mod tests {
         let store = KnownPeers::open(dir.path().join("kp.json")).unwrap();
         let claimed = [1u8; 32];
         let presented = [2u8; 32];
-        let err = store.verify_or_pin(&claimed, &presented, "bob").unwrap_err();
+        let err = store
+            .verify_or_pin(&claimed, &presented, "bob")
+            .unwrap_err();
         assert!(matches!(err, Error::FingerprintMismatch));
         assert!(store.get(&claimed).is_none());
     }
