@@ -161,7 +161,7 @@ impl TransferHistory {
     /// Get most recent transfers (up to limit)
     pub fn recent(&self, limit: usize) -> Vec<&TransferRecord> {
         let mut records: Vec<&TransferRecord> = self.records.iter().collect();
-        records.sort_by(|a, b| b.start_time.cmp(&a.start_time));
+        records.sort_by_key(|r| std::cmp::Reverse(r.start_time));
         records.into_iter().take(limit).collect()
     }
 

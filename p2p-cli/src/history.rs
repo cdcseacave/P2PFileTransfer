@@ -44,7 +44,7 @@ pub async fn handle_history(
     }
 
     // Sort by start time (most recent first)
-    records.sort_by(|a, b| b.start_time.cmp(&a.start_time));
+    records.sort_by_key(|r| std::cmp::Reverse(r.start_time));
 
     // Limit results
     let records: Vec<_> = records.into_iter().take(limit).collect();
