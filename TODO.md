@@ -17,6 +17,17 @@
   `Error::HolePunchFailed`. `tests/traversal_loopback_test.rs` covers
   the rendezvous + punch primitives end-to-end on localhost (real
   cross-NAT requires a netns harness / two laptops + VPS).
+* **Phase 2 — QUIC relay fallback** — **done** (2026-05).
+  `rendezvousd --relay-bind <addr> --max-relay-mbps <n>` runs a tiny
+  UDP packet forwarder alongside the rendezvous. Rendezvous matches
+  where either side sets `want_relay` (symmetric NAT or
+  `--force-relay`) get a `RelayMatch` with a fresh session token.
+  Each peer sends a `RelayHello` so the relay records its source
+  address, then runs a normal QUIC handshake with the relay's address
+  as the apparent peer — packets are forwarded verbatim, so QUIC TLS
+  terminates end-to-end between the two real peers (the relay sees
+  ciphertext only). `tests/relay_loopback_test.rs` proves the full
+  rendezvous-→-relay-→-QUIC-handshake path on localhost.
 
 ## Active work
 
@@ -30,17 +41,6 @@
 * Real-world: two laptops on different home networks, rendezvous on a
   free-tier VPS, target time-to-pair ≤ 10 s after both sides enter the
   code.
-
-### Phase 2 — QUIC relay fallback
-
-* `rendezvousd --relay-bind <addr>` opens a second `quinn::Endpoint`.
-* Both peers `connect` to the relay with a per-session token; the relay
-  byte-pipes the two `quinn::Connection`s.
-* End-to-end TLS still terminates on the peers because the cert
-  fingerprint came from the rendezvous, not the relay (relay sees
-  ciphertext only).
-* `--max-relay-mbps` rate cap. 1 GB symmetric-NAT transfer as the
-  acceptance benchmark.
 
 ### Phase 3 — GUI pairing + polish
 

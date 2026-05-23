@@ -45,7 +45,10 @@ pub async fn establish(
         .await
         .with_context(|| format!("resolving --rendezvous '{rendezvous_host}'"))?;
 
-    info!("Pairing through rendezvous {rendezvous_addr} with code '{code}' (this may take a moment)...");
+    info!(
+        "Pairing through rendezvous {rendezvous_addr} with code '{code}' (this may take a moment, relay={})...",
+        params.force_relay
+    );
 
     let session = P2PSession::from_rendezvous(
         rendezvous_addr,
@@ -54,6 +57,7 @@ pub async fn establish(
         device_id,
         capabilities,
         config,
+        params.force_relay,
     )
     .await?;
     Ok(session)

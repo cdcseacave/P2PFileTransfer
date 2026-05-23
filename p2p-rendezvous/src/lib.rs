@@ -14,10 +14,12 @@
 
 pub mod client;
 pub mod protocol;
+pub mod relay;
 pub mod server;
 
-pub use client::{register, ClientError, PeerInfo};
+pub use client::{register, ClientError, MatchOutcome, PeerInfo, RelayInfo};
 pub use protocol::{Message, RegisterRequest, RendezvousProtoError};
+pub use relay::{Relay, RelayError, RelayHello, FINGERPRINT_LEN, SESSION_TOKEN_LEN};
 pub use server::{Server, ServerError};
 
 /// Default port `rendezvousd` listens on for TCP control-channel

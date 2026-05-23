@@ -21,6 +21,7 @@ use tracing::{debug, info, warn};
 
 use crate::framing;
 use crate::protocol::{Message, RegisterRequest, PROTOCOL_VERSION};
+use crate::relay::{Relay, FINGERPRINT_LEN, SESSION_TOKEN_LEN};
 
 /// How long a code stays valid waiting for its second peer.
 pub const DEFAULT_CODE_TTL: Duration = Duration::from_secs(300);
@@ -41,26 +42,55 @@ struct State {
     /// channel back to the waiting connection task.
     waiting: Mutex<HashMap<String, Waiter>>,
     ttl: Duration,
+    /// Optional relay handle. If present, pairs where either side sets
+    /// `want_relay` are returned as [`Message::RelayMatch`] with a
+    /// session reserved on this relay; otherwise the server falls
+    /// through to a direct [`Message::Match`] regardless.
+    relay: Option<Relay>,
 }
 
 struct Waiter {
     /// The first peer's registration data.
     first: RegisterRequest,
-    /// Channel that fires when the second peer arrives, delivering its
-    /// registration so the first peer's task can send the inverse Match.
-    notify: oneshot::Sender<RegisterRequest>,
+    /// Channel that fires when the second peer arrives, delivering
+    /// either the second peer's registration (direct) or a relay
+    /// session reservation (relay).
+    notify: oneshot::Sender<NotifyPayload>,
     /// Wall-clock instant the entry expires. After this point the second
     /// peer (if any) is rejected with [`Message::Expired`].
     expires_at: Instant,
 }
 
+/// What the second peer's task tells the waiting first peer's task.
+enum NotifyPayload {
+    /// Direct hole-punch match. Send the second peer's registration to
+    /// the first peer as a [`Message::Match`].
+    Direct(RegisterRequest),
+    /// Relay-mediated match. The relay session is already reserved on
+    /// this server's relay; the first peer's task just needs to send
+    /// the RelayMatch frame.
+    Relay {
+        token: [u8; SESSION_TOKEN_LEN],
+        relay_endpoint: SocketAddr,
+        peer: PeerSummary,
+    },
+}
+
+struct PeerSummary {
+    fingerprint: [u8; FINGERPRINT_LEN],
+    device_id: [u8; 16],
+}
+
 impl Server {
-    /// Bind a server at `addr` with the default 5-minute code TTL.
+    /// Bind a server at `addr` with the default 5-minute code TTL and
+    /// no relay attached.
     pub async fn bind(addr: SocketAddr) -> Result<Self, ServerError> {
         Self::bind_with_ttl(addr, DEFAULT_CODE_TTL).await
     }
 
-    /// Bind a server at `addr` with a custom code lifetime.
+    /// Bind a server at `addr` with a custom code lifetime and no
+    /// relay. Use [`Server::attach_relay`] before calling [`Server::run`]
+    /// to enable Phase 2 fallback.
     pub async fn bind_with_ttl(addr: SocketAddr, ttl: Duration) -> Result<Self, ServerError> {
         let listener = TcpListener::bind(addr).await.map_err(ServerError::Bind)?;
         info!("rendezvous server listening on {}", listener.local_addr().map_err(ServerError::Bind)?);
@@ -69,8 +99,18 @@ impl Server {
             state: Arc::new(State {
                 waiting: Mutex::new(HashMap::new()),
                 ttl,
+                relay: None,
             }),
         })
+    }
+
+    /// Attach a running relay handle. Required for `RelayMatch`
+    /// responses; without it, peers that set `want_relay` still get a
+    /// direct `Match` (and will fail their hole-punch).
+    pub fn attach_relay(&mut self, relay: Relay) {
+        Arc::get_mut(&mut self.state)
+            .expect("attach_relay must be called before run()")
+            .relay = Some(relay);
     }
 
     /// Actual bound address (handy when `addr` was `:0`).
@@ -151,9 +191,48 @@ async fn handle_connection(
     };
 
     if let Some(waiter) = waiter_for_pairing {
-        // We're the second peer. Send the first peer's info to ourselves
-        // and the second peer's info (us) to the first via the oneshot.
+        // We're the second peer. Decide direct vs relay using:
+        //   relay needed = either peer set want_relay,
+        // **and** the server actually has a relay attached. Otherwise
+        // we fall back to direct (which will fail the punch — but that
+        // failure is the user's signal to enable relay mode).
         let first = waiter.first.clone();
+        let needs_relay = req.want_relay || first.want_relay;
+        if needs_relay {
+            if let Some(relay) = state.relay.as_ref() {
+                let token: [u8; SESSION_TOKEN_LEN] = rand::random();
+                let peer_a_fp: [u8; FINGERPRINT_LEN] = first.cert_fingerprint;
+                let peer_b_fp: [u8; FINGERPRINT_LEN] = req.cert_fingerprint;
+                relay.reserve_session(token, peer_a_fp, peer_b_fp).await;
+
+                let relay_addr = relay.public_addr();
+                let match_for_us = Message::RelayMatch {
+                    relay_endpoint: relay_addr,
+                    relay_session_token: token,
+                    peer_fingerprint: first.cert_fingerprint,
+                    peer_device_id: first.device_id,
+                };
+                framing::write_message(&mut wr, &match_for_us)
+                    .await
+                    .map_err(ServerError::Wire)?;
+                let _ = wr.shutdown().await;
+
+                // Hand the same token to the first peer via a clone of req.
+                let mut first_view = req.clone();
+                first_view.cert_fingerprint = first.cert_fingerprint;
+                let _ = waiter.notify.send(NotifyPayload::Relay {
+                    token,
+                    relay_endpoint: relay_addr,
+                    peer: PeerSummary {
+                        fingerprint: req.cert_fingerprint,
+                        device_id: req.device_id,
+                    },
+                });
+                return Ok(());
+            }
+            debug!("relay requested but server has no --relay-bind — falling back to direct match");
+        }
+
         let match_for_us = Message::Match {
             peer_endpoint: first.public_endpoint,
             peer_fingerprint: first.cert_fingerprint,
@@ -164,9 +243,8 @@ async fn handle_connection(
             .map_err(ServerError::Wire)?;
         let _ = wr.shutdown().await;
 
-        // Notify the first peer. If it disconnected before we got here
-        // the send fails harmlessly.
-        let _ = waiter.notify.send(req);
+        // Notify the first peer.
+        let _ = waiter.notify.send(NotifyPayload::Direct(req));
         return Ok(());
     }
 
@@ -207,11 +285,28 @@ async fn handle_connection(
     }
 
     match outcome {
-        Ok(Ok(second)) => {
+        Ok(Ok(NotifyPayload::Direct(second))) => {
             let match_for_us = Message::Match {
                 peer_endpoint: second.public_endpoint,
                 peer_fingerprint: second.cert_fingerprint,
                 peer_device_id: second.device_id,
+            };
+            framing::write_message(&mut wr, &match_for_us)
+                .await
+                .map_err(ServerError::Wire)?;
+            let _ = wr.shutdown().await;
+            Ok(())
+        }
+        Ok(Ok(NotifyPayload::Relay {
+            token,
+            relay_endpoint,
+            peer,
+        })) => {
+            let match_for_us = Message::RelayMatch {
+                relay_endpoint,
+                relay_session_token: token,
+                peer_fingerprint: peer.fingerprint,
+                peer_device_id: peer.device_id,
             };
             framing::write_message(&mut wr, &match_for_us)
                 .await
@@ -274,6 +369,7 @@ mod tests {
             public_endpoint: "1.2.3.4:5678".parse().unwrap(),
             cert_fingerprint: [0xAA; 32],
             device_id: [0x01; 16],
+            want_relay: false,
         };
         let b = RegisterRequest {
             protocol_version: PROTOCOL_VERSION,
@@ -281,6 +377,7 @@ mod tests {
             public_endpoint: "5.6.7.8:9012".parse().unwrap(),
             cert_fingerprint: [0xBB; 32],
             device_id: [0x02; 16],
+            want_relay: false,
         };
 
         let a_task = tokio::spawn(crate::client::register(server_addr, a.clone()));
@@ -314,6 +411,7 @@ mod tests {
             public_endpoint: "1.2.3.4:5678".parse().unwrap(),
             cert_fingerprint: [0u8; 32],
             device_id: [0u8; 16],
+            want_relay: false,
         };
         let err = crate::client::register(server_addr, bad).await.unwrap_err();
         match err {

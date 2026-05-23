@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — 2026-05-23 — QUIC relay fallback (Phase 2)
+- `p2p_rendezvous::relay::Relay`: a tiny UDP packet forwarder. Each
+  session is reserved by the rendezvous and joined by both peers via
+  a `RelayHello` (magic + token + cert fingerprint). Subsequent UDP
+  packets from a paired peer are forwarded verbatim to the other.
+  Because the forwarder doesn't inspect the QUIC bytes, end-to-end
+  TLS still terminates between the two real peers — the relay sees
+  ciphertext only.
+- New rendezvous wire variant `Message::RelayMatch` (with relay
+  endpoint + session token + peer fingerprint + peer device id). The
+  `RegisterRequest` gains a `want_relay: bool` field (defaults to
+  `false` for back-compat with the v1 wire format inside the same
+  protocol version — equality check is on `protocol_version`, which
+  stays at 1).
+- `rendezvousd` flags `--relay-bind <addr>` and `--max-relay-mbps <n>`
+  (token-bucket rate cap across all sessions).
+- `p2p-transfer send` / `receive` gain a `--force-relay` flag to skip
+  the punch and head straight for the relay (useful for testing).
+- `traversal::establish_via_rendezvous`: when STUN spots symmetric NAT
+  (or `force_relay` is set), the registrant asks for relay mode and
+  the orchestrator joins the relay session before handing the socket
+  to quinn; the QUIC handshake races against the relay's address as
+  the apparent peer endpoint.
+- New `tests/relay_loopback_test.rs` exercising the full rendezvous +
+  relay + QUIC-over-relay handshake on localhost.
+
 ### Added — 2026-05-23 — Rendezvous + UDP hole punching (Phase 1)
 - New `p2p-rendezvous` workspace crate with a tiny pairing-by-code
   rendezvous protocol (MessagePack-over-TCP) and a `rendezvousd` binary.

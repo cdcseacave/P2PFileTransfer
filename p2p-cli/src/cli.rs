@@ -49,6 +49,12 @@ pub struct SessionParams {
     /// a fresh one, or accept one the other peer hands you.
     #[arg(long)]
     pub code: Option<String>,
+
+    /// Force relay mode even when STUN says the local NAT is Cone.
+    /// Useful for testing the relay path; normal pairing should leave
+    /// this off and let symmetric-NAT detection decide.
+    #[arg(long)]
+    pub force_relay: bool,
 }
 
 impl SessionParams {

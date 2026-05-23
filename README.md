@@ -113,9 +113,22 @@ the other; once both have arrived they exchange public endpoints + cert
 fingerprints and complete the QUIC handshake by UDP hole-punching. The
 rendezvous never sees the file data — it only matches peers.
 
-Symmetric NATs cannot be punched through and the receiver/sender will
-print `Hole punch failed: symmetric NAT detected — enable relay
-fallback (Phase 2)`.
+### Relay fallback (symmetric NAT)
+
+Symmetric NATs can't be punched directly. Run `rendezvousd` with a relay
+attached so peers can fall back to a forwarder when the punch fails:
+
+```
+rendezvousd --bind 0.0.0.0:14570 \
+            --relay-bind 0.0.0.0:14571 \
+            --max-relay-mbps 50
+```
+
+Peers automatically request the relay when STUN spots a symmetric NAT.
+You can also force the relay path for debugging by passing
+`--force-relay` on `send` / `receive`. The relay just forwards UDP
+packets between the two peers — QUIC TLS still terminates end-to-end so
+the relay only sees ciphertext.
 
 ### Resume
 

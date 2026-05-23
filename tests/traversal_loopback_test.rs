@@ -69,6 +69,7 @@ async fn loopback_pair_via_rendezvous_and_punch() {
         public_endpoint: addr_a,
         cert_fingerprint: fp_a,
         device_id: [0xA1; 16],
+        want_relay: false,
     };
     let req_b = RegisterRequest {
         protocol_version: RZV_PROTO,
@@ -76,6 +77,7 @@ async fn loopback_pair_via_rendezvous_and_punch() {
         public_endpoint: addr_b,
         cert_fingerprint: fp_b,
         device_id: [0xB2; 16],
+        want_relay: false,
     };
 
     let a_task = tokio::spawn(rendezvous_register(rendezvous_addr, req_a));

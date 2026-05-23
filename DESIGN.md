@@ -151,10 +151,16 @@ each `open_uni().write_all`.
   `Error::HolePunchFailed`. The rendezvous server never sees user data
   — it only stores the (endpoint, fingerprint, device_id) tuple long
   enough to deliver each peer's address to the other.
-* **Phase 2 (planned):** `rendezvousd --relay-bind` opens a second QUIC
-  endpoint that byte-pipes two `quinn::Connection`s when both peers are
-  behind symmetric NAT. End-to-end TLS still holds because cert
-  fingerprints came from the rendezvous, not the relay.
+* **Phase 2 (shipped):** `rendezvousd --relay-bind <addr>
+  --max-relay-mbps <n>` runs a tiny UDP packet forwarder. Any rendezvous
+  match where either peer set `want_relay` (auto-set when STUN spots
+  symmetric NAT, or forced via the `--force-relay` CLI flag) returns a
+  `RelayMatch` with a fresh 16-byte session token and the relay's UDP
+  address. Each peer sends a `RelayHello` so the relay records its
+  source address, then runs a normal QUIC handshake with the relay's
+  address as the apparent peer endpoint. Because the relay just forwards
+  UDP packets verbatim, QUIC TLS still terminates end-to-end between
+  the two real peers — the relay sees ciphertext only.
 
 ## Protocol versioning
 

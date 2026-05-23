@@ -10,7 +10,7 @@ use std::net::SocketAddr;
 use clap::Parser;
 use tracing_subscriber::{prelude::*, EnvFilter};
 
-use p2p_rendezvous::{Server, DEFAULT_PORT};
+use p2p_rendezvous::{Relay, Server, DEFAULT_PORT};
 
 #[derive(Parser, Debug)]
 #[command(name = "rendezvousd")]
@@ -26,6 +26,17 @@ struct Cli {
     #[arg(long, default_value_t = 300)]
     code_ttl_secs: u64,
 
+    /// Address to bind the Phase-2 UDP relay on. When omitted, peers
+    /// behind symmetric NAT receive a direct match (and fail to punch)
+    /// — operator opts in to relay by passing this flag.
+    #[arg(long)]
+    relay_bind: Option<SocketAddr>,
+
+    /// Maximum aggregate relay throughput in megabits/second. `0`
+    /// disables the rate cap. Only consulted when `--relay-bind` is set.
+    #[arg(long, default_value_t = 0)]
+    max_relay_mbps: u64,
+
     /// Logging verbosity: off, error, warn, info, debug, trace.
     #[arg(long, default_value = "info")]
     verbosity: String,
@@ -40,7 +51,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     init_logging(&cli.verbosity);
 
-    let server = Server::bind_with_ttl(cli.bind, std::time::Duration::from_secs(cli.code_ttl_secs)).await?;
+    let mut server = Server::bind_with_ttl(cli.bind, std::time::Duration::from_secs(cli.code_ttl_secs)).await?;
+    if let Some(relay_addr) = cli.relay_bind {
+        let cap_bps = cli.max_relay_mbps.saturating_mul(1_000_000 / 8);
+        let relay = Relay::bind(relay_addr, cap_bps).await?;
+        server.attach_relay(relay);
+    }
     server.run().await?;
     Ok(())
 }

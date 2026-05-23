@@ -16,8 +16,9 @@ use tokio::net::{lookup_host, UdpSocket};
 use tracing::{debug, info};
 use uuid::Uuid;
 
-use p2p_rendezvous::client::register as rendezvous_register;
+use p2p_rendezvous::client::{register_full, MatchOutcome};
 use p2p_rendezvous::protocol::{RegisterRequest, PROTOCOL_VERSION as RENDEZVOUS_PROTO_VERSION};
+use p2p_rendezvous::relay::{RelayHello, FINGERPRINT_LEN, SESSION_TOKEN_LEN};
 
 use crate::error::{Error, Result};
 use crate::identity::Identity;
@@ -57,6 +58,10 @@ pub struct RendezvousParams {
     /// classify the local NAT. Pass [`DEFAULT_STUN_SERVERS`] when in
     /// doubt.
     pub stun_servers: [String; 2],
+    /// Force relay mode regardless of STUN classification. Useful for
+    /// debugging; the more common case is "let symmetric-NAT detection
+    /// decide" (`false`).
+    pub force_relay: bool,
 }
 
 /// Establish a peer-to-peer QUIC session through a rendezvous server.
@@ -78,6 +83,7 @@ pub async fn establish_via_rendezvous(params: RendezvousParams) -> Result<Establ
         identity,
         device_id,
         stun_servers,
+        force_relay,
     } = params;
 
     let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
@@ -89,15 +95,21 @@ pub async fn establish_via_rendezvous(params: RendezvousParams) -> Result<Establ
     debug!("traversal: STUN servers resolved to {stun_a} and {stun_b}");
 
     let class = classify_nat(&socket, stun_a, stun_b).await?;
-    let public_endpoint = match class {
-        NatClass::Cone { public } => public,
+    let (public_endpoint, want_relay) = match class {
+        NatClass::Cone { public } => (public, force_relay),
         NatClass::Symmetric => {
-            return Err(Error::HolePunchFailed(
-                "symmetric NAT detected — UDP hole punching cannot succeed (enable relay fallback in Phase 2)".to_string(),
-            ));
+            // Use the local socket address as a placeholder public endpoint
+            // for the rendezvous request — the rendezvous won't use it
+            // for relay mode (it gives back the relay's address), but
+            // serde still expects a SocketAddr.
+            let local = socket.local_addr().map_err(Error::Network)?;
+            (local, true)
         }
     };
-    info!("traversal: public endpoint {public_endpoint}");
+    info!(
+        "traversal: public endpoint {public_endpoint} ({})",
+        if want_relay { "relay requested" } else { "direct punch" },
+    );
 
     let our_fp = identity.fingerprint();
     let req = RegisterRequest {
@@ -106,31 +118,92 @@ pub async fn establish_via_rendezvous(params: RendezvousParams) -> Result<Establ
         public_endpoint,
         cert_fingerprint: our_fp,
         device_id: *device_id.as_bytes(),
+        want_relay,
     };
-    let peer = rendezvous_register(rendezvous, req)
+    let outcome = register_full(rendezvous, req)
         .await
         .map_err(|e| Error::Rendezvous(e.to_string()))?;
-    info!(
-        "traversal: paired with peer device {} at {}",
-        Uuid::from_bytes(peer.device_id),
-        peer.endpoint,
-    );
 
-    // Hand the (already-STUN-pinned) socket to quinn. From this point on
-    // we can no longer raw-send_to — only quinn drives the socket.
+    match outcome {
+        MatchOutcome::Direct(peer) => {
+            info!(
+                "traversal: direct match with peer device {} at {}",
+                Uuid::from_bytes(peer.device_id),
+                peer.endpoint,
+            );
+            let std_socket = socket.into_std().map_err(Error::Network)?;
+            let endpoint = QuicEndpoint::from_socket(std_socket, identity.clone())?;
+            let connection =
+                punch::race_connect_and_accept(&endpoint, peer.endpoint, peer.fingerprint).await?;
+            Ok(EstablishedSession {
+                endpoint,
+                connection,
+                peer_endpoint: peer.endpoint,
+                peer_fingerprint: peer.fingerprint,
+                peer_device_id: Uuid::from_bytes(peer.device_id),
+            })
+        }
+        MatchOutcome::Relay(relay) => {
+            info!(
+                "traversal: relay match via {} (peer device {})",
+                relay.relay_endpoint,
+                Uuid::from_bytes(relay.peer_device_id),
+            );
+            establish_via_relay(socket, identity.clone(), relay, our_fp).await
+        }
+    }
+}
+
+/// Take the STUN-pinned UDP socket, send a [`RelayHello`] to the
+/// relay so it can record our source address against `session_token`,
+/// then hand the socket to `quinn` and race connect/accept against the
+/// **relay's** apparent address (since QUIC packets to the relay get
+/// forwarded to the real peer).
+async fn establish_via_relay(
+    socket: UdpSocket,
+    identity: Arc<Identity>,
+    relay: p2p_rendezvous::RelayInfo,
+    our_fp: [u8; FINGERPRINT_LEN],
+) -> Result<EstablishedSession> {
+    let hello = RelayHello {
+        token: relay.session_token,
+        fingerprint: our_fp,
+    }
+    .encode();
+    // Send the hello a couple of times to survive a single dropped UDP
+    // packet during the join. The relay deduplicates by source address.
+    for _ in 0..3 {
+        socket
+            .send_to(&hello, relay.relay_endpoint)
+            .await
+            .map_err(Error::Network)?;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
     let std_socket = socket.into_std().map_err(Error::Network)?;
-    let endpoint = QuicEndpoint::from_socket(std_socket, identity.clone())?;
+    let endpoint = QuicEndpoint::from_socket(std_socket, identity)?;
 
-    let connection = punch::race_connect_and_accept(&endpoint, peer.endpoint, peer.fingerprint).await?;
+    let conn = punch::race_connect_and_accept(
+        &endpoint,
+        relay.relay_endpoint,
+        relay.peer_fingerprint,
+    )
+    .await?;
 
     Ok(EstablishedSession {
         endpoint,
-        connection,
-        peer_endpoint: peer.endpoint,
-        peer_fingerprint: peer.fingerprint,
-        peer_device_id: Uuid::from_bytes(peer.device_id),
+        connection: conn,
+        peer_endpoint: relay.relay_endpoint,
+        peer_fingerprint: relay.peer_fingerprint,
+        peer_device_id: Uuid::from_bytes(relay.peer_device_id),
     })
 }
+
+// Tiny no-op suppression so the never-read SESSION_TOKEN_LEN re-export
+// shows up in `cargo doc` examples without a `dead_code` lint when we
+// build without the relay flow exercised.
+#[allow(dead_code)]
+const _SESSION_TOKEN_LEN_DOCREF: usize = SESSION_TOKEN_LEN;
 
 async fn resolve_first(host_port: &str) -> Result<SocketAddr> {
     lookup_host(host_port)

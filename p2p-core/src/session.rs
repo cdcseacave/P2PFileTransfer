@@ -108,6 +108,7 @@ impl P2PSession {
         device_id: Uuid,
         capabilities: Capabilities,
         config: ConfigMessage,
+        force_relay: bool,
     ) -> Result<Self> {
         let our_fp = identity.fingerprint();
 
@@ -120,6 +121,7 @@ impl P2PSession {
                 DEFAULT_STUN_SERVERS[0].to_string(),
                 DEFAULT_STUN_SERVERS[1].to_string(),
             ],
+            force_relay,
         })
         .await?;
 

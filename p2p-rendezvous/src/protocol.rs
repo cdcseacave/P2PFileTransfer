@@ -34,6 +34,18 @@ pub enum Message {
         peer_device_id: DeviceId,
     },
 
+    /// Server → client. The other peer arrived but at least one side
+    /// asked for relay mode (or detected symmetric NAT). Clients should
+    /// connect their QUIC endpoint to `relay_endpoint` and prefix the
+    /// first UDP datagram with a [`crate::relay::RelayHello`]
+    /// carrying `relay_session_token` and their own cert fingerprint.
+    RelayMatch {
+        relay_endpoint: SocketAddr,
+        relay_session_token: [u8; 16],
+        peer_fingerprint: Fingerprint,
+        peer_device_id: DeviceId,
+    },
+
     /// Server → client. The code was used twice before this client had a
     /// chance to be matched, or the TTL fired. Clients should surface
     /// this as a user-visible "ask the peer for a fresh code" error.
@@ -61,6 +73,13 @@ pub struct RegisterRequest {
     pub cert_fingerprint: Fingerprint,
     /// Local device id (uuid bytes).
     pub device_id: DeviceId,
+    /// Set when this peer detected symmetric NAT (or the user forced
+    /// relay mode). If either peer of a pair sets this and the server
+    /// has a relay configured, the response is a [`Message::RelayMatch`]
+    /// instead of a direct [`Message::Match`]. Defaults to `false` for
+    /// backward compatibility with the rendezvous v1 wire format.
+    #[serde(default)]
+    pub want_relay: bool,
 }
 
 /// Rendezvous protocol version. Bumped together on the server + client
