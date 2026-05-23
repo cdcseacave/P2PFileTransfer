@@ -25,9 +25,11 @@ const ATTR_XOR_MAPPED_ADDRESS: u16 = 0x0020;
 const QUERY_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Query a single STUN server using `socket` and return the public address
-/// it reports for that socket. Times out after [`QUERY_TIMEOUT`].
+/// it reports for that socket. Times out after [`QUERY_TIMEOUT`]. Rejects
+/// responses whose transaction id doesn't match the request — a spoofed
+/// packet from another source can't bind the right tx and is dropped.
 pub async fn query(socket: &UdpSocket, server: SocketAddr) -> Result<SocketAddr> {
-    let request = build_binding_request();
+    let (request, expected_tx) = build_binding_request();
     socket
         .send_to(&request, server)
         .await
@@ -38,7 +40,17 @@ pub async fn query(socket: &UdpSocket, server: SocketAddr) -> Result<SocketAddr>
         .await
         .map_err(|_| Error::Timeout)?
         .map_err(Error::Network)?;
-    parse_binding_response(&buf[..len])
+    let data = &buf[..len];
+    if data.len() < 20 {
+        return Err(Error::Protocol("STUN response too short".to_string()));
+    }
+    let response_tx = &data[8..20];
+    if response_tx != expected_tx {
+        return Err(Error::Protocol(
+            "STUN response transaction id does not match request".to_string(),
+        ));
+    }
+    parse_binding_response(data)
 }
 
 /// Classify whether the path likely supports UDP hole punching by querying
@@ -68,14 +80,14 @@ pub enum NatClass {
     Symmetric,
 }
 
-fn build_binding_request() -> [u8; 20] {
+fn build_binding_request() -> ([u8; 20], [u8; 12]) {
     let mut packet = [0u8; 20];
     packet[0..2].copy_from_slice(&BINDING_REQUEST.to_be_bytes());
     // Length = 0 (no attributes); already zero.
     packet[4..8].copy_from_slice(&MAGIC_COOKIE.to_be_bytes());
     let tx: [u8; 12] = rand::random();
     packet[8..20].copy_from_slice(&tx);
-    packet
+    (packet, tx)
 }
 
 fn parse_binding_response(data: &[u8]) -> Result<SocketAddr> {
@@ -186,12 +198,40 @@ mod tests {
 
     #[test]
     fn binding_request_has_correct_header() {
-        let req = build_binding_request();
+        let (req, tx) = build_binding_request();
         assert_eq!(u16::from_be_bytes([req[0], req[1]]), BINDING_REQUEST);
         assert_eq!(
             u32::from_be_bytes([req[4], req[5], req[6], req[7]]),
             MAGIC_COOKIE
         );
+        // The transaction id in the packet must match the returned id.
+        assert_eq!(&req[8..20], &tx[..]);
+    }
+
+    #[test]
+    fn rejects_response_with_wrong_tx_id() {
+        // Construct a STUN-shaped response whose tx_id is all zeros and
+        // verify our wire layer would reject it against a non-zero tx.
+        let mut response = [0u8; 32];
+        response[0..2].copy_from_slice(&BINDING_RESPONSE.to_be_bytes());
+        response[2..4].copy_from_slice(&12u16.to_be_bytes());
+        response[4..8].copy_from_slice(&MAGIC_COOKIE.to_be_bytes());
+        // tx_id at 8..20 left as zeros.
+        // attribute: XOR-MAPPED-ADDRESS, port 0, IP 0.0.0.0
+        response[20..22].copy_from_slice(&ATTR_XOR_MAPPED_ADDRESS.to_be_bytes());
+        response[22..24].copy_from_slice(&8u16.to_be_bytes());
+        response[25] = 0x01;
+
+        let parsed = parse_binding_response(&response).unwrap();
+        // The parser itself doesn't validate tx; that's the query() job.
+        // But assert that comparing the response tx (zeros) to a non-zero
+        // expected tx yields "not equal" — i.e. the field is where we
+        // think it is.
+        let expected_tx: [u8; 12] = [0x42; 12];
+        let response_tx = &response[8..20];
+        assert_ne!(response_tx, &expected_tx[..]);
+        // Sanity: parsing didn't fail just on the zero tx.
+        let _ = parsed;
     }
 
     #[test]

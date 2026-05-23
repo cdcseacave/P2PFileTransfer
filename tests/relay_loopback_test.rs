@@ -147,14 +147,11 @@ async fn loopback_pair_via_relay() {
 
     assert_eq!(conn_a.peer_addr(), relay_for_a.relay_endpoint);
     assert_eq!(conn_b.peer_addr(), relay_for_b.relay_endpoint);
-    // Only the QUIC client side sees the server's cert directly via
-    // `peer_identity()` (the server config uses `with_no_client_auth`).
-    // A.device_id ([0xA1; 16]) < B.device_id ([0xB2; 16]) so A is the
-    // client and observes B's cert; B is the server and observes None.
-    // The application-layer HELLO message carries fingerprints both
-    // ways for cross-checking — see handshake.rs.
+    // Mutual TLS: each side sees the peer's cert. A.device_id is
+    // smaller so A is the QUIC client and B is the server, but both
+    // present certs and both observe the other's fingerprint.
     assert_eq!(conn_a.peer_fingerprint(), Some(fp_b));
-    assert_eq!(conn_b.peer_fingerprint(), None);
+    assert_eq!(conn_b.peer_fingerprint(), Some(fp_a));
 
     let bytes = relay.bytes_forwarded().await;
     assert!(bytes > 0, "relay should have forwarded the QUIC handshake bytes");

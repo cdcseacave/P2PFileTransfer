@@ -120,7 +120,7 @@ impl<'a> FileTransferSession<'a> {
         };
 
         for chunk_index in 0..total_chunks {
-            if completed_chunks.contains(&(chunk_index as u64)) {
+            if completed_chunks.contains(&chunk_index) {
                 trace!("Skipping already-completed chunk {}", chunk_index);
                 // ChunkReader.read_chunk seeks per call, so skipping is safe;
                 // but we still need to fold the chunk into the SHA-256.
@@ -142,7 +142,7 @@ impl<'a> FileTransferSession<'a> {
                 limiter.wait_for_tokens(final_data.len()).await;
             }
 
-            self.send_chunk_stream(chunk_index as u64, is_compressed, &final_data)
+            self.send_chunk_stream(chunk_index, is_compressed, &final_data)
                 .await?;
 
             self.compressed_bytes_sent += final_data.len() as u64;
@@ -152,7 +152,7 @@ impl<'a> FileTransferSession<'a> {
                 p.add_bytes(uncompressed_size);
             }
             if let Some(ref mut cb) = chunk_complete_callback {
-                cb(chunk_index as u64);
+                cb(chunk_index);
             }
 
             trace!("Sent chunk {}/{}", chunk_index + 1, total_chunks);
@@ -201,6 +201,11 @@ impl<'a> FileTransferSession<'a> {
                 )));
             }
             let chunk_index = u64::from_le_bytes(raw[0..8].try_into().expect("8 bytes"));
+            if chunk_index >= total_chunks {
+                return Err(Error::Protocol(format!(
+                    "chunk_index {chunk_index} >= total_chunks {total_chunks}"
+                )));
+            }
             let flags = raw[8];
             let payload = &raw[CHUNK_HEADER_BYTES..];
 
@@ -216,7 +221,7 @@ impl<'a> FileTransferSession<'a> {
             };
 
             let written = final_data.len() as u64;
-            writer.write_chunk(chunk_index as u32, &final_data).await?;
+            writer.write_chunk(chunk_index, &final_data).await?;
             received += 1;
 
             if let Some(ref mut p) = progress {
@@ -257,6 +262,13 @@ impl<'a> FileTransferSession<'a> {
         stream
             .finish()
             .map_err(|e| Error::Quic(format!("finish stream: {e}")))?;
+        // Wait for the peer to acknowledge the whole stream before we
+        // return — otherwise the connection can be torn down while the
+        // last chunk is still in flight and the receiver loses it.
+        stream
+            .stopped()
+            .await
+            .map_err(|e| Error::Quic(format!("stream stopped: {e}")))?;
         Ok(())
     }
 }
@@ -268,7 +280,7 @@ impl<'a> FileTransferSession<'a> {
 pub struct ChunkReader {
     file: File,
     chunk_size: usize,
-    total_chunks: u32,
+    total_chunks: u64,
     file_size: u64,
     hasher: Sha256,
 }
@@ -283,7 +295,7 @@ impl ChunkReader {
         })?;
         let metadata = file.metadata().await?;
         let file_size = metadata.len();
-        let total_chunks = ((file_size + chunk_size as u64 - 1) / chunk_size as u64) as u32;
+        let total_chunks = (file_size + chunk_size as u64 - 1) / chunk_size as u64;
         Ok(Self {
             file,
             chunk_size,
@@ -293,7 +305,7 @@ impl ChunkReader {
         })
     }
 
-    pub fn total_chunks(&self) -> u32 {
+    pub fn total_chunks(&self) -> u64 {
         self.total_chunks
     }
 
@@ -302,8 +314,8 @@ impl ChunkReader {
     }
 
     /// Read `index`-th chunk from disk, updating the running SHA-256.
-    pub async fn read_chunk(&mut self, index: u32) -> Result<Vec<u8>> {
-        let offset = index as u64 * self.chunk_size as u64;
+    pub async fn read_chunk(&mut self, index: u64) -> Result<Vec<u8>> {
+        let offset = index * self.chunk_size as u64;
         self.file.seek(SeekFrom::Start(offset)).await?;
         let remaining = self.file_size - offset;
         let to_read = remaining.min(self.chunk_size as u64) as usize;
@@ -316,7 +328,7 @@ impl ChunkReader {
     /// Read `index`-th chunk and fold it into the running SHA-256 but
     /// discard the bytes. Used during resume to keep the running hash
     /// over the full file even when we don't re-send the chunk.
-    pub async fn fold_chunk(&mut self, index: u32) -> Result<()> {
+    pub async fn fold_chunk(&mut self, index: u64) -> Result<()> {
         let _ = self.read_chunk(index).await?;
         Ok(())
     }
@@ -368,8 +380,8 @@ impl ChunkWriter {
         })
     }
 
-    pub async fn write_chunk(&mut self, index: u32, data: &[u8]) -> Result<()> {
-        let offset = index as u64 * self.chunk_size as u64;
+    pub async fn write_chunk(&mut self, index: u64, data: &[u8]) -> Result<()> {
+        let offset = index * self.chunk_size as u64;
         self.file.seek(SeekFrom::Start(offset)).await?;
         self.file.write_all(data).await?;
         self.file.flush().await?;
@@ -419,7 +431,7 @@ mod tests {
         tokio::fs::write(&p, &data).await.unwrap();
 
         let mut reader = ChunkReader::new(&p, 64).await.unwrap();
-        assert_eq!(reader.total_chunks(), 4);
+        assert_eq!(reader.total_chunks(), 4u64);
 
         for i in 0..reader.total_chunks() {
             let _ = reader.read_chunk(i).await.unwrap();
@@ -441,10 +453,10 @@ mod tests {
         let p = dir.path().join("out.bin");
         let mut writer = ChunkWriter::new(&p, 64).await.unwrap();
 
-        writer.write_chunk(2, &vec![0x02; 64]).await.unwrap();
-        writer.write_chunk(0, &vec![0x00; 64]).await.unwrap();
-        writer.write_chunk(1, &vec![0x01; 64]).await.unwrap();
-        writer.write_chunk(3, &vec![0x03; 8]).await.unwrap();
+        writer.write_chunk(2u64, &[0x02u8; 64]).await.unwrap();
+        writer.write_chunk(0u64, &[0x00u8; 64]).await.unwrap();
+        writer.write_chunk(1u64, &[0x01u8; 64]).await.unwrap();
+        writer.write_chunk(3u64, &[0x03u8; 8]).await.unwrap();
 
         let sha = writer.finalize().await.unwrap();
         let bytes = tokio::fs::read(&p).await.unwrap();

@@ -26,18 +26,18 @@ pub struct HandshakeResult {
     pub config: ConfigMessage,
 }
 
-/// Cross-check the peer's claimed fingerprint against the cert TLS actually
-/// observed. On the responder side TLS sees no client cert (Phase 0), so
-/// `observed` is `None` and we trust the HELLO claim verbatim. On the
-/// initiator side TLS pins the cert, so `observed` is `Some(expected)` and
-/// any mismatch is fatal.
+/// Cross-check the peer's claimed fingerprint against the cert TLS
+/// actually observed. With mutual TLS, both sides see the peer's cert,
+/// so `observed` is always `Some` — any mismatch (including a missing
+/// observation, which means the peer presented no cert at all and the
+/// responder shouldn't have accepted the handshake) is fatal.
 fn cross_check_fingerprint(
     claimed: Fingerprint,
     observed: Option<Fingerprint>,
 ) -> Result<()> {
     match observed {
-        Some(actual) if actual != claimed => Err(Error::FingerprintMismatch),
-        _ => Ok(()),
+        Some(actual) if actual == claimed => Ok(()),
+        _ => Err(Error::FingerprintMismatch),
     }
 }
 
@@ -175,9 +175,9 @@ impl HandshakeServer {
             });
         }
 
-        // On the responder side TLS doesn't request a client cert in Phase 0,
-        // so peer_fingerprint() is None and we trust the HELLO claim. Phase 1
-        // upgrades to mutual TLS and tightens this.
+        // Mutual TLS: the client presented its cert during the QUIC
+        // handshake, so `peer_fingerprint()` is `Some` and any
+        // disagreement with the HELLO claim is fatal.
         cross_check_fingerprint(peer_hello.cert_fingerprint, conn.peer_fingerprint())?;
 
         trace!("Sending HELLO_ACK");
@@ -289,5 +289,38 @@ mod tests {
         assert!(client_result.agreed_capabilities.has_compression());
         assert!(server_result.agreed_capabilities.has_compression());
         assert_eq!(client_result.peer_fingerprint, server_fp);
+        // Mutual TLS: the responder now also observes the initiator's
+        // cert. The HELLO cross-check on the responder side would have
+        // failed if the observation didn't match the claim, so this
+        // just confirms the value made it out into the result.
+        assert_eq!(server_result.peer_fingerprint, client_identity.fingerprint());
+    }
+
+    #[test]
+    fn cross_check_fingerprint_rejects_missing_observation() {
+        // With mTLS, the responder must always observe a client cert.
+        // A `None` observation means the peer never presented one, which
+        // is a security failure even if the HELLO claims a valid value.
+        let claimed: Fingerprint = [0xAA; 32];
+        assert!(matches!(
+            cross_check_fingerprint(claimed, None),
+            Err(Error::FingerprintMismatch)
+        ));
+    }
+
+    #[test]
+    fn cross_check_fingerprint_rejects_mismatched_observation() {
+        let claimed: Fingerprint = [0xAA; 32];
+        let observed: Fingerprint = [0xBB; 32];
+        assert!(matches!(
+            cross_check_fingerprint(claimed, Some(observed)),
+            Err(Error::FingerprintMismatch)
+        ));
+    }
+
+    #[test]
+    fn cross_check_fingerprint_accepts_matching_observation() {
+        let fp: Fingerprint = [0x42; 32];
+        assert!(cross_check_fingerprint(fp, Some(fp)).is_ok());
     }
 }

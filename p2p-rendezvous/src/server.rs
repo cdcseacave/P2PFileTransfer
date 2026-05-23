@@ -15,7 +15,7 @@ use thiserror::Error;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore};
 use tokio::time::{timeout, Instant};
 use tracing::{debug, info, warn};
 
@@ -31,10 +31,18 @@ pub const DEFAULT_CODE_TTL: Duration = Duration::from_secs(300);
 /// style abuse from accumulating open sockets.
 const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// Default ceiling on concurrently-handled rendezvous connections. A
+/// rendezvous session is `oneshot::Receiver`-backed and idle most of
+/// the time, so this can be generous — but it must be finite so an
+/// attacker can't fan out connections until the process runs out of
+/// file descriptors.
+pub const DEFAULT_MAX_CONCURRENT: usize = 1024;
+
 /// Listen state for a single rendezvous server instance.
 pub struct Server {
     listener: TcpListener,
     state: Arc<State>,
+    concurrency: Arc<Semaphore>,
 }
 
 struct State {
@@ -82,18 +90,32 @@ struct PeerSummary {
 }
 
 impl Server {
-    /// Bind a server at `addr` with the default 5-minute code TTL and
-    /// no relay attached.
+    /// Bind a server at `addr` with the default 5-minute code TTL,
+    /// default concurrency cap, and no relay attached.
     pub async fn bind(addr: SocketAddr) -> Result<Self, ServerError> {
-        Self::bind_with_ttl(addr, DEFAULT_CODE_TTL).await
+        Self::bind_with(addr, DEFAULT_CODE_TTL, DEFAULT_MAX_CONCURRENT).await
     }
 
-    /// Bind a server at `addr` with a custom code lifetime and no
-    /// relay. Use [`Server::attach_relay`] before calling [`Server::run`]
-    /// to enable Phase 2 fallback.
+    /// Bind a server at `addr` with a custom code lifetime and the
+    /// default concurrency cap.
     pub async fn bind_with_ttl(addr: SocketAddr, ttl: Duration) -> Result<Self, ServerError> {
+        Self::bind_with(addr, ttl, DEFAULT_MAX_CONCURRENT).await
+    }
+
+    /// Bind a server at `addr` with a custom code lifetime and a
+    /// custom concurrency cap. Once the cap is reached, the accept
+    /// loop applies backpressure on the listener until a slot frees;
+    /// no more in-flight handlers will be spawned.
+    pub async fn bind_with(
+        addr: SocketAddr,
+        ttl: Duration,
+        max_concurrent: usize,
+    ) -> Result<Self, ServerError> {
         let listener = TcpListener::bind(addr).await.map_err(ServerError::Bind)?;
-        info!("rendezvous server listening on {}", listener.local_addr().map_err(ServerError::Bind)?);
+        info!(
+            "rendezvous server listening on {} (max_concurrent={max_concurrent})",
+            listener.local_addr().map_err(ServerError::Bind)?
+        );
         Ok(Self {
             listener,
             state: Arc::new(State {
@@ -101,6 +123,7 @@ impl Server {
                 ttl,
                 relay: None,
             }),
+            concurrency: Arc::new(Semaphore::new(max_concurrent)),
         })
     }
 
@@ -121,6 +144,16 @@ impl Server {
     /// Run the accept loop. Returns only when the listener errors.
     pub async fn run(self) -> Result<(), ServerError> {
         loop {
+            // Acquire a concurrency permit *before* accept so we apply
+            // backpressure on the listener — incoming connections sit
+            // in the kernel queue (or get RST'd) instead of piling up
+            // as detached spawned tasks once the cap is reached.
+            let permit = self
+                .concurrency
+                .clone()
+                .acquire_owned()
+                .await
+                .expect("rendezvous semaphore never closed");
             let (stream, peer) = match self.listener.accept().await {
                 Ok(pair) => pair,
                 Err(e) => {
@@ -130,6 +163,7 @@ impl Server {
             };
             let state = self.state.clone();
             tokio::spawn(async move {
+                let _permit = permit;
                 if let Err(e) = handle_connection(state, stream, peer).await {
                     debug!("rendezvous connection {peer} closed: {e}");
                 }
@@ -190,6 +224,15 @@ async fn handle_connection(
         waiting.remove(&req.code)
     };
 
+    // Stamp the registration with the TCP source IP so a peer can't
+    // direct the punch at a third-party victim by lying about its
+    // public address. The UDP port still has to come from the client
+    // because the punch socket is on a different transport, but the
+    // IP is forgeable for reflection and the TCP peer IP is the
+    // source of truth.
+    let mut req = req;
+    req.public_endpoint = SocketAddr::new(peer.ip(), req.public_endpoint.port());
+
     if let Some(waiter) = waiter_for_pairing {
         // We're the second peer. Decide direct vs relay using:
         //   relay needed = either peer set want_relay,
@@ -203,7 +246,11 @@ async fn handle_connection(
                 let token: [u8; SESSION_TOKEN_LEN] = rand::random();
                 let peer_a_fp: [u8; FINGERPRINT_LEN] = first.cert_fingerprint;
                 let peer_b_fp: [u8; FINGERPRINT_LEN] = req.cert_fingerprint;
-                relay.reserve_session(token, peer_a_fp, peer_b_fp).await;
+                if let Err(e) = relay.reserve_session(token, peer_a_fp, peer_b_fp).await {
+                    warn!("relay refused session for code {}: {e}", req.code);
+                    send_rejected(&mut wr, "relay refused session").await;
+                    return Ok(());
+                }
 
                 let relay_addr = relay.public_addr();
                 let match_for_us = Message::RelayMatch {
@@ -217,9 +264,6 @@ async fn handle_connection(
                     .map_err(ServerError::Wire)?;
                 let _ = wr.shutdown().await;
 
-                // Hand the same token to the first peer via a clone of req.
-                let mut first_view = req.clone();
-                first_view.cert_fingerprint = first.cert_fingerprint;
                 let _ = waiter.notify.send(NotifyPayload::Relay {
                     token,
                     relay_endpoint: relay_addr,
@@ -388,12 +432,108 @@ mod tests {
         let a_match = a_task.await.unwrap().unwrap();
         let b_match = b_task.await.unwrap().unwrap();
 
-        assert_eq!(a_match.endpoint, b.public_endpoint);
+        // The server rewrites the IP portion of each peer's
+        // public endpoint to its TCP source — preserving only the
+        // user-supplied UDP port. See `rewrites_public_endpoint_ip_to_tcp_source`.
+        assert!(a_match.endpoint.ip().is_loopback());
+        assert_eq!(a_match.endpoint.port(), b.public_endpoint.port());
         assert_eq!(a_match.fingerprint, b.cert_fingerprint);
         assert_eq!(a_match.device_id, b.device_id);
-        assert_eq!(b_match.endpoint, a.public_endpoint);
+        assert!(b_match.endpoint.ip().is_loopback());
+        assert_eq!(b_match.endpoint.port(), a.public_endpoint.port());
         assert_eq!(b_match.fingerprint, a.cert_fingerprint);
         assert_eq!(b_match.device_id, a.device_id);
+    }
+
+    #[tokio::test]
+    async fn rewrites_public_endpoint_ip_to_tcp_source() {
+        // A peer claims its public IP is 99.99.99.99 but connects from
+        // localhost. The server must rewrite the IP it gossips to the
+        // second peer to the actual TCP source, keeping the port the
+        // peer supplied. This blocks reflection attacks where a peer
+        // names a third-party victim as its "public" address.
+        let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+        let server = Server::bind(bind).await.unwrap();
+        let server_addr = server.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = server.run().await;
+        });
+
+        let a = RegisterRequest {
+            protocol_version: PROTOCOL_VERSION,
+            code: "SPF000".to_string(),
+            public_endpoint: "99.99.99.99:5555".parse().unwrap(),
+            cert_fingerprint: [0xAA; 32],
+            device_id: [0x01; 16],
+            want_relay: false,
+        };
+        let b = RegisterRequest {
+            protocol_version: PROTOCOL_VERSION,
+            code: "SPF000".to_string(),
+            public_endpoint: "88.88.88.88:6666".parse().unwrap(),
+            cert_fingerprint: [0xBB; 32],
+            device_id: [0x02; 16],
+            want_relay: false,
+        };
+
+        let a_task = tokio::spawn(crate::client::register(server_addr, a));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let b_task = tokio::spawn(crate::client::register(server_addr, b));
+
+        let a_match = a_task.await.unwrap().unwrap();
+        let b_match = b_task.await.unwrap().unwrap();
+
+        // The IP that A sees for B must be loopback (the TCP source),
+        // not the spoofed 88.88.88.88. The port stays as 6666.
+        assert!(a_match.endpoint.ip().is_loopback());
+        assert_eq!(a_match.endpoint.port(), 6666);
+        assert!(b_match.endpoint.ip().is_loopback());
+        assert_eq!(b_match.endpoint.port(), 5555);
+    }
+
+    #[tokio::test]
+    async fn caps_concurrent_sessions() {
+        let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+        let server = Server::bind_with(bind, DEFAULT_CODE_TTL, 2).await.unwrap();
+        let server_addr = server.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = server.run().await;
+        });
+
+        // Two slow clients that just open TCP connections and never
+        // send a Register frame. They each consume one of the two
+        // permits for FIRST_FRAME_TIMEOUT.
+        let _slow_a = tokio::net::TcpStream::connect(server_addr).await.unwrap();
+        let _slow_b = tokio::net::TcpStream::connect(server_addr).await.unwrap();
+
+        // Give the accept loop a moment to claim both permits.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // A third connection beyond the cap. The TCP connect itself
+        // still succeeds (kernel queue), but the server hasn't picked
+        // it up yet — verify by racing a short timeout against the
+        // server actually doing anything with us.
+        let mut third = tokio::net::TcpStream::connect(server_addr).await.unwrap();
+        let request = RegisterRequest {
+            protocol_version: PROTOCOL_VERSION,
+            code: "CAP000".to_string(),
+            public_endpoint: "1.2.3.4:5678".parse().unwrap(),
+            cert_fingerprint: [0u8; 32],
+            device_id: [0u8; 16],
+            want_relay: false,
+        };
+        framing::write_message(&mut third, &Message::Register(request))
+            .await
+            .unwrap();
+
+        // The third client should not get a response within 250ms: the
+        // first two permits are still held by the unresponsive peers.
+        let recv = tokio::time::timeout(
+            Duration::from_millis(250),
+            framing::read_message(&mut third),
+        )
+        .await;
+        assert!(recv.is_err(), "third client should be queued by the cap, not served");
     }
 
     #[tokio::test]

@@ -478,14 +478,10 @@ impl P2PSession {
                     debug!("Transfer completed, awaiting next");
                 }
                 Err(e) => {
-                    let msg = e.to_string().to_lowercase();
                     if matches!(
                         &e,
                         Error::Disconnected | Error::Quic(_) | Error::Network(_)
-                    ) || msg.contains("connection")
-                        || msg.contains("closed")
-                        || msg.contains("eof")
-                    {
+                    ) {
                         debug!("Connection closed, ending event loop");
                         return Ok(());
                     }

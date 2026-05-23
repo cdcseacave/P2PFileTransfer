@@ -36,33 +36,49 @@ where
     Ok(())
 }
 
-/// Read a message from an async reader
+/// Read a message from an async reader. A clean close on the magic
+/// read (peer finished without sending another frame) maps to
+/// [`Error::Disconnected`]; truncation inside a frame is
+/// [`Error::Protocol`].
 pub async fn read_message<R>(reader: &mut R) -> Result<Message>
 where
     R: AsyncReadExt + Unpin,
 {
-    // Read magic bytes
+    // Read magic bytes. UnexpectedEof here means the peer cleanly
+    // closed the stream between frames — that's a graceful disconnect,
+    // not a wire fault.
     let mut magic = [0u8; 4];
-    reader.read_exact(&mut magic).await?;
+    reader.read_exact(&mut magic).await.map_err(|e| {
+        if e.kind() == std::io::ErrorKind::UnexpectedEof {
+            Error::Disconnected
+        } else {
+            Error::Network(e)
+        }
+    })?;
 
     if magic != PROTOCOL_MAGIC {
         return Err(Error::Protocol(format!("Invalid magic bytes: {:?}", magic)));
     }
 
-    // Read length
+    // Reads from here on are inside a frame: any short read is a
+    // truncation, not a clean disconnect.
     let mut len_buf = [0u8; 4];
-    reader.read_exact(&mut len_buf).await?;
+    reader
+        .read_exact(&mut len_buf)
+        .await
+        .map_err(|e| Error::Protocol(format!("truncated frame header: {e}")))?;
     let len = u32::from_be_bytes(len_buf);
 
     if len > MAX_MESSAGE_SIZE {
         return Err(Error::Protocol(format!("Message too large: {} bytes", len)));
     }
 
-    // Read payload
     let mut payload = vec![0u8; len as usize];
-    reader.read_exact(&mut payload).await?;
+    reader
+        .read_exact(&mut payload)
+        .await
+        .map_err(|e| Error::Protocol(format!("truncated frame payload: {e}")))?;
 
-    // Deserialize message
     let message = rmp_serde::from_slice(&payload)?;
 
     Ok(message)
@@ -73,6 +89,31 @@ mod tests {
     use super::*;
     use crate::protocol::{Capabilities, HelloMessage};
     use uuid::Uuid;
+
+    #[tokio::test]
+    async fn read_on_empty_returns_disconnected() {
+        let empty: Vec<u8> = Vec::new();
+        let mut cursor = &empty[..];
+        let err = read_message(&mut cursor).await.unwrap_err();
+        assert!(
+            matches!(err, Error::Disconnected),
+            "expected Disconnected, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_truncated_frame_returns_protocol_error() {
+        // Magic + a length prefix that promises 100 bytes, but no payload.
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&PROTOCOL_MAGIC);
+        buf.extend_from_slice(&100u32.to_be_bytes());
+        let mut cursor = &buf[..];
+        let err = read_message(&mut cursor).await.unwrap_err();
+        assert!(
+            matches!(err, Error::Protocol(_)),
+            "expected Protocol, got {err:?}"
+        );
+    }
 
     #[tokio::test]
     async fn test_write_read_message() {

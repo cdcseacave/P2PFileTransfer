@@ -20,7 +20,8 @@ use std::sync::OnceLock;
 
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
-use rustls::{DigitallySignedStruct, SignatureScheme};
+use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
+use rustls::{DigitallySignedStruct, DistinguishedName, SignatureScheme};
 
 use crate::error::{Error, Result};
 use crate::identity::{fingerprint_of, Fingerprint, Identity};
@@ -36,9 +37,14 @@ pub fn install_default_crypto_provider() {
     });
 }
 
-/// Build a TLS 1.3 server config presenting the local device identity.
-/// The server accepts any client cert (peer identity is checked separately
-/// via the fingerprint in the application-layer HELLO message).
+/// Build a TLS 1.3 server config presenting the local device identity
+/// and requiring the client to present its own cert. The cert chain isn't
+/// rooted in any CA — the client cert is recorded by the TLS layer and the
+/// handshake layer (see [`crate::handshake`]) cross-checks its fingerprint
+/// against the value the peer claims in HELLO. Without mutual TLS that
+/// cross-check would have nothing to compare against on the responder
+/// side (peer_identity would always be `None`), so the HELLO claim would
+/// be unverified.
 pub fn server_config(identity: &Identity) -> Result<Arc<rustls::ServerConfig>> {
     install_default_crypto_provider();
 
@@ -46,7 +52,7 @@ pub fn server_config(identity: &Identity) -> Result<Arc<rustls::ServerConfig>> {
     let key = identity.private_key_der();
 
     let mut cfg = rustls::ServerConfig::builder()
-        .with_no_client_auth()
+        .with_client_cert_verifier(Arc::new(AcceptAnyClientCert::new()))
         .with_single_cert(cert_chain, key)
         .map_err(|e| Error::Tls(format!("server config: {e}")))?;
     cfg.alpn_protocols = vec![ALPN_PROTOCOL.to_vec()];
@@ -67,16 +73,16 @@ pub fn client_config_pinning(
 
     let verifier = Arc::new(FingerprintVerifier::new(expected_fingerprint));
 
-    // We don't present a client cert: the server uses with_no_client_auth in
-    // Phase 0. Cross-direction fingerprint validation happens at the
-    // application layer via the HELLO message (Phase 1 will tighten this to
-    // mutual TLS once rendezvous-mediated pairing makes the client
-    // fingerprint authoritative).
-    let _ = identity; // reserved for Phase 1 mutual TLS
+    // Present our cert so the responder's mutual-TLS verifier sees our
+    // SPKI and the application-layer HELLO cross-check has something
+    // authoritative to compare against.
+    let cert_chain = vec![identity.cert_der()];
+    let key = identity.private_key_der();
     let mut cfg = rustls::ClientConfig::builder()
         .dangerous()
         .with_custom_certificate_verifier(verifier)
-        .with_no_client_auth();
+        .with_client_auth_cert(cert_chain, key)
+        .map_err(|e| Error::Tls(format!("client auth cert: {e}")))?;
     cfg.alpn_protocols = vec![ALPN_PROTOCOL.to_vec()];
     Ok(Arc::new(cfg))
 }
@@ -120,6 +126,89 @@ impl ServerCertVerifier for FingerprintVerifier {
                 hex::encode(presented),
             )))
         }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &rustls::crypto::ring::default_provider().signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &rustls::crypto::ring::default_provider().signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.schemes.clone()
+    }
+}
+
+/// Client-cert verifier that accepts any presented certificate — peer
+/// identity is authenticated at the application layer by cross-checking
+/// the HELLO fingerprint against the cert TLS captured here. The whole
+/// reason for requiring the client cert at all is so the responder's
+/// `peer_fingerprint()` returns `Some`; the verifier itself doesn't pin.
+#[derive(Debug)]
+pub struct AcceptAnyClientCert {
+    schemes: Vec<SignatureScheme>,
+}
+
+impl Default for AcceptAnyClientCert {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AcceptAnyClientCert {
+    pub fn new() -> Self {
+        let provider = rustls::crypto::ring::default_provider();
+        let schemes = provider
+            .signature_verification_algorithms
+            .supported_schemes();
+        Self { schemes }
+    }
+}
+
+impl ClientCertVerifier for AcceptAnyClientCert {
+    fn offer_client_auth(&self) -> bool {
+        true
+    }
+
+    fn client_auth_mandatory(&self) -> bool {
+        true
+    }
+
+    fn root_hint_subjects(&self) -> &[DistinguishedName] {
+        &[]
+    }
+
+    fn verify_client_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _now: UnixTime,
+    ) -> std::result::Result<ClientCertVerified, rustls::Error> {
+        // Trust any presented cert at the TLS layer. The handshake layer
+        // pins it against the HELLO fingerprint right after.
+        Ok(ClientCertVerified::assertion())
     }
 
     fn verify_tls12_signature(

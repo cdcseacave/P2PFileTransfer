@@ -6,13 +6,55 @@
 //! `FileChecksum` control messages so both sides agree on integrity.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::{Instant, SystemTime};
 
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 use tracing::{debug, info, trace, warn};
 use uuid::Uuid;
+
+/// Reject paths the receiver should never write to: absolute paths,
+/// `..` traversal, current-dir tricks, prefix components (Windows
+/// drive letters / UNC roots), and anything else but bog-standard
+/// `Normal` components. Returns the same path back as a [`PathBuf`]
+/// once it has been confirmed safe.
+pub fn sanitize_relative_path(p: &Path) -> Result<PathBuf> {
+    if p.is_absolute() {
+        return Err(Error::Protocol(format!(
+            "rejecting absolute path in transfer: {}",
+            p.display()
+        )));
+    }
+    let mut clean = PathBuf::new();
+    for comp in p.components() {
+        match comp {
+            Component::Normal(part) => clean.push(part),
+            Component::CurDir => {
+                return Err(Error::Protocol(format!(
+                    "rejecting `.` component in transfer path: {}",
+                    p.display()
+                )))
+            }
+            Component::ParentDir => {
+                return Err(Error::Protocol(format!(
+                    "rejecting `..` component in transfer path: {}",
+                    p.display()
+                )))
+            }
+            Component::Prefix(_) | Component::RootDir => {
+                return Err(Error::Protocol(format!(
+                    "rejecting drive/root component in transfer path: {}",
+                    p.display()
+                )))
+            }
+        }
+    }
+    if clean.as_os_str().is_empty() {
+        return Err(Error::Protocol("transfer path is empty".to_string()));
+    }
+    Ok(clean)
+}
 
 use crate::bandwidth;
 use crate::error::{Error, Result};
@@ -387,7 +429,7 @@ impl<'a> FolderTransferSession<'a> {
 
         let total_files = transfer_info.items.len();
         for (file_index, file_meta) in transfer_info.items.iter().enumerate() {
-            let relative_path = PathBuf::from(&file_meta.path);
+            let relative_path = sanitize_relative_path(Path::new(&file_meta.path))?;
             let full_path = output_dir.join(&relative_path);
             info!(
                 "Receiving file {}/{}: {}",
@@ -531,12 +573,12 @@ impl<'a> FolderTransferSession<'a> {
         };
 
         if sender_checksum != receiver_checksum {
-            warn!(
+            return Err(Error::Verification(format!(
                 "File {} checksum mismatch: sender={:02x?}, receiver={:02x?}",
                 file_index,
                 &sender_checksum[..8],
                 &receiver_checksum[..8]
-            );
+            )));
         }
         Ok(())
     }
@@ -563,6 +605,7 @@ impl<'a> FolderTransferSession<'a> {
                         .strip_prefix(base_path)
                         .map_err(|e| Error::Protocol(format!("Invalid path: {}", e)))?
                         .to_path_buf();
+                    let relative_path = sanitize_relative_path(&relative_path)?;
                     let size = metadata.len();
                     let modified = metadata
                         .modified()
@@ -706,5 +749,43 @@ mod tests {
         state.mark_file_complete(1);
         assert!(state.is_complete());
         assert_eq!(state.progress_percentage(), 100.0);
+    }
+
+    #[test]
+    fn sanitize_accepts_normal_relative_paths() {
+        let ok = sanitize_relative_path(Path::new("dir/sub/file.txt")).unwrap();
+        assert_eq!(ok, PathBuf::from("dir/sub/file.txt"));
+        let plain = sanitize_relative_path(Path::new("file.txt")).unwrap();
+        assert_eq!(plain, PathBuf::from("file.txt"));
+    }
+
+    #[test]
+    fn sanitize_rejects_parent_dir() {
+        let err = sanitize_relative_path(Path::new("../evil")).unwrap_err();
+        assert!(matches!(err, Error::Protocol(_)));
+        let err = sanitize_relative_path(Path::new("a/../../evil")).unwrap_err();
+        assert!(matches!(err, Error::Protocol(_)));
+    }
+
+    #[test]
+    fn sanitize_rejects_current_dir_marker() {
+        let err = sanitize_relative_path(Path::new("./evil")).unwrap_err();
+        assert!(matches!(err, Error::Protocol(_)));
+    }
+
+    #[test]
+    fn sanitize_rejects_absolute_path() {
+        #[cfg(windows)]
+        let abs = Path::new(r"C:\Windows\System32\evil.dll");
+        #[cfg(not(windows))]
+        let abs = Path::new("/etc/passwd");
+        let err = sanitize_relative_path(abs).unwrap_err();
+        assert!(matches!(err, Error::Protocol(_)));
+    }
+
+    #[test]
+    fn sanitize_rejects_empty_path() {
+        let err = sanitize_relative_path(Path::new("")).unwrap_err();
+        assert!(matches!(err, Error::Protocol(_)));
     }
 }

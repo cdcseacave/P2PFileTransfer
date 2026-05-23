@@ -47,10 +47,16 @@ pub const FINGERPRINT_LEN: usize = 32;
 /// can be issued.
 pub const SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// Maximum UDP datagram the relay reads in one go. Set above the
-/// typical 1500 byte MTU so a jumbo-frame LAN behind the relay does
-/// not get truncated.
-const RECV_BUF_BYTES: usize = 1700;
+/// Maximum UDP datagram the relay reads in one go. Sized to the UDP
+/// payload ceiling (65 507 bytes — `u16::MAX − IPv4 header − UDP
+/// header`) plus a little slack so neither jumbo frames nor IPv6
+/// fragmented datagrams get truncated.
+const RECV_BUF_BYTES: usize = 65 * 1024;
+
+/// How often the background task scans for idle sessions to evict.
+/// Moving the scan off the per-packet hot path keeps the lock
+/// hold-time per packet O(1) instead of O(sessions).
+const IDLE_SWEEP_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Hello packet sent by each peer when joining a relay session.
 #[derive(Debug, Clone)]
@@ -138,7 +144,15 @@ struct RelayState {
 }
 
 impl RelayState {
-    fn reserve(&mut self, token: [u8; SESSION_TOKEN_LEN], peer_a_fp: [u8; FINGERPRINT_LEN], peer_b_fp: [u8; FINGERPRINT_LEN]) {
+    fn reserve(
+        &mut self,
+        token: [u8; SESSION_TOKEN_LEN],
+        peer_a_fp: [u8; FINGERPRINT_LEN],
+        peer_b_fp: [u8; FINGERPRINT_LEN],
+    ) -> Result<(), RelayError> {
+        if peer_a_fp == peer_b_fp {
+            return Err(RelayError::DuplicateFingerprint);
+        }
         let now = Instant::now();
         self.sessions.insert(
             token,
@@ -151,6 +165,7 @@ impl RelayState {
                 peer_b_expected_fp: peer_b_fp,
             },
         );
+        Ok(())
     }
 
     fn forget(&mut self, token: &[u8; SESSION_TOKEN_LEN]) {
@@ -210,7 +225,8 @@ impl Relay {
             public_addr,
         };
 
-        tokio::spawn(forward_loop(socket, state, bandwidth_cap_bps));
+        tokio::spawn(forward_loop(socket, state.clone(), bandwidth_cap_bps));
+        tokio::spawn(idle_sweep_loop(state));
         Ok(handle)
     }
 
@@ -220,17 +236,19 @@ impl Relay {
     }
 
     /// Reserve a session for two peers identified by `token`. Both
-    /// fingerprints are recorded so the relay can reject impostors that
-    /// know only the token but not the matching cert.
+    /// fingerprints are recorded so the relay can reject impostors
+    /// that know only the token but not the matching cert. Returns an
+    /// error when both peers would share a fingerprint — that means
+    /// either peer can occupy either slot and there's no impostor
+    /// barrier left.
     pub async fn reserve_session(
         &self,
         token: [u8; SESSION_TOKEN_LEN],
         peer_a_fp: [u8; FINGERPRINT_LEN],
         peer_b_fp: [u8; FINGERPRINT_LEN],
-    ) {
+    ) -> Result<(), RelayError> {
         let mut state = self.state.lock().await;
-        state.evict_idle(Instant::now());
-        state.reserve(token, peer_a_fp, peer_b_fp);
+        state.reserve(token, peer_a_fp, peer_b_fp)
     }
 
     /// Visible bytes-forwarded counter, for diagnostics.
@@ -255,6 +273,9 @@ async fn forward_loop(
                 continue;
             }
         };
+        if len == RECV_BUF_BYTES {
+            warn!("relay: received {len}-byte datagram filling the entire buffer — possible truncation");
+        }
 
         // Top up the token bucket only when a cap is set. Burst = 0.5s of cap.
         if bandwidth_cap_bps > 0 {
@@ -272,10 +293,7 @@ async fn forward_loop(
 
         let packet = &buf[..len];
         let mut state_guard = state.lock().await;
-
-        // Periodic idle eviction.
         let now = Instant::now();
-        state_guard.evict_idle(now);
 
         if let Some(token) = state_guard.addr_to_token.get(&src).copied() {
             // Already paired. Forward to the partner.
@@ -311,25 +329,33 @@ async fn forward_loop(
             continue;
         };
 
-        let slot_a_fp_ok = hello.fingerprint == session.peer_a_expected_fp;
-        let slot_b_fp_ok = hello.fingerprint == session.peer_b_expected_fp;
-        if !slot_a_fp_ok && !slot_b_fp_ok {
-            debug!("relay: hello with unknown fingerprint from {src}");
-            state_guard.sessions.insert(hello.token, session);
-            continue;
-        }
-        let new_state = PeerState {
-            addr: src,
-            fingerprint: hello.fingerprint,
-        };
-        let assigned_slot = if slot_a_fp_ok && session.peer_a.is_none() {
-            session.peer_a = Some(new_state);
+        // Pre-bound slot lookup. `reserve_session` rejected identical
+        // fingerprints upfront, so each fingerprint maps to exactly
+        // one slot here.
+        let assigned_slot = if hello.fingerprint == session.peer_a_expected_fp {
+            if session.peer_a.is_some() {
+                debug!("relay: duplicate hello for slot A from {src}");
+                state_guard.sessions.insert(hello.token, session);
+                continue;
+            }
+            session.peer_a = Some(PeerState {
+                addr: src,
+                fingerprint: hello.fingerprint,
+            });
             "A"
-        } else if slot_b_fp_ok && session.peer_b.is_none() {
-            session.peer_b = Some(new_state);
+        } else if hello.fingerprint == session.peer_b_expected_fp {
+            if session.peer_b.is_some() {
+                debug!("relay: duplicate hello for slot B from {src}");
+                state_guard.sessions.insert(hello.token, session);
+                continue;
+            }
+            session.peer_b = Some(PeerState {
+                addr: src,
+                fingerprint: hello.fingerprint,
+            });
             "B"
         } else {
-            debug!("relay: duplicate hello from {src}");
+            debug!("relay: hello with unknown fingerprint from {src}");
             state_guard.sessions.insert(hello.token, session);
             continue;
         };
@@ -347,6 +373,18 @@ async fn forward_loop(
 pub enum RelayError {
     #[error("relay bind: {0}")]
     Bind(std::io::Error),
+    #[error("relay refused session: both peers share the same fingerprint")]
+    DuplicateFingerprint,
+}
+
+/// Background task: periodically scan for idle sessions and evict
+/// them. Keeps the per-packet forward path off the linear scan.
+async fn idle_sweep_loop(state: Arc<Mutex<RelayState>>) {
+    loop {
+        tokio::time::sleep(IDLE_SWEEP_INTERVAL).await;
+        let mut guard = state.lock().await;
+        guard.evict_idle(Instant::now());
+    }
 }
 
 #[cfg(test)]
