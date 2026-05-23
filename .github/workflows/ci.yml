@@ -141,4 +141,6 @@ jobs:
       uses: codecov/codecov-action@v3
       with:
         files: ./cobertura.xml
-        fail_ci_if_error: true
+        # Tokenless uploads are rate-limited by codecov.io; don't fail
+        # the run on a 429. Coverage is informational, not gating.
+        fail_ci_if_error: false
