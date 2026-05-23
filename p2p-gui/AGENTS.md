@@ -39,6 +39,16 @@ When adding a feature, the usual edit set is: `state.rs` (field) → `message.rs
 
 `Tab::all()` returns `[Connection, Send, Receive, Settings, History]`. Each tab has its own state struct in `state.rs` (e.g., `ConnectionState`) and a `view_<tab>_tab(state) -> Element<Message>` in `views/`. Adding a tab: extend the `Tab` enum + `all()` + `icon()` + `text()`, add a state struct, add a view function and re-export from `views/mod.rs`, add the match arm in `app.rs::view`.
 
+### Connection tab modes
+
+`ConnectionMode::all()` returns `[Listen, Connect, Rendezvous]`:
+
+- **Listen** — bind on `--port` and accept the next inbound session.
+- **Connect** — direct dial of `peer_address` with `peer_fingerprint` pinned at the TLS layer (or pulled from a LAN beacon when `use_discovery` is set).
+- **Rendezvous** ("Pair with code (cross-NAT)") — pair through `rendezvous_address` with a shared `code`. The view exposes a Generate button that fills `code` with a fresh 6-character base32 (`p2p_core::traversal::generate_code`). Peer fingerprint comes from the rendezvous match — the user doesn't have to type it.
+
+Session establishment runs **inside `Command::perform`** (off the iced thread): the async future calls `P2PSession::connect`, `accept`, or `from_rendezvous` and returns `Message::ConnectionEstablishedWithSession(Arc<tokio::Mutex<P2PSession>>)`. Only the wrapped session is stored in `AppState` so the message loop never holds the mutex across an await. Don't lock the mutex on the iced thread — go through `Command::perform` for any operation that needs the session.
+
 ## Cross-platform emoji font
 
 `app.rs::view` selects an emoji font by target OS — `Apple Color Emoji` (macOS), `Segoe UI Emoji` (Windows), `Noto Color Emoji` (otherwise). Tab labels render the emoji and the text as **separate** `text` elements so the emoji font doesn't bleed into the regular label. Preserve this split when editing the tabs row; mixing them with a single `text` widget breaks rendering on Windows.

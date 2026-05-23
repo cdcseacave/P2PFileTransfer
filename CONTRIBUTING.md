@@ -32,23 +32,28 @@ Thank you for your interest in contributing! This document provides guidelines f
 
 ```
 p2p-transfer/
-├── src/              # Main binary entry point
-├── p2p-core/         # Core library
+├── src/main.rs           # Binary entry point (delegates to p2p-cli or p2p-gui)
+├── p2p-core/             # Core library: identity, TLS, QUIC, handshake,
+│   │                     # session, transfer engine, traversal, history, ...
 │   └── src/
-│       ├── protocol.rs       # Message definitions
-│       ├── network/          # Networking layer
-│       ├── compression.rs    # Compression utilities
-│       ├── verification.rs   # Checksums
-│       ├── transfer.rs       # Transfer logic
-│       └── ...
-├── p2p-cli/          # CLI interface
-│   └── src/
-│       └── lib.rs
-├── p2p-gui/          # GUI interface
-│   └── src/
-│       └── lib.rs
-└── docs/             # Documentation
+│       ├── identity.rs, tls.rs, known_peers.rs
+│       ├── protocol.rs, handshake.rs, session.rs
+│       ├── transfer_file.rs, transfer_folder.rs
+│       ├── compression.rs, verification.rs, bandwidth.rs
+│       ├── traversal/{mod.rs, stun.rs, punch.rs}
+│       └── network/{quic.rs, framing.rs, udp.rs}
+├── p2p-cli/              # clap-based CLI
+├── p2p-gui/              # Iced 0.12 GUI
+├── p2p-rendezvous/       # Matchmaking + relay (`rendezvousd` binary)
+│   └── src/{lib.rs, protocol.rs, server.rs, relay.rs, client.rs,
+│            bin/rendezvousd.rs}
+├── tests/                # Workspace integration + loopback tests
+└── README.md, DESIGN.md, TODO.md, CHANGELOG.md
 ```
+
+Per-crate developer guidance lives in each crate's `AGENTS.md` (root,
+`p2p-core/`, `p2p-cli/`, `p2p-gui/`, `p2p-rendezvous/`). Read those
+before touching a crate.
 
 ## Coding Guidelines
 

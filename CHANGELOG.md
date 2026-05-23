@@ -7,6 +7,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — 2026-05-23 — Security & robustness audit (16 findings)
+
+Landed all 16 findings from a code review on the `quic` branch (4
+Critical, 6 High, 6 Medium). Per the project's no-backwards-compat
+rule, the fixes change wire formats and call sites in place; no
+deprecated paths or shims.
+
+Data integrity:
+- **C1** — `FileTransferSession::send_chunk_stream` awaits
+  `stream.stopped().await` after `finish()` so the last chunk isn't
+  lost when the sender closes the connection.
+- **C3** — `FileTransferSession::receive_file` rejects
+  `chunk_index >= total_chunks` with `Error::Protocol` before
+  writing.
+- **H4 + M4** — Chunk indices are `u64` end-to-end:
+  `ChunkReader::total_chunks` / `read_chunk` / `fold_chunk` and
+  `ChunkWriter::write_chunk` all take `u64`. Files larger than `2^32`
+  chunks no longer truncate.
+- **C4** — Receiver SHA-256 mismatch returns `Error::Verification`,
+  not a silent warn.
+
+Security:
+- **H1** — Mutual TLS. `tls::server_config` now uses
+  `with_client_cert_verifier(AcceptAnyClientCert)`; client presents
+  its cert via `with_client_auth_cert`. `cross_check_fingerprint`
+  rejects `None` observations too, closing the responder-side TOFU
+  bypass.
+- **M3** — `transfer_folder::sanitize_relative_path` rejects
+  absolute, `..`, `.`, drive/root, and empty paths; applied on both
+  the receive join site and the sender's `scan_folder` output.
+- **M6** — Rendezvous server rewrites
+  `RegisterRequest.public_endpoint` IP to the TCP peer's IP
+  (keeping the user-supplied UDP port), blocking traffic reflection
+  via forged endpoints.
+- **M1** — `stun::query` rejects responses whose transaction id
+  doesn't match the request.
+
+Robustness:
+- **C2** — `traversal::punch::race_connect_and_accept` now launches
+  `connect` *and* an address-validating `accept_from` on both peers;
+  the larger-device-id peer staggers its `connect` by 50 ms to avoid
+  Initial-packet collisions. First successful handshake wins.
+- **H5** — `accept_from` loops on `endpoint.accept()` and drops
+  connections whose source address doesn't match the rendezvous-
+  supplied peer.
+- **H6** — `Server::bind_with(max_concurrent)` caps in-flight
+  rendezvous handlers via `tokio::sync::Semaphore` (default 1024)
+  with backpressure on the listener.
+- **H3** — Relay recv buffer increased to 65 KiB; warns on
+  full-buffer reads as a truncation tripwire.
+- **H2** — Relay slot binding is fingerprint-keyed lookup;
+  `reserve_session` refuses identical fingerprints on both slots.
+- **M5** — Relay idle-session eviction moved to a 30 s background
+  task off the per-packet forward path.
+- **M2** — `framing::read_message` maps `UnexpectedEof` on the magic
+  read to `Error::Disconnected` and frame-interior short reads to
+  `Error::Protocol`; `session::run_event_loop` drops its
+  string-matching arm in favor of typed `matches!(...)`.
+
 ### Added — 2026-05-23 — GUI pair-with-code + nat-test self-loop (Phase 3)
 - GUI Connection tab gains a third mode `Pair with code (cross-NAT)`:
   inputs for rendezvous server (host:port) and shared code, with a

@@ -25,26 +25,39 @@ Cargo workspace
 `p2p-core` module map:
 
 ```
-identity        Ed25519 keypair + self-signed cert (rcgen), SHA-256 fingerprint
-tls             rustls 0.23 ServerConfig/ClientConfig + FingerprintVerifier
-known_peers     TOFU fingerprint store at <config_dir>/p2p-transfer/known_peers.json
-network/quic    QuicEndpoint + QuicConnection (the only transport)
-network/framing length-prefixed MessagePack frames over any stream
-network/udp     LAN broadcast beacons (port 14566)
-discovery       Beacon manager — maintains peer table from UDP beacons
-traversal/      STUN primitives (Phase 0); hole punch + rendezvous (Phase 1)
-protocol        Control-plane Message enum + ConfigMessage + TransferInfo + ...
-handshake       HELLO / HELLO_ACK / CONFIG / CONFIG_ACK over the QUIC control stream
-session         P2PSession owns QuicEndpoint + QuicConnection + handshake result
-transfer_file   Single-file send/receive: one uni-stream per chunk
-transfer_folder Folder = sequence of single-file transfers reusing the connection
-compression     zstd; adaptive disable for incompressible data
-verification    file-level SHA-256 (per-chunk CRC removed — TLS AEAD covers bytes)
-bandwidth       token-bucket throttle applied before each stream.write
-state           chunk bitmap for resume
-reconnect       exponential backoff retry loop for transient errors
-history         JSON-backed transfer history (UX-only)
-progress        ProgressState — observer callbacks, no I/O
+identity         Ed25519 keypair + self-signed cert (rcgen), SHA-256 fingerprint
+tls              rustls 0.23 ServerConfig (mutual TLS) / ClientConfig + FingerprintVerifier + AcceptAnyClientCert
+known_peers      TOFU fingerprint store at <config_dir>/p2p-transfer/known_peers.json
+network/quic     QuicEndpoint + QuicConnection (the only transport)
+network/framing  length-prefixed MessagePack frames over any stream; typed Disconnected on clean EOF
+network/udp      LAN broadcast beacons (port 14566)
+discovery        Beacon manager — maintains peer table from UDP beacons
+traversal/stun   async STUN with response-tx-id validation, Cone/Symmetric classifier
+traversal/punch  race_connect_and_accept (parallel connect + address-validating accept loop)
+traversal/mod    establish_via_rendezvous orchestrator (STUN → register → punch-or-relay)
+protocol         Control-plane Message enum + ConfigMessage + TransferInfo + ...
+handshake        HELLO / HELLO_ACK / CONFIG / CONFIG_ACK over the QUIC control stream
+session          P2PSession owns QuicEndpoint + QuicConnection + handshake result
+transfer_file    Single-file send/receive: one uni-stream per chunk, u64 indices, stream.stopped() drain
+transfer_folder  Folder = sequence of single-file transfers; sanitize_relative_path on every wire path
+compression      zstd; adaptive disable for incompressible data
+verification     file-level SHA-256 (per-chunk CRC removed — TLS AEAD covers bytes); receiver mismatch is fatal
+bandwidth        token-bucket throttle applied before each stream.write
+state            chunk bitmap for resume
+reconnect        exponential backoff retry loop for transient errors
+history          JSON-backed transfer history (UX-only)
+progress         ProgressState — observer callbacks, no I/O
+```
+
+`p2p-rendezvous` module map:
+
+```
+protocol         Wire enum (Register / Match / RelayMatch / Expired / Rejected) + RegisterRequest
+server           TCP listener; concurrency-capped via Semaphore; rewrites public_endpoint IP to TCP source
+relay            UDP packet forwarder; fingerprint-bound slot lookup; off-hot-path idle eviction
+client           register / register_full → MatchOutcome (Direct | Relay)
+lib              4 KiB-capped MessagePack framing
+bin/rendezvousd  the binary (clap CLI over Server + Relay)
 ```
 
 ## Connection model
@@ -103,15 +116,21 @@ After handshake both peers are symmetric: either side can call
   and persisted to `<config_dir>/p2p-transfer/identity.{key,cert}`.
   The SHA-256 of the cert's DER encoding is the stable per-device
   fingerprint (`identity.fingerprint()` / `--peer-fingerprint`).
-* The initiator pins the responder's cert by SHA-256 via
-  `tls::FingerprintVerifier`. The fingerprint is delivered out of band:
-  - LAN: in the discovery beacon (with TOFU into `known_peers.json` on
-    first contact).
+* **Mutual TLS.** The initiator pins the responder via
+  `tls::FingerprintVerifier`; the responder requires a client cert
+  via `tls::AcceptAnyClientCert` (which lets any cert through at the
+  TLS layer — pinning happens at the handshake layer). Both sides
+  observe the peer's cert via `QuicConnection::peer_fingerprint()`.
+* The application-layer HELLO carries a claimed fingerprint that
+  `handshake::cross_check_fingerprint` compares against the TLS
+  observation. A mismatch *or* a missing observation (which would
+  mean the peer didn't present a cert) is fatal
+  (`Error::FingerprintMismatch`).
+* The fingerprint is delivered out of band:
+  - LAN: in the discovery beacon (with TOFU into `known_peers.json`
+    on first contact).
   - Direct (`--peer`): on the command line via `--peer-fingerprint`.
-  - WAN (Phase 1): via the rendezvous server.
-* On the responder side rustls accepts the connection without requesting
-  a client cert; the application-layer HELLO cross-checks the claimed
-  fingerprint against the cert TLS observed.
+  - WAN: via the rendezvous server's `Match` / `RelayMatch`.
 
 ## Discovery (LAN)
 
@@ -139,28 +158,95 @@ each `open_uni().write_all`.
 
 * **Phase 0 (shipped):** LAN discovery and direct `--peer` only.
   `traversal/stun.rs` exposes async `query(&UdpSocket, server)` and
-  `classify_nat(&UdpSocket, a, b)` primitives the next phases use.
+  `classify_nat(&UdpSocket, a, b)` primitives the next phases use. STUN
+  responses are validated against the request's transaction id so a
+  spoofed reply from another source can't bind a fake mapping.
 * **Phase 1 (shipped):** new crate `p2p-rendezvous` + `rendezvousd`
   binary; CLI flags `--rendezvous` + `--code`;
   `traversal::establish_via_rendezvous` orchestrator. Both peers bind a
   UDP socket, run STUN on it (the same socket quinn will later own),
-  register at the rendezvous with a short shared code, and on match race
-  `quinn::Endpoint::connect` against `accept` — QUIC `Initial` packets
-  themselves serve as the hole-punch. Symmetric NAT is detected up
-  front by comparing mapped ports across two STUN servers and surfaces
-  `Error::HolePunchFailed`. The rendezvous server never sees user data
-  — it only stores the (endpoint, fingerprint, device_id) tuple long
-  enough to deliver each peer's address to the other.
+  register at the rendezvous with a short shared code, and on match
+  drive `traversal::punch::race_connect_and_accept`: both peers fire
+  `quinn::Endpoint::connect` *and* an address-validating
+  `accept_from(peer_addr)` in parallel. The smaller-device-id peer
+  starts `connect` immediately; the larger one delays by 50 ms so the
+  two Initial flights don't collide on a strict NAT. `accept_from`
+  loops on `endpoint.accept()` and drops connections whose source
+  address doesn't match the rendezvous-supplied peer — preventing
+  third parties from riding our open mapping. Symmetric NAT is
+  detected up front by comparing mapped ports across two STUN servers.
+  The rendezvous server never sees user data; it only stores the
+  (endpoint, fingerprint, device_id) tuple long enough to deliver each
+  peer's address to the other, and it rewrites the claimed endpoint
+  IP to the TCP source IP so a peer can't aim the punch at a
+  third-party victim.
 * **Phase 2 (shipped):** `rendezvousd --relay-bind <addr>
   --max-relay-mbps <n>` runs a tiny UDP packet forwarder. Any rendezvous
   match where either peer set `want_relay` (auto-set when STUN spots
   symmetric NAT, or forced via the `--force-relay` CLI flag) returns a
   `RelayMatch` with a fresh 16-byte session token and the relay's UDP
   address. Each peer sends a `RelayHello` so the relay records its
-  source address, then runs a normal QUIC handshake with the relay's
-  address as the apparent peer endpoint. Because the relay just forwards
-  UDP packets verbatim, QUIC TLS still terminates end-to-end between
-  the two real peers — the relay sees ciphertext only.
+  source address against the fingerprint-bound slot the rendezvous
+  reserved; subsequent UDP packets are forwarded verbatim. The relay
+  rejects sessions where both peers claim the same fingerprint
+  (`RelayError::DuplicateFingerprint`), uses a 65 KiB recv buffer,
+  and runs idle eviction in a 30 s background task (off the per-packet
+  hot path). Because the relay just forwards UDP packets verbatim,
+  QUIC TLS still terminates end-to-end between the two real peers —
+  the relay sees ciphertext only.
+
+## Security & robustness guarantees
+
+The data path enforces several invariants that an external code review
+flagged as load-bearing — keep them intact when changing the relevant
+modules.
+
+* **Chunk indices are `u64` end-to-end.** `ChunkReader::total_chunks`,
+  `read_chunk`, `fold_chunk`, and `ChunkWriter::write_chunk` all take
+  `u64`. There is no `as u32` narrowing on the chunk path, so files
+  larger than `2^32` chunks transfer correctly.
+* **Bounds-checked chunk_index.** `FileTransferSession::receive_file`
+  rejects `chunk_index >= total_chunks` with `Error::Protocol`. The
+  wire-supplied index cannot make the writer seek to a random offset.
+* **Drained streams.** `send_chunk_stream` awaits
+  `stream.stopped().await` after `finish()` so the last chunk isn't
+  lost when the sender closes the connection.
+* **Hard SHA-256 verification.** The receiver computes the file SHA-256
+  from disk after the transfer and compares to the sender's value; a
+  mismatch returns `Error::Verification` (never just a warn).
+* **Path sanitization.** Every wire path on the receive side runs
+  through `transfer_folder::sanitize_relative_path`, which rejects
+  absolute paths, `..`, `.`, drive letters, UNC roots, and empty
+  paths. The sender runs the same check on `scan_folder` output so
+  weird local names fail fast.
+* **Mutual TLS.** `tls::server_config` requires a client cert
+  (`AcceptAnyClientCert`) so `QuicConnection::peer_fingerprint()` is
+  `Some(...)` on the responder side too. The handshake's
+  `cross_check_fingerprint` rejects `None` observations — a peer that
+  somehow didn't present a cert cannot pass the handshake even if its
+  HELLO claim looks plausible.
+* **Accept-from-expected-peer.** `traversal::punch::accept_from` loops
+  on `endpoint.accept()` and drops connections whose `peer_addr()`
+  doesn't match the rendezvous-supplied address.
+* **STUN tx-id validation.** `stun::query` checks the response's
+  transaction id against the one in the request before parsing
+  attributes.
+* **Rendezvous concurrency cap.** `Server::bind_with(max_concurrent)`
+  applies backpressure via a `tokio::sync::Semaphore` (default 1024).
+  An attacker can't fan out unbounded connections.
+* **TCP-sourced public IP.** The rendezvous rewrites
+  `RegisterRequest.public_endpoint`'s IP to the TCP peer's IP
+  (keeping the user-supplied UDP port) so a client can't direct the
+  punch at a third-party victim.
+* **Relay slot pre-binding.** `reserve_session` rejects sessions where
+  both peers share a fingerprint. With distinct fingerprints, slot
+  binding is a single equality lookup per slot — no ambiguity, no
+  duplicate-slot race.
+* **Typed disconnect.** `framing::read_message` maps `UnexpectedEof`
+  on the magic read to `Error::Disconnected`; frame-interior short
+  reads become `Error::Protocol("truncated frame ...")`. The session
+  event loop uses `matches!(err, Disconnected | Quic | Network)`
+  instead of substring-matching error messages.
 
 ## Protocol versioning
 

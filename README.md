@@ -1,24 +1,42 @@
 # P2P File Transfer
 
 A peer-to-peer file transfer tool in Rust. Two peers establish an
-authenticated **QUIC** connection (TLS 1.3, cert-pinned) and stream files
-chunk-by-chunk over per-chunk unidirectional QUIC streams. Ships with a
-CLI and an optional Iced GUI.
+authenticated **QUIC** connection (TLS 1.3 with **mutual auth**, both
+ends cert-pinned by SHA-256) and stream files chunk-by-chunk over
+per-chunk unidirectional QUIC streams. Cross-NAT pairing through a
+self-hosted rendezvous server, with a UDP relay fallback for symmetric
+NATs. Ships with a CLI and an optional Iced GUI.
 
 ## Highlights
 
-* **QUIC + TLS 1.3** on a single UDP socket — encryption is mandatory.
-* **Per-device identity** — Ed25519 keypair + self-signed cert, pinned
-  by SHA-256 fingerprint.
+* **QUIC + mutual TLS 1.3** on a single UDP socket — encryption and
+  client-cert authentication are mandatory. Both peers pin each
+  other's cert by SHA-256 fingerprint.
+* **Per-device identity** — Ed25519 keypair + self-signed cert,
+  persisted across runs.
 * **LAN auto-discovery** — UDP beacons announce device name + cert
   fingerprint so receivers can pin immediately.
+* **Cross-NAT pairing** — `p2p-rendezvous` crate + `rendezvousd`
+  binary; peers exchange short codes and the server matches them by
+  public endpoint + cert fingerprint. UDP hole-punching uses the QUIC
+  Initial packets themselves.
+* **Relay fallback** — symmetric NATs that can't be punched directly
+  fall through to a UDP forwarder; QUIC TLS still terminates
+  end-to-end (the relay sees ciphertext only).
 * **Resume** — chunk-level bitmap persisted per transfer; reconnects
-  pick up where they left off.
+  pick up where they left off. Chunk indices are `u64` end-to-end —
+  very large files transfer correctly.
+* **Integrity** — per-file SHA-256 exchanged both ways; receiver
+  mismatch is a hard failure (no silent acceptance).
+* **Path safety** — every incoming relative path is sanitized; the
+  receiver rejects absolute paths, `..`, `.`, drive letters, and UNC
+  roots.
 * **Adaptive zstd compression** — auto-disabled when data is
   incompressible.
 * **Bandwidth throttling** — token-bucket cap (`--max-speed 10M`).
 * **GUI** (optional) — Iced-based tabs for Connection / Send / Receive /
-  Settings / History.
+  Settings / History; the Connection tab has a `Pair with code` mode
+  for cross-NAT setup.
 
 ## Build
 
@@ -137,6 +155,14 @@ You can also force the relay path for debugging by passing
 packets between the two peers — QUIC TLS still terminates end-to-end so
 the relay only sees ciphertext.
 
+The rendezvous applies several anti-abuse measures: a per-process
+concurrency cap (default 1024 simultaneous handlers, backpressured at
+the listener), the registered `public_endpoint` IP is replaced by the
+TCP source IP server-side (the user-supplied UDP port is kept — only
+the IP is forgeable for traffic reflection), and the relay's slot
+binding pins each session's two seats to specific cert fingerprints
+upfront so impostors with only the session token can't take a seat.
+
 ### Resume
 
 ```
@@ -147,7 +173,10 @@ p2p-transfer resume <transfer_id> \
 ```
 
 Reads `transfer_<transfer_id>.json` (written when a transfer is
-interrupted) and continues from the chunk bitmap.
+interrupted) and continues from the chunk bitmap. The state file lives
+in the working directory where the transfer started; the original
+`--path` and `--peer-fingerprint` aren't stored, so you have to supply
+them again on resume.
 
 ### History
 
@@ -190,6 +219,26 @@ python3 benchmark.py --mode sender   --receiver-ip 192.168.1.100 --port 14568
 * Rust 1.79+
 * UDP port 14567 reachable (or whatever you pass to `--port`).
 * For LAN discovery, UDP broadcast must not be filtered on the network.
+* For cross-NAT pairing, a reachable `rendezvousd` instance (and, if
+  any peer is behind a symmetric NAT, the same `rendezvousd` running
+  with `--relay-bind` for the UDP forwarder).
+
+## Security model
+
+* TLS 1.3 with **mutual authentication** — both ends present a
+  self-signed cert and each side pins the other by SHA-256
+  fingerprint at the application layer.
+* No CA, no key escrow. The fingerprint is delivered out-of-band: on
+  the command line (`--peer-fingerprint`), in the LAN beacon (TOFU
+  pinning), or via the rendezvous match.
+* The rendezvous server only matches peers — it never sees user data
+  and is never trusted to vouch for cert authenticity (the cert is
+  cross-checked against the fingerprint at handshake time).
+* The relay forwards UDP datagrams verbatim — QUIC TLS terminates
+  end-to-end between the two real peers, so the relay only sees
+  ciphertext.
+* All wire-supplied paths are sanitized before any filesystem write;
+  receiver-side SHA-256 mismatch is fatal.
 
 ## License
 

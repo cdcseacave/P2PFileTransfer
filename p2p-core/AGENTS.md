@@ -11,16 +11,16 @@ The crate is layered. Higher layers depend on lower layers, not the other way ar
 | Layer | Modules | Role |
 |---|---|---|
 | Constants | `lib.rs` | `PROTOCOL_VERSION = 2`, `DEFAULT_CHUNK_SIZE = 65536`, `DEFAULT_DISCOVERY_PORT = 14566`, `DEFAULT_TRANSFER_PORT = 14567`, `DEFAULT_RENDEZVOUS_PORT = 14570`, `PROTOCOL_MAGIC = b"P2PF"`, `ALPN_PROTOCOL = b"p2pf/2"` |
-| Errors | `error.rs` | `Error`/`Result` — every fallible API in this crate returns these (`Quic`, `Tls`, `Rendezvous`, `HolePunchFailed`, `FingerprintMismatch`, ...) |
-| Identity & TLS | `identity.rs`, `tls.rs`, `known_peers.rs` | `Identity` = persistent Ed25519 keypair + self-signed cert (rcgen); `tls::FingerprintVerifier` pins the peer cert by SHA-256; `KnownPeers` = TOFU store at `<config_dir>/p2p-transfer/known_peers.json` |
+| Errors | `error.rs` | `Error`/`Result` — every fallible API in this crate returns these (`Quic`, `Tls`, `Rendezvous`, `HolePunchFailed`, `FingerprintMismatch`, `Verification`, `Disconnected`, ...) |
+| Identity & TLS | `identity.rs`, `tls.rs`, `known_peers.rs` | `Identity` = persistent Ed25519 keypair + self-signed cert (rcgen). `tls::server_config` requires a client cert via `AcceptAnyClientCert` (mutual TLS — peer identity is pinned at the handshake layer, TLS just guarantees the cert is presented). `tls::client_config_pinning` presents our cert and pins the server cert via `FingerprintVerifier`. `KnownPeers` = TOFU store at `<config_dir>/p2p-transfer/known_peers.json`. |
 | Protocol | `protocol.rs`, `config.rs` | `Message` enum (control-plane only — chunks ride raw on per-chunk uni streams), `HelloMessage`, `ConfigMessage`, `TransferInfo`, `FileMetadata`, `Capabilities` |
-| Transport | `network/quic.rs`, `network/framing.rs`, `network/udp.rs` | `QuicEndpoint` + `QuicConnection` (the only transport — one UDP socket per endpoint, acts as both client and server); MessagePack length-prefixed framing over the QUIC control stream; UDP socket helpers for LAN beacons |
-| Crypto/check | `verification.rs`, `compression.rs` | File-level SHA256 only (per-chunk CRC is gone — TLS AEAD authenticates every byte); `AdaptiveCompressor` (Zstd levels -7..22, auto-disables under 1.05x ratio after sampling 3 chunks) |
+| Transport | `network/quic.rs`, `network/framing.rs`, `network/udp.rs` | `QuicEndpoint` + `QuicConnection` (the only transport — one UDP socket per endpoint, acts as both client and server; `peer_fingerprint()` is `Some` on both sides thanks to mTLS); `framing::read_message` maps clean EOF on the magic read to `Error::Disconnected`, frame-interior short reads to `Error::Protocol`; UDP helpers for LAN beacons |
+| Crypto/check | `verification.rs`, `compression.rs` | File-level SHA-256 only (per-chunk CRC is gone — TLS AEAD authenticates every byte); receiver mismatch is a hard `Error::Verification` — never a warn. `AdaptiveCompressor` (Zstd levels -7..22, auto-disables under 1.05× ratio after sampling 3 chunks). |
 | Throttle | `bandwidth.rs` | Token-bucket with `K`/`M`/`G` suffix parser; applied before each `open_uni().write` |
-| Discovery / NAT | `discovery.rs`, `traversal/stun.rs`, `traversal/mod.rs` | UDP beacon-based `DiscoveryManager` carrying `cert_fingerprint`; async STUN on a borrowed `tokio::net::UdpSocket` + `classify_nat` (Cone vs Symmetric); `traversal/mod.rs` is a Phase-1 stub for the rendezvous orchestrator |
-| Handshake | `handshake.rs` | `HandshakeClient`/`HandshakeServer` over the bidi control stream — HELLO/HELLO_ACK with cert-fingerprint cross-check + CONFIG/CONFIG_ACK, produces `HandshakeResult { peer_device_id, peer_fingerprint, agreed_capabilities, config }` |
-| Transfer engine | `transfer_file.rs`, `transfer_folder.rs` | `FileTransferSession` (one unidirectional QUIC stream per chunk with `[u64 LE index | u8 flags | payload]`); `FolderTransferSession` (walks tree, orchestrates per-file sessions, aggregates `TransferStats`) |
-| Session | `session.rs` | `P2PSession` — bidirectional, symmetric facade combining QUIC endpoint + handshake + transfer; the GUI and CLI both drive this |
+| Discovery / NAT | `discovery.rs`, `traversal/stun.rs`, `traversal/punch.rs`, `traversal/mod.rs` | UDP beacon-based `DiscoveryManager` carrying `cert_fingerprint`. `traversal::stun` runs async STUN on a borrowed `tokio::net::UdpSocket` and validates the response transaction id; `classify_nat` reports Cone vs Symmetric. `traversal::punch::race_connect_and_accept` runs `connect` and an address-validating `accept_from` in parallel (50 ms stagger by larger device id) — first success wins; mismatched source addresses are dropped and the accept loop continues. `traversal::mod` orchestrates STUN → register at rendezvous → punch-or-relay. |
+| Handshake | `handshake.rs` | `HandshakeClient`/`HandshakeServer` over the bidi control stream — HELLO/HELLO_ACK with `cross_check_fingerprint` (fatal on mismatch *and* on missing observation, closing the responder TOFU bypass) + CONFIG/CONFIG_ACK, produces `HandshakeResult { peer_device_id, peer_fingerprint, agreed_capabilities, config }` |
+| Transfer engine | `transfer_file.rs`, `transfer_folder.rs` | `FileTransferSession`: one unidirectional QUIC stream per chunk with `[u64 LE index \| u8 flags \| payload]`; `send_chunk_stream` awaits `stream.stopped()` so the last chunk isn't lost on close. Receiver bounds-checks `chunk_index < total_chunks` before writing. Chunk indices are `u64` end-to-end (`ChunkReader::total_chunks`, `read_chunk`, `fold_chunk`, `ChunkWriter::write_chunk`). `FolderTransferSession` walks the tree, runs per-file sessions, aggregates `TransferStats`, and exposes `sanitize_relative_path` (rejects absolute, `..`, `.`, drive/root, empty) which is applied to both incoming `FileMetadata.path` *and* outgoing `scan_folder` paths. |
+| Session | `session.rs` | `P2PSession` — bidirectional, symmetric facade combining QUIC endpoint + handshake + transfer. `connect`, `accept`, and `from_rendezvous` are the three entry points. The event loop ends on `Error::Disconnected` / `Error::Quic` / `Error::Network` (no string matching). |
 | Cross-cutting | `state.rs`, `history.rs`, `progress.rs`, `reconnect.rs` | Resume-state JSON (chunk bitmap); transfer-history log; shared `ProgressState` consumed by CLI bars and GUI updates; exponential-backoff reconnect loop |
 
 ## Design points you can't see from one file
@@ -48,6 +48,20 @@ State is persisted **after each file completes** (not mid-file), so resume granu
 ### Identity persistence
 
 `Identity::load_or_generate` reads PEM-encoded PKCS#8 key + PEM cert from `<config_dir>/p2p-transfer/identity.{key,cert}` (created on first run with mode 0600 on Unix). The SHA-256 of the cert DER is the stable per-device fingerprint and is what peers pin. The cert is persisted alongside the key so the fingerprint stays stable across restarts — TOFU pinning in `known_peers.json` depends on it.
+
+### Mutual TLS, but pinning lives at the handshake layer
+
+Both the server and the client now present certs (rustls's `with_client_cert_verifier(AcceptAnyClientCert)` on the server, `with_client_auth_cert(...)` on the client). `AcceptAnyClientCert` doesn't validate the client cert against any CA — it just lets the cert through so `QuicConnection::peer_fingerprint()` returns `Some(...)` on both sides. The actual identity check lives in `handshake.rs::cross_check_fingerprint`, which compares the cert TLS observed against the value HELLO claimed and fails if they disagree *or* if the observation is `None`. Don't reintroduce `with_no_client_auth()` on the server — that's the responder TOFU bypass the audit closed.
+
+### Path sanitization
+
+Any path that came in over the wire goes through `transfer_folder::sanitize_relative_path` before being joined under the output directory. It rejects absolute paths, `..` and `.` components, Windows drive prefixes, UNC roots, and empty paths. The sender also runs it on `scan_folder` output so weird local names fail fast instead of silently producing a wire payload the receiver will reject. When adding any new code path that writes to a receiver-controlled location, route the relative path through this function first.
+
+### NAT traversal correctness
+
+`traversal::punch::race_connect_and_accept` launches `connect` *and* `accept_from` in parallel on both peers — both `connect`s send their outbound QUIC `Initial` packets which open the NAT mappings on both sides. The smaller `device_id` peer fires its `connect` immediately; the larger one delays by `SECONDARY_CONNECT_DELAY` (50 ms) so the two flights don't collide in a way some NATs treat as garbage. `accept_from` loops on `endpoint.accept()` until the remote source matches the rendezvous-supplied peer address — that drops third-party connections that ride our open mapping.
+
+`stun::query` validates the response transaction id (`data[8..20]` ≡ request tx) so a spoofed STUN-shaped packet from another source can't bind a fake mapping.
 
 ### Adaptive compression accounting
 

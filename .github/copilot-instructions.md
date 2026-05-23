@@ -2,12 +2,15 @@
 
 ## Project Overview
 
-**P2P File Transfer** is a peer-to-peer file transfer system built in Rust. Peers connect over **QUIC** (TLS 1.3, cert-pinned) on a single UDP socket and stream files chunk-by-chunk over per-chunk unidirectional QUIC streams. Includes automatic LAN peer discovery, fault-tolerant resume, and an optional Iced GUI.
+**P2P File Transfer** is a peer-to-peer file transfer system built in Rust. Peers connect over **QUIC** (TLS 1.3 with mutual auth, both ends cert-pinned by SHA-256) on a single UDP socket and stream files chunk-by-chunk over per-chunk unidirectional QUIC streams. Includes automatic LAN peer discovery, cross-NAT pairing through a self-hosted rendezvous server (`p2p-rendezvous` crate + `rendezvousd` binary), UDP relay fallback for symmetric NATs, fault-tolerant resume, and an optional Iced GUI.
 
 ### Key Features
-- **QUIC transport** (quinn 0.11): mandatory TLS 1.3, per-stream flow control replaces a sliding window
-- **Cert-pinned identity**: per-device Ed25519 + self-signed cert, pinned by SHA-256 fingerprint
-- **Per-chunk unidirectional streams**: `[u64 LE index | u8 flags | payload]`; no per-chunk ACKs/CRC (TLS AEAD authenticates every byte)
+- **QUIC transport** (quinn 0.11): mandatory TLS 1.3, mutual client-cert authentication, per-stream flow control replaces a sliding window
+- **Cert-pinned identity**: per-device Ed25519 + self-signed cert, pinned by SHA-256 fingerprint on both sides
+- **Per-chunk unidirectional streams**: `[u64 LE index | u8 flags | payload]`; chunk indices `u64` end-to-end; no per-chunk ACKs/CRC (TLS AEAD authenticates every byte); receiver bounds-checks `chunk_index`; senders drain with `stream.stopped()`
+- **Rendezvous + hole punching**: short-code pairing through `rendezvousd`; both peers race `connect` and an address-validated `accept` (50 ms stagger by device id)
+- **Relay fallback**: optional UDP forwarder in `rendezvousd` for symmetric-NAT pairs; QUIC TLS terminates end-to-end (relay sees ciphertext only)
+- **File integrity**: per-file SHA-256 cross-checked; receiver mismatch is fatal; incoming paths sanitized
 - **Automatic resume**: chunk-level bitmap with state persistence
 - **Adaptive Zstd compression**: auto-disables on incompressible data
 - **Bandwidth throttling**: token bucket
@@ -15,7 +18,8 @@
 
 ### Project Type
 - **Primary**: Command-line tool (CLI)
-- **Future**: GUI application framework (in progress)
+- **Shipped UI**: Iced 0.12 GUI with pair-with-code support
+- **Binaries**: `p2p-transfer` (CLI + optional GUI) and `rendezvousd` (matchmaking + relay server)
 - **Language**: Rust (stable channel)
 - **Target**: Cross-platform (Windows, macOS, Linux)
 
@@ -75,7 +79,8 @@
 
 #### CLI Parameter Naming
 - Use `--verbosity` (not `--log-level`) for logging configuration
-- Global flag: `--verbosity`. Shared transfer flags (`--compress`, `--chunk-size`, `--max-speed`, ...) live in the `TransferParams` `Args` group; session-establishment flags (`--peer`, `--peer-fingerprint`, `--port`, `--discover`, `--role`) live in `SessionParams`.
+- Global flag: `--verbosity`. Shared transfer flags (`--compress`, `--compress-level`, `--adaptive`, `--chunk-size`, `--max-speed`) live in the `TransferParams` `Args` group; session-establishment flags (`--peer`, `--peer-fingerprint`, `--port`, `--discover`, `--role`, `--rendezvous`, `--code`, `--force-relay`) live in `SessionParams`.
+- There is no `--window-size` flag — QUIC stream multiplexing replaced the sliding-window protocol in the Phase 0 rewrite.
 
 #### Documentation Requirements
 - **Each module must have documentation** describing its purpose and functionality
@@ -112,29 +117,30 @@ P2PFileTransfer/
 │   │   ├── lib.rs                  # Library entry point + constants
 │   │   ├── error.rs                # Error types
 │   │   ├── identity.rs             # Ed25519 keypair + self-signed cert (persistent)
-│   │   ├── tls.rs                  # rustls configs + fingerprint-pinning verifier
+│   │   ├── tls.rs                  # rustls configs: mutual TLS + fingerprint-pinning verifier
 │   │   ├── known_peers.rs          # TOFU fingerprint trust store
 │   │   ├── protocol.rs             # Control-plane Message definitions
-│   │   ├── handshake.rs            # HELLO/CONFIG over QUIC bidi control stream
+│   │   ├── handshake.rs            # HELLO/CONFIG with cert-fingerprint cross-check
 │   │   ├── session.rs              # P2PSession (symmetric, bidirectional)
-│   │   ├── transfer_file.rs        # Single-file transfer (one uni stream per chunk)
-│   │   ├── transfer_folder.rs      # Folder transfer orchestration
+│   │   ├── transfer_file.rs        # Single-file transfer (one uni stream per chunk, u64 indices)
+│   │   ├── transfer_folder.rs      # Folder orchestration + sanitize_relative_path
 │   │   ├── compression.rs          # Adaptive Zstd compression
-│   │   ├── verification.rs         # File-level SHA256
+│   │   ├── verification.rs         # File-level SHA256 (hard receiver check)
 │   │   ├── bandwidth.rs            # Token bucket rate limiting
 │   │   ├── reconnect.rs            # Exponential-backoff retry loop
 │   │   ├── state.rs                # Chunk bitmap for resume
 │   │   ├── history.rs              # Transfer history tracking
 │   │   ├── config.rs               # Configuration types
 │   │   ├── discovery.rs            # UDP peer discovery
-│   │   ├── traversal/              # STUN + future hole-punch/rendezvous
-│   │   │   ├── mod.rs
-│   │   │   └── stun.rs             # Async STUN on a borrowed UdpSocket
+│   │   ├── traversal/
+│   │   │   ├── mod.rs              # establish_via_rendezvous orchestrator
+│   │   │   ├── stun.rs             # Async STUN with tx-id validation
+│   │   │   └── punch.rs            # race_connect_and_accept (address-validated)
 │   │   └── network/
 │   │       ├── mod.rs              # Re-exports
 │   │       ├── quic.rs             # QuicEndpoint + QuicConnection (only transport)
 │   │       ├── udp.rs              # LAN beacon socket helpers
-│   │       └── framing.rs          # MessagePack framing
+│   │       └── framing.rs          # MessagePack framing (typed Disconnected on EOF)
 │   └── Cargo.toml
 ├── p2p-cli/                        # CLI wrapper
 │   ├── src/
@@ -145,16 +151,30 @@ P2PFileTransfer/
 │   │   ├── discover.rs             # Discovery command
 │   │   ├── resume.rs               # Resume command
 │   │   ├── history.rs              # History command
-│   │   └── nat_test.rs             # NAT test command
+│   │   └── nat_test.rs             # NAT test command (STUN-only or self-loop punch)
 │   └── Cargo.toml
-├── p2p-gui/                        # GUI (future, in development)
+├── p2p-gui/                        # Iced 0.12 GUI
 │   ├── src/
-│   │   └── lib.rs                  # Iced GUI framework skeleton
+│   │   ├── lib.rs                  # public run_gui entry point
+│   │   ├── app.rs, state.rs, message.rs, operations.rs
+│   │   ├── styles.rs, utils.rs
+│   │   └── views/                  # one file per tab + console.rs
+│   └── Cargo.toml
+├── p2p-rendezvous/                 # Matchmaking + relay (with `rendezvousd` binary)
+│   ├── src/
+│   │   ├── lib.rs                  # re-exports + private framing
+│   │   ├── protocol.rs             # Wire enum + RegisterRequest
+│   │   ├── server.rs               # Concurrency-capped server + IP rewrite
+│   │   ├── relay.rs                # UDP forwarder + slot pre-binding
+│   │   ├── client.rs               # register / register_full
+│   │   └── bin/rendezvousd.rs      # the binary
 │   └── Cargo.toml
 ├── src/
-│   └── main.rs                     # Binary entry point
+│   └── main.rs                     # Binary entry point (delegates to p2p-cli or p2p-gui)
 ├── tests/
-│   └── integration_test.rs         # Integration tests
+│   ├── integration_test.rs                # QUIC handshake smoke test
+│   ├── traversal_loopback_test.rs         # Rendezvous + punch end-to-end
+│   └── relay_loopback_test.rs             # Rendezvous + relay + QUIC end-to-end
 ├── Cargo.toml                      # Workspace root
 ├── Cargo.lock                      # Locked dependencies
 ├── clippy.toml                     # Clippy configuration
@@ -219,7 +239,8 @@ P2PFileTransfer/
 **`cli.rs`** - Clap argument parsing
 - Uses derive macros for clean definitions
 - **Parameter naming**: Use `verbosity` (not `log-level`)
-- Global flag: `--verbosity`. Shared `Args` groups: `SessionParams` (`--peer`, `--peer-fingerprint`, `--port`, `--discover`, `--role`) and `TransferParams` (`--compress`, `--compress-level`, `--adaptive`, `--chunk-size`, `--max-speed`).
+- Global flag: `--verbosity`. Shared `Args` groups: `SessionParams` (`--peer`, `--peer-fingerprint`, `--port`, `--discover`, `--role`, `--rendezvous`, `--code`, `--force-relay`) and `TransferParams` (`--compress`, `--compress-level`, `--adaptive`, `--chunk-size`, `--max-speed`).
+- `nat-test` has two modes: STUN-only classification (default) and self-loop punch (`--rendezvous host:port` — spawns two local peers and races a real handshake through the rendezvous).
 
 **`send.rs`**, **`receive.rs`**, etc. - Command implementations
 - Bridge between CLI args and core library
@@ -323,11 +344,10 @@ cargo build --release
 ```bash
 cargo test --all
 ```
-**Expected**: 
-- p2p-core: 50 tests pass
-- Integration tests: 4 tests pass
-- Doc tests: 8 tests pass
-- **Total: 62 tests passed**
+**Expected**: zero failures. Exact counts shift as the suite grows;
+treat the workspace `cargo test --workspace` summary as authoritative.
+At the time of writing: p2p-core ~65 unit tests, p2p-gui 2, p2p-rendezvous 7,
+3 integration tests, 3 doc tests, all green.
 
 #### 3. **Clippy Linting**
 ```bash

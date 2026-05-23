@@ -28,6 +28,18 @@
   terminates end-to-end between the two real peers (the relay sees
   ciphertext only). `tests/relay_loopback_test.rs` proves the full
   rendezvous-→-relay-→-QUIC-handshake path on localhost.
+* **Security & robustness hardening** — **done** (2026-05-23). 16
+  code-review findings (4 Critical, 6 High, 6 Medium) landed in one
+  pass: drain QUIC streams on finish (last-chunk loss), chunk indices
+  widened to `u64`, wire-supplied `chunk_index` bounds-checked,
+  receiver SHA-256 mismatch is fatal, path-traversal sanitizer on
+  both sides, mutual TLS with fingerprint cross-check on the
+  responder, deterministic-staggered punch with address-validated
+  accept, STUN tx-id validation, rendezvous concurrency cap +
+  TCP-sourced public IP, relay slot pre-binding + larger recv buffer
+  + off-hot-path idle eviction, typed disconnect framing. Per the
+  no-compat rule, no shims — wire formats and call sites changed in
+  place.
 
 ## Active work
 

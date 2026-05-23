@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-P2P File Transfer is a Rust workspace implementing a peer-to-peer file/folder transfer tool over **QUIC** (TLS 1.3, cert-pinned), with per-chunk unidirectional streams, chunk-level resume, adaptive Zstd compression, file-level SHA256 verification, UDP LAN discovery, STUN-based NAT diagnostic, and bandwidth throttling. It ships both a CLI and an Iced-based GUI from a single binary (`p2p-transfer`).
+P2P File Transfer is a Rust workspace implementing a peer-to-peer file/folder transfer tool over **QUIC** (TLS 1.3 with **mutual auth** — both peers present certs pinned by SHA-256 fingerprint), with per-chunk unidirectional streams, chunk-level resume, adaptive Zstd compression, file-level SHA-256 verification, UDP LAN discovery, **rendezvous-mediated UDP hole punching** (`p2p-rendezvous` crate + `rendezvousd` binary), **QUIC relay fallback** for symmetric NAT, STUN-based NAT classification, and bandwidth throttling. It ships both a CLI and an Iced-based GUI from a single binary (`p2p-transfer`), with a separate `rendezvousd` binary for self-hosted matchmaking.
 
 Running `p2p-transfer` with **no subcommand** launches the GUI when the binary was built with the `gui` feature; otherwise it prints a help message and exits.
 
@@ -21,11 +21,19 @@ cargo build --release --features gui --no-default-features
 # Run
 ./target/release/p2p-transfer            # GUI if built with gui, else help
 ./target/release/p2p-transfer send <path> --peer <ip:port> --peer-fingerprint <hex>
+./target/release/p2p-transfer send <path> --rendezvous host:14570 --code ABC123
+./target/release/p2p-transfer send <path> --rendezvous host:14570 --code ABC123 --force-relay
 ./target/release/p2p-transfer receive --output ./downloads --port 14567 --auto-accept
+./target/release/p2p-transfer receive --output ./downloads --rendezvous host:14570 --code ABC123
 ./target/release/p2p-transfer discover
-./target/release/p2p-transfer resume <transfer-id> --to <ip:port> --peer-fingerprint <hex> --path <orig-path>
+./target/release/p2p-transfer resume <transfer-id> --peer <ip:port> --peer-fingerprint <hex> --path <orig-path>
 ./target/release/p2p-transfer nat-test
+./target/release/p2p-transfer nat-test --rendezvous host:14570        # self-loop punch test
 ./target/release/p2p-transfer history
+
+# Rendezvous server (separate binary from p2p-rendezvous crate)
+./target/release/rendezvousd --bind 0.0.0.0:14570
+./target/release/rendezvousd --bind 0.0.0.0:14570 --relay-bind 0.0.0.0:14571 --max-relay-mbps 50
 ```
 
 Feature flags (root `Cargo.toml`):
@@ -56,14 +64,17 @@ python3 benchmark.py --mode sender                 # localhost benchmark (auto-s
 
 ## Workspace Layout
 
-Cargo workspace with three member crates plus a thin binary:
+Cargo workspace with four member crates plus a thin binary:
 
 ```
-.                        workspace root — binary crate `p2p-transfer` (src/main.rs delegates to p2p-cli or p2p-gui)
-p2p-core/                core library: protocol, transfer engine, networking, session, identity, history
-p2p-cli/                 clap-based CLI (also launches the GUI when --features gui is enabled)
-p2p-gui/                 Iced 0.12 GUI (tabs: Connection, Send, Receive, Settings, History, Console)
-tests/integration_test.rs   workspace-level QUIC handshake smoke test
+.                                 workspace root — binary crate `p2p-transfer` (src/main.rs delegates to p2p-cli or p2p-gui)
+p2p-core/                         core library: protocol, transfer engine, transport, session, identity, traversal
+p2p-cli/                          clap-based CLI (also launches the GUI when --features gui is enabled)
+p2p-gui/                          Iced 0.12 GUI (tabs: Connection, Send, Receive, Settings, History; bottom console)
+p2p-rendezvous/                   pairing-by-code rendezvous server + relay; provides the `rendezvousd` binary
+tests/integration_test.rs         workspace-level QUIC handshake smoke test
+tests/traversal_loopback_test.rs  rendezvous + race-connect-and-accept punch
+tests/relay_loopback_test.rs      rendezvous + UDP relay + QUIC-over-relay end-to-end
 ```
 
 `src/main.rs` dispatches by feature: `cli` -> `p2p_cli::run_cli_sync()` (which itself routes the no-arg case to `p2p_gui::run_gui` when the `gui` feature is on); `gui` without `cli` -> direct `run_gui()`. **The GUI is started outside the async runtime** because Iced owns its own Tokio runtime — re-entering Tokio would panic. The CLI builds a `tokio::runtime::Runtime` and calls `block_on` for the async subcommands.
@@ -72,22 +83,33 @@ tests/integration_test.rs   workspace-level QUIC handshake smoke test
 
 ### Layered design in `p2p-core`
 
-1. **Identity & TLS** — `identity.rs` (Ed25519 keypair + self-signed cert via `rcgen`, persisted to `<config_dir>/p2p-transfer/identity.{key,cert}`), `tls.rs` (rustls 0.23 `ServerConfig`/`ClientConfig` + `FingerprintVerifier`), `known_peers.rs` (TOFU fingerprint store).
-2. **Transport** — `network/quic.rs` is the **only** transport: `QuicEndpoint` wraps `quinn::Endpoint` (one UDP socket per endpoint, acts as both client and server), `QuicConnection` holds the `quinn::Connection` + the bidi control stream. `network/framing.rs` is MessagePack length-prefixed framing with the `P2PF` magic, used over the QUIC control stream. `network/udp.rs` is the UDP LAN beacon (port 14566).
-3. **Handshake** — `handshake.rs` (`HandshakeClient`/`HandshakeServer`) over the bidi control stream: HELLO/HELLO_ACK with cert-fingerprint cross-check, then CONFIG/CONFIG_ACK. Produces `HandshakeResult { peer_device_id, peer_fingerprint, agreed_capabilities, config }`.
-4. **Session** — `session.rs` (`P2PSession`). **After the handshake the connection is fully symmetric and bidirectional.** The `ConnectionRole` (`Initiator`/`Responder`) is retained only for `reconnect` (only the initiator knows where to reconnect to). Either side may call `send_path()` or `receive_to()` repeatedly on the same connection.
-5. **Transfer engine** — `transfer_file.rs` (`FileTransferSession`, single file — opens one unidirectional QUIC stream per chunk with `[u64 LE index | u8 flags | payload]`) and `transfer_folder.rs` (`FolderTransferSession`, walks a directory tree and runs one `FileTransferSession` per file, aggregating `TransferStats`).
-6. **Cross-cutting**: `compression.rs` (adaptive Zstd — samples first 3 chunks, disables if ratio < 1.05x), `verification.rs` (file-level SHA256 only — per-chunk CRC is gone, TLS AEAD authenticates every byte), `bandwidth.rs` (token bucket, parses `K`/`M`/`G` suffixes), `reconnect.rs` (exponential backoff retry loop), `state.rs` (chunk bitmap persisted as `transfer_<uuid>.json` for resume), `history.rs` (transfer log in a user data dir), `discovery.rs` + UDP beacons on port `14566`, `traversal/stun.rs` (async STUN on a borrowed `tokio::net::UdpSocket` — same socket type quinn owns), `progress.rs` (shared `ProgressState`).
+1. **Identity & TLS** — `identity.rs` (Ed25519 keypair + self-signed cert via `rcgen`, persisted to `<config_dir>/p2p-transfer/identity.{key,cert}`). `tls.rs` builds rustls 0.23 configs for **mutual TLS**: server uses `with_client_cert_verifier(AcceptAnyClientCert)` so the client cert is required but its identity is checked at the handshake layer; client uses `with_client_auth_cert(...)` to present its own cert and `FingerprintVerifier` to pin the server cert. `known_peers.rs` is the TOFU fingerprint store.
+2. **Transport** — `network/quic.rs` is the **only** transport: `QuicEndpoint` wraps `quinn::Endpoint` (one UDP socket per endpoint, acts as both client and server), `QuicConnection` holds the `quinn::Connection` + the bidi control stream and exposes `peer_fingerprint()` (now `Some` on **both** sides thanks to mTLS). `network/framing.rs` is MessagePack length-prefixed framing with the `P2PF` magic; clean EOF on the first read maps to `Error::Disconnected`, truncation inside a frame to `Error::Protocol`. `network/udp.rs` is the UDP LAN beacon (port 14566).
+3. **Handshake** — `handshake.rs` (`HandshakeClient`/`HandshakeServer`) over the bidi control stream: HELLO/HELLO_ACK with cert-fingerprint cross-check (mismatch *or* missing observation = fatal `Error::FingerprintMismatch`), then CONFIG/CONFIG_ACK. Produces `HandshakeResult { peer_device_id, peer_fingerprint, agreed_capabilities, config }`.
+4. **Session** — `session.rs` (`P2PSession`). **After the handshake the connection is fully symmetric and bidirectional.** The `ConnectionRole` (`Initiator`/`Responder`) is retained only for `reconnect` (only the initiator knows where to reconnect to). Either side may call `send_path()` or `receive_to()` repeatedly on the same connection. `P2PSession::from_rendezvous` is the cross-NAT entry point.
+5. **Transfer engine** — `transfer_file.rs` (`FileTransferSession`, single file — opens one unidirectional QUIC stream per chunk with `[u64 LE index | u8 flags | payload]`; `send_chunk_stream` awaits `stream.stopped()` so the last chunk isn't lost on close; the receiver bounds-checks `chunk_index < total_chunks`) and `transfer_folder.rs` (`FolderTransferSession`, walks a directory tree, runs one `FileTransferSession` per file, aggregates `TransferStats`, and routes every wire-supplied path through `sanitize_relative_path` — rejects absolute paths, `..`, `.`, drive/root components).
+6. **NAT traversal** — `traversal/stun.rs` (async STUN on a borrowed `tokio::net::UdpSocket`, validates response transaction id matches the request), `traversal/punch.rs` (`race_connect_and_accept`: runs `connect` and an address-validating `accept_from` in parallel; the larger-device-id peer staggers its `connect` by 50 ms to avoid Initial-packet collisions), `traversal/mod.rs` orchestrator (`establish_via_rendezvous`: bind socket → STUN classify → register → punch or join relay).
+7. **Cross-cutting**: `compression.rs` (adaptive Zstd — samples first 3 chunks, disables if ratio < 1.05x), `verification.rs` (file-level SHA-256 — sender checks pre-send, receiver mismatch is a hard `Error::Verification`), `bandwidth.rs` (token bucket, parses `K`/`M`/`G` suffixes), `reconnect.rs` (exponential backoff retry loop), `state.rs` (chunk bitmap persisted as `transfer_<uuid>.json` for resume), `history.rs` (transfer log in a user data dir), `discovery.rs` + UDP beacons on port `14566`, `progress.rs` (shared `ProgressState`).
 
-Default ports and constants live in `p2p-core/src/lib.rs`: `DEFAULT_DISCOVERY_PORT = 14566`, `DEFAULT_TRANSFER_PORT = 14567`, `DEFAULT_RENDEZVOUS_PORT = 14570`, `DEFAULT_CHUNK_SIZE = 65536`, `PROTOCOL_VERSION = 2`, `PROTOCOL_MAGIC = b"P2PF"`, `ALPN_PROTOCOL = b"p2pf/2"`.
+Default ports and constants live in `p2p-core/src/lib.rs`: `DEFAULT_DISCOVERY_PORT = 14566`, `DEFAULT_TRANSFER_PORT = 14567`, `DEFAULT_RENDEZVOUS_PORT = 14570`, `DEFAULT_CHUNK_SIZE = 65536`, `PROTOCOL_VERSION = 2`, `PROTOCOL_MAGIC = b"P2PF"`, `ALPN_PROTOCOL = b"p2pf/2"`. Chunk indices on the wire and in memory are `u64` end-to-end — there is no `u32` narrowing anywhere on the chunk path, so files larger than `2^32` chunks transfer correctly.
+
+### `p2p-rendezvous` crate
+
+Standalone matchmaking + relay. See `p2p-rendezvous/AGENTS.md` for the crate-specific notes. Quick summary:
+- `server.rs` — TCP listener, MessagePack frames, pairs peers by short code. **Concurrency cap** via `tokio::sync::Semaphore` (`Server::bind_with`, default 1024) applies backpressure on the listener. Each registration's IP is rewritten to the TCP peer's IP (the user-supplied UDP port is kept) so a peer can't aim the punch at a third-party victim.
+- `relay.rs` — UDP packet forwarder. Slot binding is fingerprint-keyed lookup; `reserve_session` refuses identical fingerprints on both slots. Idle eviction runs in a 30 s background task (off the per-packet hot path). Recv buffer up to 65 KiB; warns on full-buffer reads.
+- `protocol.rs` — `Message::{Register, Match, RelayMatch, Expired, Rejected}`, `RegisterRequest` with `want_relay` bit.
+- `bin/rendezvousd.rs` — the `rendezvousd` binary.
 
 ### CLI structure (`p2p-cli`)
 
 Subcommands live in their own files (`send.rs`, `receive.rs`, `discover.rs`, `nat_test.rs`, `resume.rs`, `history.rs`). `cli.rs` factors **two shared `Args` groups** that are `#[command(flatten)]`d into multiple subcommands:
-- `SessionParams` — `--role`, `--peer`, `--peer-fingerprint`, `--port`, `--discover` (governs how the QUIC session is established; `--peer-fingerprint` is required for `--peer` mode and pulled from the beacon for `--discover`)
-- `TransferParams` — `--compress`, `--compress-level`, `--adaptive`, `--chunk-size`, `--max-speed`
+- `SessionParams` — `--role`, `--peer`, `--peer-fingerprint`, `--port`, `--discover`, `--rendezvous <host:port>`, `--code <ABC123>`, `--force-relay`. When `--rendezvous` is set, `--peer` and `--discover` are ignored and pairing goes through the rendezvous server.
+- `TransferParams` — `--compress`, `--compress-level`, `--adaptive`, `--chunk-size`, `--max-speed`.
 
 When adding a new transfer-related flag, add it to `TransferParams` so every command picks it up consistently; don't duplicate it per subcommand. `--verbosity` is a global flag and the canonical name — do **not** rename it to `--log-level`.
+
+`nat-test` has two modes: STUN-only classification (default — reports `Cone` vs `Symmetric`), and self-loop punch (`--rendezvous host:port` — spawns two local peers, registers both with a fresh code, races a real QUIC handshake, reports `direct` / `relay` / `failed` with latency).
 
 `run_cli_sync` intercepts the `None`/`Gui` command **before** entering the async runtime (Iced runs blocking with its own runtime).
 
@@ -97,11 +119,11 @@ Standard Iced 0.12 Elm-architecture split:
 - `app.rs` — `Application` impl, tabs row + active view + console at bottom
 - `state.rs` — `AppState`, per-tab state structs, `Tab` enum, `ConsoleIcon`
 - `message.rs` — all `Message` variants
-- `operations.rs` — `handle_message(state, msg) -> Command<Message>`; this is where async operations are spawned (file dialogs via `rfd`, transfer sessions wrapped in `Arc<Mutex<P2PSession>>`)
+- `operations.rs` — `handle_message(state, msg) -> Command<Message>`; this is where async operations are spawned (file dialogs via `rfd`, transfer sessions wrapped in `Arc<tokio::Mutex<P2PSession>>`)
 - `views/` — one file per tab plus `console.rs`
 - `styles.rs`, `utils.rs` — theme and formatting helpers
 
-The GUI holds the active `P2PSession` in shared state so transfer tabs can drive sends/receives against the same connection.
+The GUI holds the active `P2PSession` in shared state so transfer tabs can drive sends/receives against the same connection. The Connection tab has three modes — `Listen`, `Connect` (with `--peer-fingerprint`), and **`Pair with code (cross-NAT)`** (rendezvous + shared code with a Generate button). Session establishment runs **inside `Command::perform`** (off the iced thread) and only the resulting `P2PSession` is wrapped in `Arc<tokio::Mutex<...>>` via `ConnectionEstablishedWithSession` — so the UI stays responsive during multi-second rendezvous waits.
 
 ## Conventions
 
@@ -116,7 +138,12 @@ The GUI holds the active `P2PSession` in shared state so transfer tabs can drive
 
 - **Don't nest Tokio runtimes.** Anything that calls `Iced::run` must be reached *outside* `block_on`; that's why `run_cli_sync` returns early for the GUI cases.
 - **The QUIC bidi control stream only materialises on the responder once the initiator writes to it.** Real handshake code does this immediately; tests that don't exchange messages must either send a marker first or use the same `oneshot` "hold the connection" pattern the existing tests use.
-- **Adaptive compression accounting**: track uncompressed size from `chunk_data.len()` *before* compression, not from the compressed payload, otherwise stats and SHA256 boundaries break.
-- **Resume state files** are written as `transfer_<uuid>.json` in the working directory at the time of the transfer. Resume requires the original `--path`, `--to`, and `--peer-fingerprint` because the file doesn't store any of them.
+- **Adaptive compression accounting**: track uncompressed size from `chunk_data.len()` *before* compression, not from the compressed payload, otherwise stats and SHA-256 boundaries break.
+- **Resume state files** are written as `transfer_<uuid>.json` in the working directory at the time of the transfer. Resume requires the original `--path`, `--peer`, and `--peer-fingerprint` because the file doesn't store any of them.
 - **Receiver event loop**: the receiver stays alive after a transfer finishes and accepts further transfers on the same connection until the peer disconnects — don't add logic that exits after the first transfer.
-- **Both peers behind NAT** is not yet automated. `nat-test` reports the public endpoint and classifies the NAT (Cone vs Symmetric) via STUN; rendezvous-mediated hole punching is on the roadmap (see `TODO.md`).
+- **Chunk indices are `u64` end-to-end**. `ChunkReader::total_chunks`, `read_chunk`, `fold_chunk`, `ChunkWriter::write_chunk` and the wire format all use `u64`. Do not narrow back to `u32` anywhere on the chunk path — that's what previously truncated large files at `2^32` chunks.
+- **Sanitize before joining paths.** Anything written under the output directory goes through `transfer_folder::sanitize_relative_path` first — adding a new write site means routing it through the same sanitizer.
+- **Mutual TLS, no compat shim.** Both sides present certs now; `cross_check_fingerprint` rejects a `None` observation, so any new transport layer that bypasses the standard `tls::server_config` / `client_config_pinning` builders has to keep client-cert presentation intact.
+- **Source-address validation on accept.** `traversal::punch::accept_from` drops connections whose remote address doesn't match the rendezvous-supplied peer. If you add a new entry point that does its own `endpoint.accept()` outside a controlled test, wrap it the same way.
+- **`PUBLIC_ENDPOINT` is server-rewritten.** A peer's `RegisterRequest.public_endpoint` IP is *replaced* by the TCP source IP at the rendezvous. The port is kept (because the UDP punch socket is a different transport from the TCP control channel) but the IP is forgeable for traffic reflection and the TCP source is the source of truth.
+- **No backwards compatibility.** Per the project's "no compat on redesigns" rule, wire formats and call sites change in place; do not add shims or deprecated paths for the QUIC/rendezvous/relay flows.
