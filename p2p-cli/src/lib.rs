@@ -87,7 +87,11 @@ pub fn run_cli_sync() -> Result<()> {
 
     #[cfg(not(feature = "gui"))]
     {
-        if cli.command.is_none() {
+        // Both the no-command launcher and the explicit `gui` subcommand
+        // map to the GUI in a full build; without the gui feature both
+        // need to exit cleanly with the same hint, not fall through to
+        // the async dispatcher's unreachable arm.
+        if matches!(cli.command, None | Some(cli::Commands::Gui)) {
             eprintln!("GUI not available. This binary was built without GUI support.");
             eprintln!("To use GUI, rebuild with: cargo build --release --features full");
             eprintln!("\nAvailable CLI commands:");
