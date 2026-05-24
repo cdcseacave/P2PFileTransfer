@@ -18,6 +18,7 @@ pub async fn handle_resume(
     to: String,
     peer_fingerprint_hex: String,
     path: PathBuf,
+    state_dir: Option<PathBuf>,
     max_reconnect_attempts: u32,
     identity_dir: Option<PathBuf>,
 ) -> Result<()> {
@@ -30,10 +31,10 @@ pub async fn handle_resume(
         anyhow::bail!("Path does not exist: {}", path.display());
     }
 
-    let state_path = PathBuf::from(format!("transfer_{}.json", transfer_id));
+    let state_path = crate::util::resolve_state_file(state_dir.as_deref(), &transfer_id)?;
     if !state_path.exists() {
         anyhow::bail!(
-            "State file not found: {}. Transfer may have already completed.",
+            "State file not found: {}. (If the original `send` ran with --state-dir, pass the same value here.)",
             state_path.display()
         );
     }
@@ -94,13 +95,22 @@ pub async fn handle_resume(
             info!("Transfer resumed and completed!");
         }
         _ = signal::ctrl_c() => {
-            warn!("Transfer interrupted again. State has been saved.");
+            // The on-disk state is up to date as of the last completed
+            // file (sender persists per-file via the FolderTransferSession
+            // state callback wired in send_path's error path). Chunks
+            // completed mid-file since the last file boundary will be
+            // re-sent on the next resume.
+            warn!("Transfer interrupted. State persisted up to the most recent file boundary.");
             info!(
-                "Use 'p2p-transfer resume {} --to {} --peer-fingerprint {} --path {}' to continue",
+                "Use 'p2p-transfer resume {} --to {} --peer-fingerprint {} --path {}{}' to continue",
                 transfer_id,
                 to,
                 peer_fingerprint_hex,
                 path.display(),
+                state_dir
+                    .as_deref()
+                    .map(|d| format!(" --state-dir {}", d.display()))
+                    .unwrap_or_default(),
             );
             return Ok(());
         }
@@ -121,12 +131,55 @@ mod tests {
             "127.0.0.1:1".into(),
             "0".repeat(64),
             PathBuf::from("definitely/does/not/exist"),
+            None,
             1,
             None,
         )
         .await;
         let err = result.expect_err("nonexistent path must error").to_string();
         assert!(err.contains("does not exist"), "got: {err}");
+    }
+
+    /// Finding 3.4: when --state-dir is supplied, handle_resume reads
+    /// the state file from there rather than the current working
+    /// directory. Without the flag, users who `cd`-ed between failure
+    /// and resume saw "State file not found" with no recovery hint.
+    #[tokio::test]
+    async fn finds_state_file_via_state_dir_flag_from_unrelated_cwd() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path().join("state");
+        let file_path = tmp.path().join("payload.bin");
+        tokio::fs::write(&file_path, b"hi").await.unwrap();
+
+        // The state file just needs to exist for handle_resume to get
+        // past the early "State file not found" bail; it will then fail
+        // later trying to deserialise — but that's after we've proven
+        // the path resolution honours --state-dir.
+        let tid = Uuid::new_v4().to_string();
+        tokio::fs::create_dir_all(&state_dir).await.unwrap();
+        tokio::fs::write(
+            state_dir.join(format!("transfer_{tid}.json")),
+            b"{}", // empty JSON object — will fail to deserialise later
+        )
+        .await
+        .unwrap();
+
+        let result = handle_resume(
+            tid,
+            "127.0.0.1:1".into(),
+            "0".repeat(64),
+            file_path,
+            Some(state_dir.clone()),
+            1,
+            None,
+        )
+        .await;
+
+        let err = result.expect_err("should fail later for unrelated reasons").to_string();
+        assert!(
+            !err.contains("State file not found"),
+            "--state-dir must let resume locate the file; got: {err}"
+        );
     }
 
     #[tokio::test]
@@ -141,6 +194,7 @@ mod tests {
             "127.0.0.1:1".into(),
             "0".repeat(64),
             file_path,
+            None,
             1,
             None,
         )

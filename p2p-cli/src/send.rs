@@ -16,9 +16,11 @@ use p2p_core::{
 };
 
 use crate::cli::{SessionParams, TransferParams};
+use crate::util::{derive_base_name, resolve_state_file};
 
 pub async fn handle_send(
     path: PathBuf,
+    state_dir: Option<PathBuf>,
     session_params: SessionParams,
     transfer_params: TransferParams,
     identity_dir: Option<PathBuf>,
@@ -90,7 +92,7 @@ pub async fn handle_send(
     let peer_addr = session.peer_addr().to_string();
 
     tokio::select! {
-        result = send(&mut session, &path, transfer_params.max_reconnect_attempts, &peer_addr) => result,
+        result = send(&mut session, &path, state_dir.as_deref(), transfer_params.max_reconnect_attempts, &peer_addr) => result,
         _ = signal::ctrl_c() => Err(anyhow::anyhow!("Transfer interrupted by user (Ctrl+C)")),
     }
 }
@@ -98,10 +100,11 @@ pub async fn handle_send(
 async fn send(
     session: &mut P2PSession,
     path: &Path,
+    state_dir: Option<&Path>,
     max_reconnect_attempts: u32,
     peer_addr: &str,
 ) -> Result<()> {
-    let base_name = path.file_name().unwrap().to_string_lossy().to_string();
+    let base_name = derive_base_name(path)?;
     if path.is_file() {
         info!("Sending file: {}", base_name);
     } else {
@@ -109,7 +112,7 @@ async fn send(
     }
 
     let transfer_id = Uuid::new_v4();
-    let state_file = PathBuf::from(format!("transfer_{}.json", transfer_id));
+    let state_file = resolve_state_file(state_dir, &transfer_id.to_string())?;
     let mut progress = p2p_core::progress::ProgressState::new(0);
     let reconnect_config = p2p_core::reconnect::ReconnectConfig {
         max_attempts: max_reconnect_attempts,

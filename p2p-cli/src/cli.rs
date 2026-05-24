@@ -154,6 +154,13 @@ pub enum Commands {
         /// File or folder to send
         path: PathBuf,
 
+        /// Directory to write the resume state file into. Defaults to the
+        /// current working directory. Pass an absolute path here so
+        /// `p2p-transfer resume <id> --state-dir <same>` works regardless
+        /// of where the user runs the resume command from.
+        #[arg(long)]
+        state_dir: Option<PathBuf>,
+
         #[command(flatten)]
         session: SessionParams,
 
@@ -222,6 +229,12 @@ pub enum Commands {
         /// Original file or folder path to resume from
         #[arg(long)]
         path: PathBuf,
+
+        /// Directory the resume state file lives in. Must match whatever
+        /// `--state-dir` the original `send` used; defaults to the current
+        /// working directory.
+        #[arg(long)]
+        state_dir: Option<PathBuf>,
 
         /// Max reconnect attempts after a connection drop (0 = retry forever)
         #[arg(long, default_value = "5")]

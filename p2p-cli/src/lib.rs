@@ -15,6 +15,7 @@ mod receive;
 mod rendezvous;
 mod resume;
 mod send;
+mod util;
 
 use anyhow::Result;
 use clap::Parser;
@@ -126,10 +127,11 @@ async fn run_cli_async(cli: Cli) -> Result<()> {
         }
         Some(cli::Commands::Send {
             path,
+            state_dir,
             session,
             transfer,
         }) => {
-            send::handle_send(path, session, transfer, identity_dir).await?;
+            send::handle_send(path, state_dir, session, transfer, identity_dir).await?;
         }
         Some(cli::Commands::Receive {
             output,
@@ -152,6 +154,7 @@ async fn run_cli_async(cli: Cli) -> Result<()> {
             to,
             peer_fingerprint,
             path,
+            state_dir,
             max_reconnect_attempts,
         }) => {
             resume::handle_resume(
@@ -159,6 +162,7 @@ async fn run_cli_async(cli: Cli) -> Result<()> {
                 to,
                 peer_fingerprint,
                 path,
+                state_dir,
                 max_reconnect_attempts,
                 identity_dir,
             )
