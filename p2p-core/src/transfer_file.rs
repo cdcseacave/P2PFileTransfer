@@ -167,20 +167,23 @@ impl<'a> FileTransferSession<'a> {
         Ok(checksum)
     }
 
-    /// Receive a file from the peer. `total_chunks` comes from the
-    /// preceding `TransferInfo` message; we read exactly that many uni
-    /// streams. After all chunks land, re-read the file from disk to
+    /// Receive a file from the peer. `total_chunks` is the file's total
+    /// chunk count (used only as a bounds check on incoming `chunk_index`
+    /// values); `streams_to_receive` is the number of unidirectional
+    /// streams the sender will actually open — `total_chunks - already_sent`
+    /// on a resume. After all chunks land, re-read the file from disk to
     /// compute its SHA-256.
     pub async fn receive_file(
         &mut self,
         output_path: &Path,
         total_chunks: u64,
+        streams_to_receive: u64,
         mut chunk_complete_callback: Option<impl FnMut(u64)>,
         mut progress: Option<&mut ProgressState>,
     ) -> Result<[u8; 32]> {
         debug!(
-            "Starting file receive: {:?} ({} chunks expected)",
-            output_path, total_chunks
+            "Starting file receive: {:?} ({} chunks total, {} streams expected)",
+            output_path, total_chunks, streams_to_receive
         );
 
         let mut writer = ChunkWriter::new(output_path, self.config.chunk_size as usize).await?;
@@ -191,7 +194,7 @@ impl<'a> FileTransferSession<'a> {
         };
 
         let mut received: u64 = 0;
-        while received < total_chunks {
+        while received < streams_to_receive {
             let mut stream = self.connection.accept_uni().await?;
             let raw = stream
                 .read_to_end(MAX_CHUNK_STREAM_BYTES)
@@ -239,7 +242,7 @@ impl<'a> FileTransferSession<'a> {
                 "Received chunk {} ({}/{})",
                 chunk_index,
                 received,
-                total_chunks
+                streams_to_receive
             );
         }
 
@@ -430,7 +433,95 @@ impl ChunkWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::identity::Identity;
+    use crate::network::quic::QuicEndpoint;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::sync::Arc;
+    use std::time::Duration;
     use tempfile::tempdir;
+
+    /// Single-file resume must not deadlock when the sender skips
+    /// already-completed chunks: the receiver has to know to expect fewer
+    /// streams than `total_chunks`.
+    #[tokio::test]
+    async fn resume_with_skipped_chunks_does_not_deadlock() {
+        let chunk_size = 64usize;
+        let total_chunks = 4u64;
+        let completed = vec![0u64, 1];
+        let file_bytes: Vec<u8> = (0..(chunk_size as u64 * total_chunks) as usize)
+            .map(|i| (i % 251) as u8)
+            .collect();
+
+        let dir = tempdir().unwrap();
+        let src = dir.path().join("src.bin");
+        let dst = dir.path().join("dst.bin");
+        tokio::fs::write(&src, &file_bytes).await.unwrap();
+        // Pre-populate the receiver's .partial with the chunks the sender will skip,
+        // so the final SHA-256 verification matches.
+        let mut partial_bytes = vec![0u8; file_bytes.len()];
+        for &idx in &completed {
+            let off = idx as usize * chunk_size;
+            partial_bytes[off..off + chunk_size]
+                .copy_from_slice(&file_bytes[off..off + chunk_size]);
+        }
+        let partial_path = {
+            let mut p = dst.clone().into_os_string();
+            p.push(".partial");
+            std::path::PathBuf::from(p)
+        };
+        tokio::fs::write(&partial_path, &partial_bytes).await.unwrap();
+
+        let server_id = Arc::new(Identity::generate().unwrap());
+        let server_fp = server_id.fingerprint();
+        let server_ep = QuicEndpoint::bind(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            server_id.clone(),
+        )
+        .unwrap();
+        let server_addr = server_ep.local_addr().unwrap();
+
+        let cfg = ConfigMessage {
+            compression_enabled: false,
+            compression_level: 3,
+            adaptive_compression: false,
+            chunk_size: chunk_size as u32,
+            bandwidth_limit: 0,
+        };
+
+        let dst_recv = dst.clone();
+        let cfg_recv = cfg.clone();
+        let streams_to_receive = total_chunks - completed.len() as u64;
+        let recv_task = tokio::spawn(async move {
+            let mut conn = server_ep.accept().await.unwrap();
+            let _ = conn.recv_message().await.unwrap(); // drive accept_bi
+            let mut session =
+                FileTransferSession::new(&mut conn, cfg_recv, Uuid::new_v4(), 0);
+            session
+                .receive_file(&dst_recv, total_chunks, streams_to_receive, None::<fn(u64)>, None)
+                .await
+        });
+
+        let client_id = Arc::new(Identity::generate().unwrap());
+        let client_ep = QuicEndpoint::bind(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            client_id,
+        )
+        .unwrap();
+        let mut conn = client_ep.connect(server_addr, server_fp).await.unwrap();
+        conn.send_message(&crate::protocol::Message::Ping).await.unwrap();
+        let mut session = FileTransferSession::new(&mut conn, cfg, Uuid::new_v4(), 0);
+        let send_fut = session.send_file(&src, &completed, None::<fn(u64)>, None);
+
+        let recv_result = tokio::time::timeout(Duration::from_secs(5), async {
+            let send_checksum = send_fut.await.unwrap();
+            let recv_checksum = recv_task.await.unwrap().unwrap();
+            assert_eq!(send_checksum, recv_checksum, "checksums must match");
+            recv_checksum
+        })
+        .await;
+
+        recv_result.expect("resume must finish within 5 s — receiver expected too many streams");
+    }
 
     #[tokio::test]
     async fn chunk_reader_reads_and_hashes() {

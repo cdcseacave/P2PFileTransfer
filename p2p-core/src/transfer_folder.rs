@@ -441,13 +441,21 @@ impl<'a> FolderTransferSession<'a> {
                 fs::create_dir_all(parent).await?;
             }
 
-            let expected_chunks = (file_meta.size + self.config.chunk_size as u64 - 1)
+            let total_chunks = (file_meta.size + self.config.chunk_size as u64 - 1)
                 / self.config.chunk_size as u64;
+            let already_sent = transfer_info
+                .resume_from
+                .as_ref()
+                .filter(|rp| rp.file_index as usize == file_index)
+                .map(|rp| rp.completed_chunks.len() as u64)
+                .unwrap_or(0);
+            let streams_to_receive = total_chunks.saturating_sub(already_sent);
 
             self.receive_single_file(
                 &full_path,
                 file_index as u32,
-                expected_chunks,
+                total_chunks,
+                streams_to_receive,
                 progress.as_deref_mut(),
             )
             .await?;
@@ -531,7 +539,8 @@ impl<'a> FolderTransferSession<'a> {
         &mut self,
         path: &Path,
         file_index: u32,
-        expected_chunks: u64,
+        total_chunks: u64,
+        streams_to_receive: u64,
         progress: Option<&mut ProgressState>,
     ) -> Result<()> {
         let mut file_session = FileTransferSession::new(
@@ -542,7 +551,7 @@ impl<'a> FolderTransferSession<'a> {
         );
 
         let receiver_checksum = file_session
-            .receive_file(path, expected_chunks, None::<fn(u64)>, progress)
+            .receive_file(path, total_chunks, streams_to_receive, None::<fn(u64)>, progress)
             .await?;
 
         let our_msg = FileChecksumMessage {
