@@ -20,7 +20,9 @@ use crate::identity::{Fingerprint, Identity};
 use crate::network::quic::{QuicConnection, QuicEndpoint};
 use crate::progress::ProgressState;
 use crate::protocol::{Capabilities, ConfigMessage};
-use crate::transfer_folder::{FolderTransferSession, FolderTransferState};
+use crate::transfer_folder::{
+    AcceptDecision, FolderTransferSession, FolderTransferState, TransferSummary,
+};
 use crate::traversal::{establish_via_rendezvous, RendezvousParams, DEFAULT_STUN_SERVERS};
 
 /// An established connection plus the parameters needed to resurrect it.
@@ -313,7 +315,7 @@ impl P2PSession {
         reconnect_config: &crate::reconnect::ReconnectConfig,
         state_path: Option<&Path>,
         mut progress: Option<&mut ProgressState>,
-    ) -> Result<()> {
+    ) -> Result<TransferSummary> {
         if !path.exists() {
             return Err(Error::Protocol(format!(
                 "Path does not exist: {}",
@@ -380,7 +382,12 @@ impl P2PSession {
                             let _ = tokio::fs::remove_file(state_file).await;
                         }
                     }
-                    return Ok(());
+                    let summary = TransferSummary {
+                        root_name: state.folder_name.clone(),
+                        files: state.files.iter().map(|f| f.path.clone()).collect(),
+                        bytes: state.total_bytes,
+                    };
+                    return Ok(summary);
                 }
                 Err(e) => {
                     if !e.is_recoverable() {
@@ -434,13 +441,18 @@ impl P2PSession {
         }
     }
 
-    /// Receive a file or folder from the peer.
+    /// Receive a file or folder from the peer. `accept_decision` is
+    /// consulted after TransferInfo arrives and before any data flows —
+    /// the CLI uses this to honour `--auto-accept` and/or prompt the
+    /// user. Returns a `TransferSummary` describing what landed on disk
+    /// so callers can record an accurate history entry (findings 2.1, 2.3).
     pub async fn receive_to(
         &mut self,
         output_dir: &Path,
         state_path: Option<&Path>,
+        accept_decision: impl FnOnce(&crate::protocol::TransferInfo) -> AcceptDecision,
         progress: Option<&mut ProgressState>,
-    ) -> Result<()> {
+    ) -> Result<TransferSummary> {
         tokio::fs::create_dir_all(output_dir).await?;
 
         let transfer_id = Uuid::new_v4();
@@ -451,41 +463,36 @@ impl P2PSession {
         );
 
         session
-            .receive_folder(output_dir, state_path, progress)
+            .receive_folder(output_dir, state_path, accept_decision, progress)
             .await
     }
 
-    /// Auto-receive loop: handle incoming transfers until the connection closes.
-    pub async fn run_event_loop(
-        &mut self,
-        output_dir: &Path,
-        auto_accept: bool,
-        show_progress: bool,
-    ) -> Result<()> {
-        debug!(
-            "Starting session event loop (auto_accept={}, show_progress={})",
-            auto_accept, show_progress
-        );
-        loop {
-            let mut progress = if show_progress {
-                Some(ProgressState::new(0))
-            } else {
-                None
-            };
-
-            match self.receive_to(output_dir, None, progress.as_mut()).await {
-                Ok(_) => {
-                    debug!("Transfer completed, awaiting next");
-                }
-                Err(e) => {
-                    if matches!(&e, Error::Disconnected | Error::Quic(_) | Error::Network(_)) {
-                        debug!("Connection closed, ending event loop");
-                        return Ok(());
-                    }
-                    return Err(e);
-                }
-            }
+    /// Re-accept on the existing endpoint and re-perform the handshake.
+    /// Used by the receive CLI to keep listening after a peer disconnects
+    /// without re-binding (so the user's --port stays stable) (finding 2.4).
+    pub async fn reaccept(&mut self) -> Result<()> {
+        if self.role != ConnectionRole::Responder {
+            return Err(Error::Protocol(
+                "reaccept() is only valid for responder sessions".into(),
+            ));
         }
+        info!(
+            "Re-listening for next peer on {}",
+            self.endpoint.local_addr()?
+        );
+        let mut new_connection = self.endpoint.accept().await?;
+        let handshake_server =
+            HandshakeServer::new(self.device_id, self.handshake.agreed_capabilities, &self.identity);
+        let handshake = handshake_server
+            .perform_handshake(&mut new_connection)
+            .await?;
+        self.connection = new_connection;
+        self.handshake = handshake;
+        debug!(
+            "Re-established session with new peer ({})",
+            self.handshake.peer_device_id
+        );
+        Ok(())
     }
 
     // ------------------------------------------------------------------

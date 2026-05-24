@@ -128,11 +128,20 @@ async fn send(
         .await;
 
     match result {
-        Ok(_) => {
+        Ok(summary) => {
             if state_file.exists() {
                 let _ = tokio::fs::remove_file(&state_file).await;
             }
-            record.complete(vec![base_name], progress.transferred_bytes());
+            // Prefer the per-file list from the summary so folder
+            // transfers record every file rather than just the folder
+            // name (finding 3.2). Fall back to base_name when the summary
+            // is empty (e.g. a single-file transfer with no inner list).
+            let files = if summary.files.is_empty() {
+                vec![base_name]
+            } else {
+                summary.files
+            };
+            record.complete(files, progress.transferred_bytes());
             if let Err(e) = record_transfer(record, None).await {
                 warn!("Failed to record transfer history: {}", e);
             }

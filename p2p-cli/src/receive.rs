@@ -1,5 +1,6 @@
 //! Receive operations.
 
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -11,8 +12,9 @@ use p2p_core::{
     history::{record_transfer, TransferDirection, TransferRecord},
     identity::Identity,
     progress::ProgressState,
-    protocol::{Capabilities, ConfigMessage},
+    protocol::{Capabilities, ConfigMessage, TransferInfo},
     session::P2PSession,
+    transfer_folder::AcceptDecision,
     Uuid,
 };
 
@@ -32,6 +34,8 @@ pub async fn handle_receive(
 
     if auto_accept {
         info!("  Mode: Auto-accept (no prompts)");
+    } else {
+        info!("  Mode: Interactive (prompt y/N per transfer)");
     }
 
     std::fs::create_dir_all(&output)?;
@@ -76,8 +80,7 @@ pub async fn handle_receive(
     info!("    Compression: {}", session.config().compression_enabled);
 
     info!("Session ready - waiting for incoming transfers... (Ctrl+C to exit)");
-    let _ = auto_accept;
-    let peer_addr = session.peer_addr().to_string();
+    let mut peer_addr = session.peer_addr().to_string();
     loop {
         let mut progress = ProgressState::new(0);
         let mut record = TransferRecord::new(
@@ -86,18 +89,37 @@ pub async fn handle_receive(
             peer_addr.clone(),
         );
 
-        match session.receive_to(&output, None, Some(&mut progress)).await {
-            Ok(_) => {
-                record.complete(
-                    vec![output.display().to_string()],
-                    progress.transferred_bytes(),
-                );
+        let accept_cb = |info: &TransferInfo| accept_or_prompt(auto_accept, info);
+        match session
+            .receive_to(&output, None, accept_cb, Some(&mut progress))
+            .await
+        {
+            Ok(summary) => {
+                if summary.files.is_empty() {
+                    info!("Transfer rejected; awaiting next");
+                    record.interrupt(vec![], 0);
+                } else {
+                    record.complete(summary.files, summary.bytes);
+                }
                 if let Err(e) = record_transfer(record, None).await {
                     warn!("Failed to record transfer history: {}", e);
                 }
             }
-            Err(e) if matches!(&e, Error::Disconnected | Error::Quic(_) | Error::Network(_)) => {
-                break;
+            // Only treat true peer disconnects as a graceful end-of-stream;
+            // disk I/O failures (which surface as Error::Network) propagate
+            // and get recorded as failed (finding 2.2).
+            Err(e) if matches!(&e, Error::Disconnected | Error::Quic(_)) => {
+                info!("Peer disconnected; awaiting next inbound session");
+                match session.reaccept().await {
+                    Ok(()) => {
+                        peer_addr = session.peer_addr().to_string();
+                        info!("New peer connected: {}", session.peer_device_id());
+                    }
+                    Err(reaccept_err) => {
+                        warn!("Failed to re-accept: {}", reaccept_err);
+                        return Err(reaccept_err.into());
+                    }
+                }
             }
             Err(e) => {
                 record.fail(e.to_string());
@@ -106,7 +128,38 @@ pub async fn handle_receive(
             }
         }
     }
-    info!("Session ended");
+}
 
-    Ok(())
+/// Prompt the user on stderr (y/N) when not in auto-accept mode.
+/// Synchronous stdin read inside the async loop is fine here — this only
+/// runs at most once per inbound transfer, after which the loop blocks
+/// on the network anyway.
+fn accept_or_prompt(auto_accept: bool, info: &TransferInfo) -> AcceptDecision {
+    if auto_accept {
+        return AcceptDecision::Accept;
+    }
+    let total: u64 = info.items.iter().map(|f| f.size).sum();
+    let first = info
+        .items
+        .first()
+        .map(|f| f.path.as_str())
+        .unwrap_or("?");
+    eprint!(
+        "Incoming transfer: {} files starting with {:?} ({} bytes total). Accept? [y/N]: ",
+        info.items.len(),
+        first,
+        total
+    );
+    let _ = std::io::stderr().flush();
+    let mut line = String::new();
+    match std::io::stdin().read_line(&mut line) {
+        Ok(_) => {
+            if line.trim().eq_ignore_ascii_case("y") || line.trim().eq_ignore_ascii_case("yes") {
+                AcceptDecision::Accept
+            } else {
+                AcceptDecision::Reject
+            }
+        }
+        Err(_) => AcceptDecision::Reject,
+    }
 }

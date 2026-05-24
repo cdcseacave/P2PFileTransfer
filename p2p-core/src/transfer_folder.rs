@@ -78,6 +78,33 @@ pub struct TransferStats {
     pub felt_speed_mbps: f64,
 }
 
+/// What was actually transferred — returned from `receive_folder` / `send`
+/// so callers can record accurate history entries instead of placeholders
+/// like the output directory path (finding 2.3).
+#[derive(Debug, Clone, Default)]
+pub struct TransferSummary {
+    /// The top-level item name as agreed during TransferInfo (single
+    /// filename for a single-file send, folder name for a folder send).
+    pub root_name: String,
+    /// Relative paths of every file that was transferred (not the .partial
+    /// names, not the absolute output paths).
+    pub files: Vec<String>,
+    /// Total bytes whose transfer was completed in this session (excludes
+    /// resumed chunks counted in a prior session — `bytes_transferred`
+    /// before this `receive_to` call).
+    pub bytes: u64,
+}
+
+/// Accept policy for an incoming transfer. The receiver consults this
+/// after reading TransferInfo but before sending `Ready`. `Reject` causes
+/// the receiver to send `Cancel`; the sender then returns Ok without
+/// opening any chunk streams (finding 2.1).
+#[derive(Debug, Clone, Copy)]
+pub enum AcceptDecision {
+    Accept,
+    Reject,
+}
+
 /// Callback fired after each file completes so the caller can persist state.
 pub type StateCallback = std::sync::Arc<dyn Fn(&FolderTransferState) + Send + Sync>;
 
@@ -288,9 +315,27 @@ impl<'a> FolderTransferSession<'a> {
             .send_message(&Message::TransferInfo(transfer_info))
             .await?;
 
-        match self.connection.recv_message().await? {
-            Message::Ready => {}
-            msg => return Err(Error::Protocol(format!("Expected Ready, got {:?}", msg))),
+        match self.connection.recv_message().await {
+            Ok(Message::Ready) => {}
+            Ok(Message::Cancel) => {
+                info!("Receiver rejected the transfer; no chunks sent.");
+                return Err(Error::Cancelled);
+            }
+            Ok(msg) => return Err(Error::Protocol(format!("Expected Ready, got {:?}", msg))),
+            // The receiver may close the connection immediately after
+            // sending Cancel without waiting for our acknowledgement —
+            // that surfaces here as Disconnected/Network/Quic instead of
+            // a clean Cancel message. Treat as a rejection.
+            Err(e)
+                if matches!(
+                    &e,
+                    Error::Disconnected | Error::Network(_) | Error::Quic(_)
+                ) =>
+            {
+                info!("Receiver disconnected before sending Ready; treating as cancel.");
+                return Err(Error::Cancelled);
+            }
+            Err(e) => return Err(e),
         }
         debug!(
             "Receiver ready, {}",
@@ -353,12 +398,19 @@ impl<'a> FolderTransferSession<'a> {
     }
 
     /// Receive a folder from the peer.
+    ///
+    /// `accept_decision` is invoked after parsing the TransferInfo but
+    /// before any data flows — return `Reject` to send `Cancel` and skip
+    /// the transfer. `Ok(TransferSummary::default())` is returned on
+    /// rejection so the caller can record an "interrupted" history entry
+    /// without losing the file list.
     pub async fn receive_folder(
         &mut self,
         output_dir: &Path,
         state_path: Option<&Path>,
+        accept_decision: impl FnOnce(&TransferInfo) -> AcceptDecision,
         mut progress: Option<&mut ProgressState>,
-    ) -> Result<()> {
+    ) -> Result<TransferSummary> {
         let transfer_info = match self.connection.recv_message().await? {
             Message::TransferInfo(info) => info,
             msg => {
@@ -376,6 +428,12 @@ impl<'a> FolderTransferSession<'a> {
         // accept_uni() forever by advertising u64::MAX (finding 4.1).
         for f in &transfer_info.items {
             validate_file_size(f.size)?;
+        }
+
+        if matches!(accept_decision(&transfer_info), AcceptDecision::Reject) {
+            info!("Transfer rejected by accept policy; notifying sender");
+            self.connection.send_message(&Message::Cancel).await?;
+            return Ok(TransferSummary::default());
         }
 
         info!("Starting receive to: {:?}", output_dir);
@@ -493,7 +551,25 @@ impl<'a> FolderTransferSession<'a> {
         self.display_transfer_stats(total_files, total_bytes, duration.as_secs_f64(), false);
 
         let _ = is_resume;
-        Ok(())
+
+        // Build a summary the CLI can record in history. `files` is the
+        // per-file relative-path list as agreed at TransferInfo time —
+        // covers both the "single file" send and the "folder of many
+        // files" send without distinguishing.
+        let summary = TransferSummary {
+            root_name: transfer_info
+                .items
+                .first()
+                .map(|f| f.path.clone())
+                .unwrap_or_default(),
+            files: transfer_info
+                .items
+                .iter()
+                .map(|f| f.path.clone())
+                .collect(),
+            bytes: total_bytes.saturating_sub(already_transferred),
+        };
+        Ok(summary)
     }
 
     async fn send_single_file<F>(
@@ -938,7 +1014,9 @@ mod tests {
             let mut conn = server_ep.accept().await.unwrap();
             let _ = conn.recv_message().await.unwrap(); // initial Ping to drive accept_bi
             let mut session = FolderTransferSession::new(&mut conn, cfg_recv, Uuid::new_v4());
-            session.receive_folder(&dst_recv, None, None).await
+            session
+                .receive_folder(&dst_recv, None, |_| AcceptDecision::Accept, None)
+                .await
         });
 
         let client_id = Arc::new(Identity::generate().unwrap());
@@ -989,6 +1067,175 @@ mod tests {
             let got = tokio::fs::read(recv_root.join(n)).await.unwrap();
             assert_eq!(got, *body, "file {n} mismatch");
         }
+    }
+
+    /// Finding 2.1 / 2.3: the reject path sends Cancel to the sender,
+    /// the sender returns Err(Cancelled) without opening any chunk
+    /// streams, and the receiver returns an empty TransferSummary so
+    /// the CLI can log an interrupted history entry without inventing
+    /// a fake "received the output dir" placeholder.
+    #[tokio::test]
+    async fn receive_folder_reject_sends_cancel_and_returns_empty_summary() {
+        use crate::identity::Identity;
+        use crate::network::quic::QuicEndpoint;
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let src_dir = dir.path().join("src");
+        let dst_dir = dir.path().join("dst");
+        tokio::fs::create_dir_all(&src_dir).await.unwrap();
+        tokio::fs::write(src_dir.join("only.bin"), vec![7u8; 32])
+            .await
+            .unwrap();
+
+        let cfg = make_cfg(64);
+
+        let server_id = Arc::new(Identity::generate().unwrap());
+        let server_fp = server_id.fingerprint();
+        let server_ep = QuicEndpoint::bind(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            server_id.clone(),
+        )
+        .unwrap();
+        let server_addr = server_ep.local_addr().unwrap();
+
+        let dst_recv = dst_dir.clone();
+        let cfg_recv = cfg.clone();
+        let recv_task = tokio::spawn(async move {
+            let mut conn = server_ep.accept().await.unwrap();
+            let _ = conn.recv_message().await.unwrap();
+            let mut session = FolderTransferSession::new(&mut conn, cfg_recv, Uuid::new_v4());
+            session
+                .receive_folder(&dst_recv, None, |_info| AcceptDecision::Reject, None)
+                .await
+        });
+
+        let client_id = Arc::new(Identity::generate().unwrap());
+        let client_ep = QuicEndpoint::bind(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            client_id,
+        )
+        .unwrap();
+        let mut conn = client_ep.connect(server_addr, server_fp).await.unwrap();
+        conn.send_message(&crate::protocol::Message::Ping)
+            .await
+            .unwrap();
+
+        let files = vec![FileMetadata {
+            path: "src/only.bin".into(),
+            size: 32,
+            modified: 0,
+            checksum: [0u8; 32],
+        }];
+        let mut state = FolderTransferState::new(Uuid::new_v4(), "src".into(), files, &cfg);
+        let mut session = FolderTransferSession::new(&mut conn, cfg, state.transfer_id);
+        let send_result = tokio::time::timeout(
+            Duration::from_secs(5),
+            session.send(&src_dir, &mut state, None),
+        )
+        .await
+        .expect("send must return promptly on receiver reject")
+        .unwrap_err();
+        assert!(
+            matches!(send_result, Error::Cancelled),
+            "sender must surface Cancel as Error::Cancelled, got {send_result:?}"
+        );
+
+        let recv_summary = tokio::time::timeout(Duration::from_secs(5), recv_task)
+            .await
+            .expect("receiver must return promptly on reject")
+            .unwrap()
+            .unwrap();
+        assert!(
+            recv_summary.files.is_empty(),
+            "rejected transfer's summary must be empty so CLI logs an interrupted entry, got {recv_summary:?}"
+        );
+    }
+
+    /// Finding 2.3: receiver summary on success carries the actual
+    /// per-file list from TransferInfo, not the output directory path.
+    /// The CLI's history record then names the real files.
+    #[tokio::test]
+    async fn receive_folder_accept_returns_summary_with_per_file_list() {
+        use crate::identity::Identity;
+        use crate::network::quic::QuicEndpoint;
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let src_dir = dir.path().join("src");
+        let dst_dir = dir.path().join("dst");
+        tokio::fs::create_dir_all(&src_dir).await.unwrap();
+        tokio::fs::write(src_dir.join("alpha.bin"), vec![1u8; 64])
+            .await
+            .unwrap();
+        tokio::fs::write(src_dir.join("beta.bin"), vec![2u8; 64])
+            .await
+            .unwrap();
+
+        let cfg = make_cfg(64);
+
+        let server_id = Arc::new(Identity::generate().unwrap());
+        let server_fp = server_id.fingerprint();
+        let server_ep = QuicEndpoint::bind(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            server_id.clone(),
+        )
+        .unwrap();
+        let server_addr = server_ep.local_addr().unwrap();
+
+        let dst_recv = dst_dir.clone();
+        let cfg_recv = cfg.clone();
+        let recv_task = tokio::spawn(async move {
+            let mut conn = server_ep.accept().await.unwrap();
+            let _ = conn.recv_message().await.unwrap();
+            let mut session = FolderTransferSession::new(&mut conn, cfg_recv, Uuid::new_v4());
+            session
+                .receive_folder(&dst_recv, None, |_| AcceptDecision::Accept, None)
+                .await
+        });
+
+        let client_id = Arc::new(Identity::generate().unwrap());
+        let client_ep = QuicEndpoint::bind(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            client_id,
+        )
+        .unwrap();
+        let mut conn = client_ep.connect(server_addr, server_fp).await.unwrap();
+        conn.send_message(&crate::protocol::Message::Ping)
+            .await
+            .unwrap();
+
+        let files = vec![
+            FileMetadata {
+                path: "src/alpha.bin".into(),
+                size: 64,
+                modified: 0,
+                checksum: [0u8; 32],
+            },
+            FileMetadata {
+                path: "src/beta.bin".into(),
+                size: 64,
+                modified: 0,
+                checksum: [0u8; 32],
+            },
+        ];
+        let mut state = FolderTransferState::new(Uuid::new_v4(), "src".into(), files, &cfg);
+        let mut session = FolderTransferSession::new(&mut conn, cfg, state.transfer_id);
+
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            session.send(&src_dir, &mut state, None).await.unwrap();
+            recv_task.await.unwrap().unwrap()
+        })
+        .await
+        .expect("transfer must complete within 5 s");
+
+        assert_eq!(result.files, vec!["src/alpha.bin", "src/beta.bin"]);
+        assert_eq!(result.root_name, "src/alpha.bin");
+        assert_eq!(result.bytes, 128);
     }
 
     #[test]

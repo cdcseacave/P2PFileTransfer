@@ -9,14 +9,55 @@ use crate::{
 use anyhow::Result;
 use iced::Command;
 use p2p_core::{
-    protocol::{Capabilities, ConfigMessage},
+    error::Error,
+    protocol::{Capabilities, ConfigMessage, TransferInfo},
     session::P2PSession,
+    transfer_folder::AcceptDecision,
     Uuid,
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::info;
+use tracing::{info, warn};
+
+/// Receive-loop equivalent for the GUI: accept transfers per `auto_accept`,
+/// re-accept on peer disconnect, propagate disk errors. Mirrors the CLI
+/// loop in p2p-cli/src/receive.rs but without stdin prompting (GUI users
+/// flip the auto-accept toggle in the UI).
+async fn run_gui_receive_loop(
+    session: &mut P2PSession,
+    output_dir: &Path,
+    auto_accept: bool,
+) -> Result<()> {
+    let policy = move |_info: &TransferInfo| {
+        if auto_accept {
+            AcceptDecision::Accept
+        } else {
+            // Without stdin in the GUI, "not auto-accept" currently means
+            // reject. A future PR can wire this to a modal dialog.
+            AcceptDecision::Reject
+        }
+    };
+    loop {
+        match session.receive_to(output_dir, None, policy, None).await {
+            Ok(summary) => {
+                info!(
+                    "Received {} files ({} bytes)",
+                    summary.files.len(),
+                    summary.bytes
+                );
+            }
+            Err(e) if matches!(&e, Error::Disconnected | Error::Quic(_)) => {
+                info!("Peer disconnected; re-accepting");
+                if let Err(reaccept_err) = session.reaccept().await {
+                    warn!("Failed to re-accept: {}", reaccept_err);
+                    return Err(reaccept_err.into());
+                }
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+}
 
 /// Handle incoming messages and update state
 pub fn handle_message(state: &mut AppState, message: Message) -> Command<Message> {
@@ -698,9 +739,7 @@ async fn start_listener_once(
 
     // Start event loop to handle incoming transfers
     info!("Starting event loop for incoming transfers...");
-    session
-        .run_event_loop(&output_dir, auto_accept, true)
-        .await?;
+    run_gui_receive_loop(&mut session, &output_dir, auto_accept).await?;
 
     info!("✅ Transfer complete from peer: {}", peer_id);
 
@@ -877,9 +916,7 @@ async fn setup_receive(
 
     let mut session_guard = session.lock().await;
 
-    session_guard
-        .run_event_loop(&output_dir, auto_accept, true)
-        .await?;
+    run_gui_receive_loop(&mut session_guard, &output_dir, auto_accept).await?;
 
     drop(session_guard);
 
