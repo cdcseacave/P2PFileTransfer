@@ -120,6 +120,10 @@ pub struct TransferParams {
     /// Maximum transfer speed (e.g., "10M", "1G", "512K", "unlimited"). Default: unlimited
     #[arg(long, value_parser = parse_bandwidth_arg, default_value = "0")]
     pub max_speed: u64,
+
+    /// Max reconnect attempts after a connection drop (0 = retry forever)
+    #[arg(long, default_value = "5")]
+    pub max_reconnect_attempts: u32,
 }
 
 #[derive(Parser)]
@@ -133,6 +137,10 @@ pub struct Cli {
     /// Set logging level: off, error, warn, info, debug, trace
     #[arg(short = 'v', long = "verbosity", default_value = "info", global = true)]
     pub verbosity: String,
+
+    /// Directory holding identity.{key,cert} (default: <config_dir>/p2p-transfer)
+    #[arg(long, global = true)]
+    pub identity_dir: Option<PathBuf>,
 }
 
 #[derive(Subcommand)]
@@ -211,9 +219,13 @@ pub enum Commands {
         #[arg(long)]
         peer_fingerprint: String,
 
-        /// Original folder path to resume from
+        /// Original file or folder path to resume from
         #[arg(long)]
         path: PathBuf,
+
+        /// Max reconnect attempts after a connection drop (0 = retry forever)
+        #[arg(long, default_value = "5")]
+        max_reconnect_attempts: u32,
     },
 
     /// View transfer history

@@ -20,7 +20,7 @@ pub struct ReconnectConfig {
 impl Default for ReconnectConfig {
     fn default() -> Self {
         Self {
-            max_attempts: 0,
+            max_attempts: 5,
             initial_backoff_secs: 3,
             max_backoff_secs: 180,
             exponential: true,
@@ -200,6 +200,16 @@ mod tests {
         assert!(config.should_retry(0));
         assert!(config.should_retry(100));
         assert!(config.should_retry(1000));
+    }
+
+    #[test]
+    fn test_default_caps_at_5_attempts() {
+        let config = ReconnectConfig::default();
+        assert_eq!(config.max_attempts, 5);
+        assert!(config.should_retry(0));
+        assert!(config.should_retry(3));
+        assert!(!config.should_retry(4));
+        assert!(!config.should_retry(10));
     }
 
     #[tokio::test]

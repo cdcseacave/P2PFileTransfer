@@ -8,11 +8,15 @@ use tracing::info;
 
 use p2p_core::{discovery::DiscoveryManager, identity::Identity, protocol::Capabilities, Uuid};
 
-pub async fn handle_discover(timeout_secs: u64, port: u16) -> Result<()> {
+pub async fn handle_discover(
+    timeout_secs: u64,
+    port: u16,
+    identity_dir: Option<std::path::PathBuf>,
+) -> Result<()> {
     info!("Discovering peers on network...");
     info!("  Timeout: {} seconds", timeout_secs);
 
-    let identity = Identity::load_or_generate()?;
+    let identity = Identity::load_or_generate(identity_dir.as_deref())?;
     let device_name = format!("cli-{}", &Uuid::new_v4().to_string()[..8]);
     let manager = Arc::new(
         DiscoveryManager::new(

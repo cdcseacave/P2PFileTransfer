@@ -8,6 +8,7 @@ use tokio::signal;
 use tracing::{info, warn};
 
 use p2p_core::{
+    history::{record_transfer, TransferDirection, TransferRecord},
     identity::Identity,
     protocol::{Capabilities, ConfigMessage},
     session::P2PSession,
@@ -20,6 +21,7 @@ pub async fn handle_send(
     path: PathBuf,
     session_params: SessionParams,
     transfer_params: TransferParams,
+    identity_dir: Option<PathBuf>,
 ) -> Result<()> {
     info!("Starting send operation");
     info!("  Path: {}", path.display());
@@ -46,7 +48,7 @@ pub async fn handle_send(
         bandwidth_limit: transfer_params.max_speed,
     };
 
-    let identity = Arc::new(Identity::load_or_generate()?);
+    let identity = Arc::new(Identity::load_or_generate(identity_dir.as_deref())?);
     info!("  Identity fingerprint: {}", identity.fingerprint_hex());
 
     let device_id = Uuid::new_v4();
@@ -85,13 +87,20 @@ pub async fn handle_send(
     );
     info!("    Capabilities: {:?}", session.capabilities());
 
+    let peer_addr = session.peer_addr().to_string();
+
     tokio::select! {
-        result = send(&mut session, &path) => result,
+        result = send(&mut session, &path, transfer_params.max_reconnect_attempts, &peer_addr) => result,
         _ = signal::ctrl_c() => Err(anyhow::anyhow!("Transfer interrupted by user (Ctrl+C)")),
     }
 }
 
-async fn send(session: &mut P2PSession, path: &Path) -> Result<()> {
+async fn send(
+    session: &mut P2PSession,
+    path: &Path,
+    max_reconnect_attempts: u32,
+    peer_addr: &str,
+) -> Result<()> {
     let base_name = path.file_name().unwrap().to_string_lossy().to_string();
     if path.is_file() {
         info!("Sending file: {}", base_name);
@@ -102,20 +111,30 @@ async fn send(session: &mut P2PSession, path: &Path) -> Result<()> {
     let transfer_id = Uuid::new_v4();
     let state_file = PathBuf::from(format!("transfer_{}.json", transfer_id));
     let mut progress = p2p_core::progress::ProgressState::new(0);
-    let reconnect_config = p2p_core::reconnect::ReconnectConfig::default();
+    let reconnect_config = p2p_core::reconnect::ReconnectConfig {
+        max_attempts: max_reconnect_attempts,
+        ..Default::default()
+    };
 
-    match session
+    let mut record = TransferRecord::new(transfer_id, TransferDirection::Send, peer_addr.into());
+
+    let result = session
         .send_path(
             path,
             &reconnect_config,
             Some(&state_file),
             Some(&mut progress),
         )
-        .await
-    {
+        .await;
+
+    match result {
         Ok(_) => {
             if state_file.exists() {
                 let _ = tokio::fs::remove_file(&state_file).await;
+            }
+            record.complete(vec![base_name], progress.transferred_bytes());
+            if let Err(e) = record_transfer(record, None).await {
+                warn!("Failed to record transfer history: {}", e);
             }
             info!("Transfer complete!");
             Ok(())
@@ -125,6 +144,10 @@ async fn send(session: &mut P2PSession, path: &Path) -> Result<()> {
                 warn!("Transfer interrupted");
                 warn!("State saved to: {}", state_file.display());
                 warn!("Resume with: p2p-transfer resume {}", state_file.display());
+            }
+            record.fail(e.to_string());
+            if let Err(rec_err) = record_transfer(record, None).await {
+                warn!("Failed to record transfer history: {}", rec_err);
             }
             Err(e.into())
         }

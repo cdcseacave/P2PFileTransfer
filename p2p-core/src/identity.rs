@@ -36,16 +36,18 @@ pub struct Identity {
 }
 
 impl Identity {
-    /// Load the identity from the default location, generating + persisting
-    /// a fresh one if none exists.
-    pub fn load_or_generate() -> Result<Self> {
-        let dir = default_identity_dir()?;
-        Self::load_or_generate_in(&dir)
-    }
+    /// Load the identity from `dir` (or the OS-default config dir when
+    /// `None`), generating + persisting a fresh one if none exists.
+    pub fn load_or_generate(dir: Option<&Path>) -> Result<Self> {
+        let owned;
+        let dir = match dir {
+            Some(d) => d,
+            None => {
+                owned = default_identity_dir()?;
+                owned.as_path()
+            }
+        };
 
-    /// Load the identity from `dir`, generating + persisting a fresh one if
-    /// none exists. Exposed for tests that want a temporary directory.
-    pub fn load_or_generate_in(dir: &Path) -> Result<Self> {
         let key_path = dir.join("identity.key");
         let cert_path = dir.join("identity.cert");
 
@@ -219,8 +221,8 @@ mod tests {
     #[test]
     fn generates_and_reloads_stable_fingerprint() {
         let dir = tempdir().unwrap();
-        let id1 = Identity::load_or_generate_in(dir.path()).unwrap();
-        let id2 = Identity::load_or_generate_in(dir.path()).unwrap();
+        let id1 = Identity::load_or_generate(Some(dir.path())).unwrap();
+        let id2 = Identity::load_or_generate(Some(dir.path())).unwrap();
         assert_eq!(
             id1.fingerprint(),
             id2.fingerprint(),
@@ -228,6 +230,15 @@ mod tests {
         );
         assert!(dir.path().join("identity.key").exists());
         assert!(dir.path().join("identity.cert").exists());
+    }
+
+    #[test]
+    fn distinct_dirs_yield_distinct_fingerprints() {
+        let a = tempdir().unwrap();
+        let b = tempdir().unwrap();
+        let id_a = Identity::load_or_generate(Some(a.path())).unwrap();
+        let id_b = Identity::load_or_generate(Some(b.path())).unwrap();
+        assert_ne!(id_a.fingerprint(), id_b.fingerprint());
     }
 
     #[test]

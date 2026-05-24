@@ -197,6 +197,63 @@ impl TransferHistory {
     }
 }
 
+/// Append a finalized [`TransferRecord`] to the on-disk history at
+/// `history_path` (or [`TransferHistory::default_path`] when `None`).
+///
+/// Concurrency: the file is opened with an OS-level exclusive lock for the
+/// duration of the read-modify-write so co-located CLI processes (e.g. a
+/// sender and a receiver on the same machine) cannot clobber each other.
+/// A missing file is treated as empty history; a corrupt file is overwritten.
+pub async fn record_transfer(record: TransferRecord, history_path: Option<&Path>) -> Result<()> {
+    let path: PathBuf = match history_path {
+        Some(p) => p.to_path_buf(),
+        None => TransferHistory::default_path(),
+    };
+
+    tokio::task::spawn_blocking(move || append_record_locked(&path, record))
+        .await
+        .map_err(|e| Error::Protocol(format!("history task join: {e}")))?
+}
+
+fn append_record_locked(path: &Path, record: TransferRecord) -> Result<()> {
+    use fs2::FileExt;
+    use std::fs::OpenOptions;
+    use std::io::{Read, Seek, SeekFrom, Write};
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(Error::Network)?;
+    }
+
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+        .map_err(Error::Network)?;
+
+    file.lock_exclusive().map_err(Error::Network)?;
+
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf).map_err(Error::Network)?;
+
+    let mut history: TransferHistory = if buf.is_empty() {
+        TransferHistory::default()
+    } else {
+        serde_json::from_slice(&buf).unwrap_or_default()
+    };
+    history.add_record(record);
+
+    let data = serde_json::to_vec_pretty(&history)
+        .map_err(|e| Error::Protocol(format!("Failed to serialize history: {}", e)))?;
+    file.seek(SeekFrom::Start(0)).map_err(Error::Network)?;
+    file.set_len(0).map_err(Error::Network)?;
+    file.write_all(&data).map_err(Error::Network)?;
+
+    fs2::FileExt::unlock(&file).map_err(Error::Network)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -262,6 +319,56 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn record_transfer_concurrent_appends_dont_clobber() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = std::sync::Arc::new(tmp.path().join("history.json"));
+
+        let n = 16usize;
+        let mut handles = Vec::with_capacity(n);
+        for i in 0..n {
+            let path = path.clone();
+            handles.push(tokio::spawn(async move {
+                let mut r = TransferRecord::new(
+                    Uuid::new_v4(),
+                    TransferDirection::Send,
+                    format!("10.0.0.{}", i),
+                );
+                r.complete(vec![format!("file-{}.bin", i)], i as u64 * 100);
+                record_transfer(r, Some(&path)).await.unwrap();
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        let loaded = TransferHistory::load_from_file(&path).await.unwrap();
+        assert_eq!(
+            loaded.records().len(),
+            n,
+            "concurrent record_transfer calls must not clobber each other"
+        );
+    }
+
+    #[tokio::test]
+    async fn record_transfer_appends_and_persists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("history.json");
+
+        let mut a = TransferRecord::new(Uuid::new_v4(), TransferDirection::Send, "1.1.1.1:1".into());
+        a.complete(vec!["a.bin".into()], 100);
+        record_transfer(a, Some(&path)).await.unwrap();
+
+        let mut b = TransferRecord::new(Uuid::new_v4(), TransferDirection::Receive, "2.2.2.2:2".into());
+        b.fail("boom".into());
+        record_transfer(b, Some(&path)).await.unwrap();
+
+        let loaded = TransferHistory::load_from_file(&path).await.unwrap();
+        assert_eq!(loaded.records().len(), 2);
+        assert_eq!(loaded.records()[0].status, TransferStatus::Completed);
+        assert_eq!(loaded.records()[1].status, TransferStatus::Failed);
     }
 
     #[tokio::test]

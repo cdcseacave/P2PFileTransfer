@@ -655,7 +655,7 @@ async fn start_listener_once(
     cancel_flag: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<(String, bool, usize)> {
     let capabilities = Capabilities::all();
-    let identity = Arc::new(p2p_core::identity::Identity::load_or_generate()?);
+    let identity = Arc::new(p2p_core::identity::Identity::load_or_generate(None)?);
 
     info!(
         "[Transfer #{}] Waiting for incoming connection on port {} (fp={})...",
@@ -724,7 +724,7 @@ async fn connect_to_peer(
     config: ConfigMessage,
 ) -> Result<(P2PSession, String)> {
     let capabilities = Capabilities::all();
-    let identity = Arc::new(p2p_core::identity::Identity::load_or_generate()?);
+    let identity = Arc::new(p2p_core::identity::Identity::load_or_generate(None)?);
 
     info!(
         "Connecting to peer (local fp={})...",
@@ -781,7 +781,7 @@ async fn pair_via_rendezvous(
     use tokio::net::lookup_host;
 
     let capabilities = Capabilities::all();
-    let identity = Arc::new(p2p_core::identity::Identity::load_or_generate()?);
+    let identity = Arc::new(p2p_core::identity::Identity::load_or_generate(None)?);
 
     // Default the rendezvous port when only a hostname was supplied.
     let host_port = p2p_core::with_default_port(&rendezvous, p2p_core::DEFAULT_RENDEZVOUS_PORT);

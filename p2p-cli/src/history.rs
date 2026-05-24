@@ -2,7 +2,6 @@
 
 use anyhow::Result;
 use p2p_core::history::{TransferDirection, TransferHistory, TransferStatus};
-use tracing::info;
 
 pub async fn handle_history(
     limit: usize,
@@ -10,14 +9,15 @@ pub async fn handle_history(
     completed: bool,
     failed: bool,
 ) -> Result<()> {
-    info!("📜 Transfer History\n");
+    println!("Transfer History");
+    println!();
 
     // Load history
     let history_path = TransferHistory::default_path();
     let history = if history_path.exists() {
         TransferHistory::load_from_file(&history_path).await?
     } else {
-        info!("No transfer history found.");
+        println!("No transfer history found.");
         return Ok(());
     };
 
@@ -50,58 +50,52 @@ pub async fn handle_history(
     let records: Vec<_> = records.into_iter().take(limit).collect();
 
     if records.is_empty() {
-        info!("No transfers found matching the filters.");
+        println!("No transfers found matching the filters.");
         return Ok(());
     }
 
-    // Display records
-    info!("Found {} transfer(s):\n", records.len());
+    println!("Found {} transfer(s):", records.len());
+    println!();
 
     for record in records {
-        let direction_icon = match record.direction {
-            TransferDirection::Send => "📤",
-            TransferDirection::Receive => "📥",
+        let direction_label = match record.direction {
+            TransferDirection::Send => "SEND",
+            TransferDirection::Receive => "RECV",
+        };
+        let status_label = match record.status {
+            TransferStatus::Completed => "OK ",
+            TransferStatus::Interrupted => "INT",
+            TransferStatus::Failed => "ERR",
         };
 
-        let status_icon = match record.status {
-            TransferStatus::Completed => "✅",
-            TransferStatus::Interrupted => "⏸️",
-            TransferStatus::Failed => "❌",
-        };
-
-        // Format timestamp
         let datetime = format_timestamp(record.start_time);
-
-        // Format size
         let size_str = format_bytes(record.bytes_transferred);
-
-        // Format duration
         let duration_str = format_duration(record.duration_secs);
 
-        info!(
-            "{} {} Transfer {}",
-            direction_icon, status_icon, record.transfer_id
+        println!(
+            "[{}] [{}] Transfer {}",
+            direction_label, status_label, record.transfer_id
         );
-        info!("  Started:   {}", datetime);
-        info!("  Peer:      {}", record.peer_address);
-        info!("  Files:     {} file(s)", record.files.len());
-        info!("  Size:      {}", size_str);
-        info!("  Duration:  {}", duration_str);
-        info!("  Status:    {:?}", record.status);
+        println!("  Started:   {}", datetime);
+        println!("  Peer:      {}", record.peer_address);
+        println!("  Files:     {} file(s)", record.files.len());
+        println!("  Size:      {}", size_str);
+        println!("  Duration:  {}", duration_str);
+        println!("  Status:    {:?}", record.status);
 
         if !record.files.is_empty() && record.files.len() <= 5 {
-            info!("  Files:");
+            println!("  Files:");
             for file in &record.files {
-                info!("    - {}", file);
+                println!("    - {}", file);
             }
         } else if record.files.len() > 5 {
-            info!(
+            println!(
                 "  Files: {} files (use details command to see all)",
                 record.files.len()
             );
         }
 
-        info!("");
+        println!();
     }
 
     Ok(())

@@ -21,17 +21,16 @@ pub async fn handle_resume(
     to: String,
     peer_fingerprint_hex: String,
     path: PathBuf,
+    max_reconnect_attempts: u32,
+    identity_dir: Option<PathBuf>,
 ) -> Result<()> {
     info!("Resuming transfer");
     info!("  Transfer ID: {}", transfer_id);
-    info!("  Folder path: {}", path.display());
+    info!("  Path: {}", path.display());
     info!("  Peer address: {}", to);
 
-    if !path.exists() || !path.is_dir() {
-        anyhow::bail!(
-            "Folder path does not exist or is not a directory: {}",
-            path.display()
-        );
+    if !path.exists() {
+        anyhow::bail!("Path does not exist: {}", path.display());
     }
 
     let state_path = PathBuf::from(format!("transfer_{}.json", transfer_id));
@@ -62,7 +61,7 @@ pub async fn handle_resume(
     let mut peer_fp = [0u8; 32];
     peer_fp.copy_from_slice(&hex::decode(&peer_fingerprint_hex)?);
 
-    let identity = Arc::new(Identity::load_or_generate()?);
+    let identity = Arc::new(Identity::load_or_generate(identity_dir.as_deref())?);
     let device_id = Uuid::new_v4();
     let capabilities = Capabilities::all();
     let config = ConfigMessage::default();
@@ -83,7 +82,7 @@ pub async fn handle_resume(
     progress.add_bytes(state.transferred_bytes);
 
     let reconnect_config = p2p_core::reconnect::ReconnectConfig {
-        max_attempts: 1,
+        max_attempts: max_reconnect_attempts,
         ..Default::default()
     };
 
@@ -108,4 +107,48 @@ pub async fn handle_resume(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn rejects_nonexistent_path() {
+        let tid = Uuid::new_v4().to_string();
+        let result = handle_resume(
+            tid,
+            "127.0.0.1:1".into(),
+            "0".repeat(64),
+            PathBuf::from("definitely/does/not/exist"),
+            1,
+            None,
+        )
+        .await;
+        let err = result.expect_err("nonexistent path must error").to_string();
+        assert!(err.contains("does not exist"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn accepts_file_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file_path = tmp.path().join("payload.bin");
+        tokio::fs::write(&file_path, b"hello").await.unwrap();
+
+        let tid = Uuid::new_v4().to_string();
+        let result = handle_resume(
+            tid,
+            "127.0.0.1:1".into(),
+            "0".repeat(64),
+            file_path,
+            1,
+            None,
+        )
+        .await;
+        let err = result.expect_err("no state file → should error later").to_string();
+        assert!(
+            !err.contains("not a directory"),
+            "resume must accept file paths; got: {err}"
+        );
+    }
 }

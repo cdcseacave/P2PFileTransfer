@@ -109,6 +109,7 @@ pub fn run_cli_sync() -> Result<()> {
 }
 
 async fn run_cli_async(cli: Cli) -> Result<()> {
+    let identity_dir = cli.identity_dir;
     match cli.command {
         // GUI cases already handled in run_cli_sync
         #[cfg(feature = "gui")]
@@ -128,17 +129,17 @@ async fn run_cli_async(cli: Cli) -> Result<()> {
             session,
             transfer,
         }) => {
-            send::handle_send(path, session, transfer).await?;
+            send::handle_send(path, session, transfer, identity_dir).await?;
         }
         Some(cli::Commands::Receive {
             output,
             auto_accept,
             session,
         }) => {
-            receive::handle_receive(output, auto_accept, session).await?;
+            receive::handle_receive(output, auto_accept, session, identity_dir).await?;
         }
         Some(cli::Commands::Discover { timeout, port }) => {
-            discover::handle_discover(timeout, port).await?;
+            discover::handle_discover(timeout, port, identity_dir).await?;
         }
         Some(cli::Commands::NatTest {
             stun_server,
@@ -151,8 +152,17 @@ async fn run_cli_async(cli: Cli) -> Result<()> {
             to,
             peer_fingerprint,
             path,
+            max_reconnect_attempts,
         }) => {
-            resume::handle_resume(transfer_id, to, peer_fingerprint, path).await?;
+            resume::handle_resume(
+                transfer_id,
+                to,
+                peer_fingerprint,
+                path,
+                max_reconnect_attempts,
+                identity_dir,
+            )
+            .await?;
         }
         Some(cli::Commands::History {
             limit,

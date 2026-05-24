@@ -47,7 +47,7 @@ State is persisted **after each file completes** (not mid-file), so resume granu
 
 ### Identity persistence
 
-`Identity::load_or_generate` reads PEM-encoded PKCS#8 key + PEM cert from `<config_dir>/p2p-transfer/identity.{key,cert}` (created on first run with mode 0600 on Unix). The SHA-256 of the cert DER is the stable per-device fingerprint and is what peers pin. The cert is persisted alongside the key so the fingerprint stays stable across restarts — TOFU pinning in `known_peers.json` depends on it.
+`Identity::load_or_generate(dir: Option<&Path>)` reads PEM-encoded PKCS#8 key + PEM cert from `<dir>/identity.{key,cert}` (or `<config_dir>/p2p-transfer/identity.{key,cert}` when `dir` is `None`); created on first run with mode 0600 on Unix. The SHA-256 of the cert DER is the stable per-device fingerprint and is what peers pin. The cert is persisted alongside the key so the fingerprint stays stable across restarts — TOFU pinning in `known_peers.json` depends on it. The CLI exposes the override as `--identity-dir <PATH>`; the GUI always passes `None`.
 
 ### Mutual TLS, but pinning lives at the handshake layer
 
