@@ -9,11 +9,8 @@ use tokio::signal;
 use tracing::{debug, info, warn};
 
 use p2p_core::{
-    identity::Identity,
-    protocol::{Capabilities, ConfigMessage},
-    session::P2PSession,
-    transfer_folder::FolderTransferState,
-    Uuid,
+    identity::Identity, protocol::Capabilities, session::P2PSession,
+    transfer_folder::FolderTransferState, Uuid,
 };
 
 pub async fn handle_resume(
@@ -64,7 +61,10 @@ pub async fn handle_resume(
     let identity = Arc::new(Identity::load_or_generate(identity_dir.as_deref())?);
     let device_id = Uuid::new_v4();
     let capabilities = Capabilities::all();
-    let config = ConfigMessage::default();
+    // Resume the original negotiated config — using ConfigMessage::default
+    // here would mis-align the .partial on disk because the receiver and
+    // ChunkWriter compute offsets from this chunk_size.
+    let config = state.to_config_message();
 
     info!("Reconnecting to peer...");
     let mut session = P2PSession::connect(

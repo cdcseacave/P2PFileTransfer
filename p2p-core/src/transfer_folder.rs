@@ -264,7 +264,8 @@ impl<'a> FolderTransferSession<'a> {
             };
 
             let file_list: Vec<FileMetadata> = files.iter().map(|(_, m)| m.clone()).collect();
-            *state = FolderTransferState::new(self.transfer_id, base_name, file_list);
+            *state =
+                FolderTransferState::new(self.transfer_id, base_name, file_list, &self.config);
             None
         };
 
@@ -275,10 +276,13 @@ impl<'a> FolderTransferSession<'a> {
         }
 
         let is_resuming = resume_point.is_some();
+        let completed_files: Vec<u32> =
+            state.completed_files.iter().map(|i| *i as u32).collect();
         let transfer_info = TransferInfo {
             transfer_id: self.transfer_id,
             items: state.files.clone(),
             resume_from: resume_point,
+            completed_files,
         };
         self.connection
             .send_message(&Message::TransferInfo(transfer_info))
@@ -428,7 +432,16 @@ impl<'a> FolderTransferSession<'a> {
         self.connection.send_message(&Message::Ready).await?;
 
         let total_files = transfer_info.items.len();
+        let skip: std::collections::HashSet<u32> =
+            transfer_info.completed_files.iter().copied().collect();
         for (file_index, file_meta) in transfer_info.items.iter().enumerate() {
+            if skip.contains(&(file_index as u32)) {
+                debug!(
+                    "Skipping file {} (sender marked complete in prior session): {}",
+                    file_index, file_meta.path
+                );
+                continue;
+            }
             let relative_path = sanitize_relative_path(Path::new(&file_meta.path))?;
             let full_path = output_dir.join(&relative_path);
             info!(
@@ -647,7 +660,11 @@ impl<'a> FolderTransferSession<'a> {
     }
 }
 
-/// On-disk state for chunk-level resume.
+/// On-disk state for chunk-level resume. Carries the negotiated
+/// [`ConfigMessage`] fields so resume rehydrates the same chunk_size and
+/// compression settings the original session used — without this the
+/// `.partial` on disk (laid out under the original chunk_size) and the
+/// resumed session's offsets disagree, silently corrupting the file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FolderTransferState {
     pub transfer_id: Uuid,
@@ -658,11 +675,22 @@ pub struct FolderTransferState {
     pub total_bytes: u64,
     pub transferred_bytes: u64,
     pub file_chunks: HashMap<usize, Vec<u64>>,
+    /// Chunk size in bytes — must match what the `.partial` on disk was
+    /// laid out with. Mirrors `ConfigMessage::chunk_size`.
     pub chunk_size: u32,
+    pub compression_enabled: bool,
+    pub compression_level: i32,
+    pub adaptive_compression: bool,
+    pub bandwidth_limit: u64,
 }
 
 impl FolderTransferState {
-    pub fn new(transfer_id: Uuid, folder_name: String, files: Vec<FileMetadata>) -> Self {
+    pub fn new(
+        transfer_id: Uuid,
+        folder_name: String,
+        files: Vec<FileMetadata>,
+        config: &ConfigMessage,
+    ) -> Self {
         let total_bytes = files.iter().map(|f| f.size).sum();
         Self {
             transfer_id,
@@ -673,7 +701,24 @@ impl FolderTransferState {
             total_bytes,
             transferred_bytes: 0,
             file_chunks: HashMap::new(),
-            chunk_size: 65536,
+            chunk_size: config.chunk_size,
+            compression_enabled: config.compression_enabled,
+            compression_level: config.compression_level,
+            adaptive_compression: config.adaptive_compression,
+            bandwidth_limit: config.bandwidth_limit,
+        }
+    }
+
+    /// Rebuild the [`ConfigMessage`] that was negotiated when the
+    /// transfer started. Used by resume to avoid `ConfigMessage::default`
+    /// (whose chunk_size would mis-align the on-disk `.partial`).
+    pub fn to_config_message(&self) -> ConfigMessage {
+        ConfigMessage {
+            compression_enabled: self.compression_enabled,
+            compression_level: self.compression_level,
+            adaptive_compression: self.adaptive_compression,
+            chunk_size: self.chunk_size,
+            bandwidth_limit: self.bandwidth_limit,
         }
     }
 
@@ -734,6 +779,16 @@ impl FolderTransferState {
 mod tests {
     use super::*;
 
+    fn make_cfg(chunk_size: u32) -> ConfigMessage {
+        ConfigMessage {
+            compression_enabled: false,
+            compression_level: 3,
+            adaptive_compression: false,
+            chunk_size,
+            bandwidth_limit: 0,
+        }
+    }
+
     #[tokio::test]
     async fn folder_transfer_state_tracks_files() {
         let files = vec![
@@ -750,7 +805,8 @@ mod tests {
                 checksum: [0u8; 32],
             },
         ];
-        let mut state = FolderTransferState::new(Uuid::new_v4(), "x".to_string(), files);
+        let mut state =
+            FolderTransferState::new(Uuid::new_v4(), "x".to_string(), files, &make_cfg(65536));
         assert_eq!(state.total_bytes, 300);
         assert_eq!(state.next_file(), Some(0));
 
@@ -796,6 +852,137 @@ mod tests {
         let abs = Path::new("/etc/passwd");
         let err = sanitize_relative_path(abs).unwrap_err();
         assert!(matches!(err, Error::Protocol(_)));
+    }
+
+    /// Finding 1.2: `FolderTransferState` must carry the original
+    /// negotiated chunk_size (and other compression knobs) so resume can
+    /// rehydrate the same `ConfigMessage` instead of falling back to the
+    /// default. Otherwise the `.partial` on disk (laid out under the
+    /// original chunk_size) and the new session's offsets disagree and
+    /// every chunk lands at the wrong file offset.
+    #[tokio::test]
+    async fn state_remembers_negotiated_chunk_size_across_serde_roundtrip() {
+        let files = vec![FileMetadata {
+            path: "x.bin".into(),
+            size: 4 * 1024 * 1024,
+            modified: 0,
+            checksum: [0u8; 32],
+        }];
+        let cfg = make_cfg(1024 * 1024);
+        let state = FolderTransferState::new(Uuid::new_v4(), "f".into(), files, &cfg);
+        assert_eq!(state.chunk_size, 1024 * 1024);
+
+        let json = serde_json::to_string(&state).unwrap();
+        let round: FolderTransferState = serde_json::from_str(&json).unwrap();
+        assert_eq!(round.chunk_size, 1024 * 1024);
+
+        let restored = round.to_config_message();
+        assert_eq!(restored.chunk_size, 1024 * 1024);
+        assert_eq!(restored.compression_enabled, cfg.compression_enabled);
+        assert_eq!(restored.compression_level, cfg.compression_level);
+        assert_eq!(restored.adaptive_compression, cfg.adaptive_compression);
+        assert_eq!(restored.bandwidth_limit, cfg.bandwidth_limit);
+    }
+
+    /// Finding 1.1: multi-file folder resume must not deadlock when the
+    /// sender skips already-completed files. Before the fix the sender
+    /// opened zero streams for files in `state.completed_files` while the
+    /// receiver iterated every item in `transfer_info.items` and blocked
+    /// on `accept_uni()` forever. With the new `TransferInfo.completed_files`
+    /// field the receiver knows which file indices to skip.
+    #[tokio::test]
+    async fn multi_file_resume_with_completed_files_does_not_deadlock() {
+        use crate::identity::Identity;
+        use crate::network::quic::QuicEndpoint;
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let src_dir = dir.path().join("src");
+        let dst_dir = dir.path().join("dst");
+        tokio::fs::create_dir_all(&src_dir).await.unwrap();
+        tokio::fs::create_dir_all(&dst_dir).await.unwrap();
+
+        let chunk_size = 64usize;
+        // 3 files, each one chunk wide. After resume the sender pretends
+        // file index 0 is already complete.
+        let names = ["a.bin", "b.bin", "c.bin"];
+        let bodies: Vec<Vec<u8>> = (0..names.len())
+            .map(|i| vec![i as u8; chunk_size])
+            .collect();
+        for (n, body) in names.iter().zip(bodies.iter()) {
+            tokio::fs::write(src_dir.join(n), body).await.unwrap();
+        }
+
+        let cfg = make_cfg(chunk_size as u32);
+
+        let server_id = Arc::new(Identity::generate().unwrap());
+        let server_fp = server_id.fingerprint();
+        let server_ep = QuicEndpoint::bind(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            server_id.clone(),
+        )
+        .unwrap();
+        let server_addr = server_ep.local_addr().unwrap();
+
+        let dst_recv = dst_dir.clone();
+        let cfg_recv = cfg.clone();
+        let recv_task = tokio::spawn(async move {
+            let mut conn = server_ep.accept().await.unwrap();
+            let _ = conn.recv_message().await.unwrap(); // initial Ping to drive accept_bi
+            let mut session = FolderTransferSession::new(&mut conn, cfg_recv, Uuid::new_v4());
+            session.receive_folder(&dst_recv, None, None).await
+        });
+
+        let client_id = Arc::new(Identity::generate().unwrap());
+        let client_ep = QuicEndpoint::bind(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            client_id,
+        )
+        .unwrap();
+        let mut conn = client_ep.connect(server_addr, server_fp).await.unwrap();
+        conn.send_message(&crate::protocol::Message::Ping)
+            .await
+            .unwrap();
+
+        // Build state.files with the same `src/<name>` relative paths that
+        // scan_folder would emit (sender resolves base_path as src_dir's
+        // parent and joins these relative paths).
+        let files: Vec<FileMetadata> = names
+            .iter()
+            .zip(bodies.iter())
+            .map(|(n, b)| FileMetadata {
+                path: format!("src/{n}"),
+                size: b.len() as u64,
+                modified: 0,
+                checksum: [0u8; 32],
+            })
+            .collect();
+        let mut state = FolderTransferState::new(Uuid::new_v4(), "src".into(), files, &cfg);
+        state.mark_file_complete(0); // pretend file 0 already shipped
+
+        let mut session = FolderTransferSession::new(&mut conn, cfg, state.transfer_id);
+        let send_path = src_dir.clone();
+        let send_fut = session.send(&send_path, &mut state, None);
+
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            send_fut.await.unwrap();
+            recv_task.await.unwrap().unwrap();
+        })
+        .await;
+
+        result.expect("multi-file resume must finish within 5 s — receiver hung waiting for streams the sender skipped");
+        // The receiver writes non-skipped files under output_dir/src/<name>.
+        let recv_root = dst_dir.join("src");
+        for (i, (n, body)) in names.iter().zip(bodies.iter()).enumerate() {
+            if i == 0 {
+                // Skipped — receiver never wrote it; nothing to assert.
+                continue;
+            }
+            let got = tokio::fs::read(recv_root.join(n)).await.unwrap();
+            assert_eq!(got, *body, "file {n} mismatch");
+        }
     }
 
     #[test]

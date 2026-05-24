@@ -338,14 +338,14 @@ impl P2PSession {
                     }
                     Err(e) => {
                         warn!("Failed to load state file: {}", e);
-                        FolderTransferState::new(Uuid::new_v4(), String::new(), vec![])
+                        FolderTransferState::new(Uuid::new_v4(), String::new(), vec![], &self.handshake.config)
                     }
                 }
             } else {
-                FolderTransferState::new(Uuid::new_v4(), String::new(), vec![])
+                FolderTransferState::new(Uuid::new_v4(), String::new(), vec![], &self.handshake.config)
             }
         } else {
-            FolderTransferState::new(Uuid::new_v4(), String::new(), vec![])
+            FolderTransferState::new(Uuid::new_v4(), String::new(), vec![], &self.handshake.config)
         };
 
         let transfer_id = if state.files.is_empty() {

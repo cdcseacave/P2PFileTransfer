@@ -151,8 +151,14 @@ pub struct TransferInfo {
     pub transfer_id: Uuid,
     /// List of files to transfer
     pub items: Vec<FileMetadata>,
-    /// Resume point if applicable
+    /// Resume point if applicable (covers the single in-progress file).
     pub resume_from: Option<ResumePoint>,
+    /// File indices the sender already finished in a prior session and
+    /// will skip entirely (no streams, no `FileChecksum`). The receiver
+    /// must skip these or it will block in `accept_uni()` forever waiting
+    /// for streams the sender never opens.
+    #[serde(default)]
+    pub completed_files: Vec<u32>,
 }
 
 /// File metadata.
