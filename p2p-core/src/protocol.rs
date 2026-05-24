@@ -138,7 +138,7 @@ impl Default for ConfigMessage {
             compression_enabled: true,
             compression_level: 3,
             adaptive_compression: true,
-            chunk_size: 65536,  // 64 KB
+            chunk_size: crate::DEFAULT_CHUNK_SIZE,
             bandwidth_limit: 0, // unlimited
         }
     }

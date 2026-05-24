@@ -145,7 +145,9 @@ mod tests {
             None,
         )
         .await;
-        let err = result.expect_err("no state file → should error later").to_string();
+        let err = result
+            .expect_err("no state file → should error later")
+            .to_string();
         assert!(
             !err.contains("not a directory"),
             "resume must accept file paths; got: {err}"

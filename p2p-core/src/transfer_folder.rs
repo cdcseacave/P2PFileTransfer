@@ -551,7 +551,13 @@ impl<'a> FolderTransferSession<'a> {
         );
 
         let receiver_checksum = file_session
-            .receive_file(path, total_chunks, streams_to_receive, None::<fn(u64)>, progress)
+            .receive_file(
+                path,
+                total_chunks,
+                streams_to_receive,
+                None::<fn(u64)>,
+                progress,
+            )
             .await?;
 
         let our_msg = FileChecksumMessage {

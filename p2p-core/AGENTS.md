@@ -10,7 +10,7 @@ The crate is layered. Higher layers depend on lower layers, not the other way ar
 
 | Layer | Modules | Role |
 |---|---|---|
-| Constants | `lib.rs` | `PROTOCOL_VERSION = 2`, `DEFAULT_CHUNK_SIZE = 65536`, `DEFAULT_DISCOVERY_PORT = 14566`, `DEFAULT_TRANSFER_PORT = 14567`, `DEFAULT_RENDEZVOUS_PORT = 14570`, `PROTOCOL_MAGIC = b"P2PF"`, `ALPN_PROTOCOL = b"p2pf/2"` |
+| Constants | `lib.rs` | `PROTOCOL_VERSION = 2`, `DEFAULT_CHUNK_SIZE = 1 MiB`, `DEFAULT_DISCOVERY_PORT = 14566`, `DEFAULT_TRANSFER_PORT = 14567`, `DEFAULT_RENDEZVOUS_PORT = 14570`, `PROTOCOL_MAGIC = b"P2PF"`, `ALPN_PROTOCOL = b"p2pf/2"`. Single source of truth — `ConfigMessage::default`, `TransferConfig::default`, and the GUI's `AppSettings::default` derive from it. |
 | Errors | `error.rs` | `Error`/`Result` — every fallible API in this crate returns these (`Quic`, `Tls`, `Rendezvous`, `HolePunchFailed`, `FingerprintMismatch`, `Verification`, `Disconnected`, ...) |
 | Identity & TLS | `identity.rs`, `tls.rs`, `known_peers.rs` | `Identity` = persistent Ed25519 keypair + self-signed cert (rcgen). `tls::server_config` requires a client cert via `AcceptAnyClientCert` (mutual TLS — peer identity is pinned at the handshake layer, TLS just guarantees the cert is presented). `tls::client_config_pinning` presents our cert and pins the server cert via `FingerprintVerifier`. `KnownPeers` = TOFU store at `<config_dir>/p2p-transfer/known_peers.json`. |
 | Protocol | `protocol.rs`, `config.rs` | `Message` enum (control-plane only — chunks ride raw on per-chunk uni streams), `HelloMessage`, `ConfigMessage`, `TransferInfo`, `FileMetadata`, `Capabilities` |

@@ -90,6 +90,29 @@ pub fn with_default_port(host_port: &str, default_port: u16) -> String {
 }
 
 #[cfg(test)]
+mod default_chunk_size_tests {
+    use super::DEFAULT_CHUNK_SIZE;
+    use crate::config::TransferConfig;
+    use crate::protocol::ConfigMessage;
+
+    /// Every public default that carries a chunk size must agree with the
+    /// single source-of-truth [`DEFAULT_CHUNK_SIZE`]. Without this guard the
+    /// CLI, GUI, and on-the-wire defaults can drift, silently downgrading
+    /// the negotiated chunk size in any session that touches the mismatched
+    /// side (see post-`f07aae4` review finding 1.3).
+    #[test]
+    fn config_message_default_matches_default_chunk_size() {
+        assert_eq!(ConfigMessage::default().chunk_size, DEFAULT_CHUNK_SIZE);
+    }
+
+    #[test]
+    fn transfer_config_default_matches_default_chunk_size() {
+        let cfg = TransferConfig::default();
+        assert_eq!(cfg.chunk_size_kb * 1024, DEFAULT_CHUNK_SIZE);
+    }
+}
+
+#[cfg(test)]
 mod with_default_port_tests {
     use super::with_default_port;
 

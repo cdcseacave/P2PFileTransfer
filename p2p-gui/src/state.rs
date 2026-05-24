@@ -169,7 +169,7 @@ impl Default for AppSettings {
             compression_enabled: true,
             compression_level: 3,
             adaptive_compression: true,
-            chunk_size_kb: 64,
+            chunk_size_kb: p2p_core::DEFAULT_CHUNK_SIZE / 1024,
             bandwidth_limit: 0,
             max_retries: 5,
             bandwidth_input: String::from("unlimited"),

@@ -469,7 +469,9 @@ mod tests {
             p.push(".partial");
             std::path::PathBuf::from(p)
         };
-        tokio::fs::write(&partial_path, &partial_bytes).await.unwrap();
+        tokio::fs::write(&partial_path, &partial_bytes)
+            .await
+            .unwrap();
 
         let server_id = Arc::new(Identity::generate().unwrap());
         let server_fp = server_id.fingerprint();
@@ -494,10 +496,15 @@ mod tests {
         let recv_task = tokio::spawn(async move {
             let mut conn = server_ep.accept().await.unwrap();
             let _ = conn.recv_message().await.unwrap(); // drive accept_bi
-            let mut session =
-                FileTransferSession::new(&mut conn, cfg_recv, Uuid::new_v4(), 0);
+            let mut session = FileTransferSession::new(&mut conn, cfg_recv, Uuid::new_v4(), 0);
             session
-                .receive_file(&dst_recv, total_chunks, streams_to_receive, None::<fn(u64)>, None)
+                .receive_file(
+                    &dst_recv,
+                    total_chunks,
+                    streams_to_receive,
+                    None::<fn(u64)>,
+                    None,
+                )
                 .await
         });
 
@@ -508,7 +515,9 @@ mod tests {
         )
         .unwrap();
         let mut conn = client_ep.connect(server_addr, server_fp).await.unwrap();
-        conn.send_message(&crate::protocol::Message::Ping).await.unwrap();
+        conn.send_message(&crate::protocol::Message::Ping)
+            .await
+            .unwrap();
         let mut session = FileTransferSession::new(&mut conn, cfg, Uuid::new_v4(), 0);
         let send_fut = session.send_file(&src, &completed, None::<fn(u64)>, None);
 

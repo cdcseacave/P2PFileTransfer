@@ -80,22 +80,23 @@ pub async fn handle_receive(
     let peer_addr = session.peer_addr().to_string();
     loop {
         let mut progress = ProgressState::new(0);
-        let mut record =
-            TransferRecord::new(Uuid::new_v4(), TransferDirection::Receive, peer_addr.clone());
+        let mut record = TransferRecord::new(
+            Uuid::new_v4(),
+            TransferDirection::Receive,
+            peer_addr.clone(),
+        );
 
         match session.receive_to(&output, None, Some(&mut progress)).await {
             Ok(_) => {
-                record.complete(vec![output.display().to_string()], progress.transferred_bytes());
+                record.complete(
+                    vec![output.display().to_string()],
+                    progress.transferred_bytes(),
+                );
                 if let Err(e) = record_transfer(record, None).await {
                     warn!("Failed to record transfer history: {}", e);
                 }
             }
-            Err(e)
-                if matches!(
-                    &e,
-                    Error::Disconnected | Error::Quic(_) | Error::Network(_)
-                ) =>
-            {
+            Err(e) if matches!(&e, Error::Disconnected | Error::Quic(_) | Error::Network(_)) => {
                 break;
             }
             Err(e) => {
