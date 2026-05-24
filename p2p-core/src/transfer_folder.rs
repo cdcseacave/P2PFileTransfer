@@ -64,7 +64,7 @@ use crate::protocol::{
     CompleteMessage, ConfigMessage, FileChecksumMessage, FileMetadata, Message, ResumePoint,
     TransferInfo,
 };
-use crate::transfer_file::FileTransferSession;
+use crate::transfer_file::{validate_file_size, FileTransferSession};
 
 /// Statistics emitted at end of a folder transfer.
 #[derive(Debug, Clone)]
@@ -370,6 +370,12 @@ impl<'a> FolderTransferSession<'a> {
         };
         if transfer_info.items.is_empty() {
             return Err(Error::Protocol("No files in transfer".to_string()));
+        }
+        // Reject manifests with absurd per-file sizes before opening any
+        // stream — a hostile peer could otherwise pin us in
+        // accept_uni() forever by advertising u64::MAX (finding 4.1).
+        for f in &transfer_info.items {
+            validate_file_size(f.size)?;
         }
 
         info!("Starting receive to: {:?}", output_dir);
