@@ -214,17 +214,14 @@ pub enum Commands {
     },
 
     /// Resume a previous transfer
+    ///
+    /// Reconnects to the original receiver and continues from the last
+    /// persisted chunk boundary. Use the same pairing flags you used for
+    /// the original `send`: either `--peer` + `--peer-fingerprint` (direct
+    /// mode) or `--rendezvous` + `--code` (cross-NAT).
     Resume {
         /// Transfer ID to resume (or state file path)
         transfer_id: String,
-
-        /// Peer address (IP:PORT) to reconnect to
-        #[arg(long)]
-        to: String,
-
-        /// SHA-256 fingerprint (64 hex chars) of the peer's TLS cert
-        #[arg(long)]
-        peer_fingerprint: String,
 
         /// Original file or folder path to resume from
         #[arg(long)]
@@ -239,6 +236,9 @@ pub enum Commands {
         /// Max reconnect attempts after a connection drop (0 = retry forever)
         #[arg(long, default_value = "5")]
         max_reconnect_attempts: u32,
+
+        #[command(flatten)]
+        session: SessionParams,
     },
 
     /// View transfer history

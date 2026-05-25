@@ -26,7 +26,8 @@ cargo build --release --features gui --no-default-features
 ./target/release/p2p-transfer receive --output ./downloads --port 14567 --auto-accept
 ./target/release/p2p-transfer receive --output ./downloads --rendezvous host:14570 --code ABC123
 ./target/release/p2p-transfer discover
-./target/release/p2p-transfer resume <transfer-id> --peer <ip:port> --peer-fingerprint <hex> --path <orig-path>
+./target/release/p2p-transfer resume <transfer-id> --path <orig-path> --peer <ip:port> --peer-fingerprint <hex>
+./target/release/p2p-transfer resume <transfer-id> --path <orig-path> --rendezvous host:14570 --code ABC123
 ./target/release/p2p-transfer nat-test
 ./target/release/p2p-transfer nat-test --rendezvous host:14570        # self-loop punch test
 ./target/release/p2p-transfer history
@@ -72,10 +73,11 @@ p2p-core/                         core library: protocol, transfer engine, trans
 p2p-cli/                          clap-based CLI (also launches the GUI when --features gui is enabled)
 p2p-gui/                          Iced 0.12 GUI (tabs: Connection, Send, Receive, Settings, History; bottom console)
 p2p-rendezvous/                   pairing-by-code rendezvous server + relay; provides the `rendezvousd` binary
-tests/integration_test.rs         workspace-level QUIC handshake smoke test
-tests/traversal_loopback_test.rs  rendezvous + race-connect-and-accept punch
-tests/relay_loopback_test.rs      rendezvous + UDP relay + QUIC-over-relay end-to-end
-scripts/deploy.py                 idempotent installer for `rendezvousd` on Ubuntu 24+ (install / uninstall / clean-build)
+tests/integration_test.rs                       workspace-level QUIC handshake smoke test
+tests/traversal_loopback_test.rs                rendezvous + race-connect-and-accept punch
+tests/relay_loopback_test.rs                    rendezvous + UDP relay + QUIC-over-relay end-to-end
+tests/rendezvous_disconnect_resume_test.rs      rendezvous re-pair after sender disconnect + resume-over-rendezvous end-to-end
+scripts/deploy.py                               idempotent installer for `rendezvousd` on Ubuntu 24+ (install / uninstall / clean-build)
 ```
 
 `src/main.rs` dispatches by feature: `cli` -> `p2p_cli::run_cli_sync()` (which itself routes the no-arg case to `p2p_gui::run_gui` when the `gui` feature is on); `gui` without `cli` -> direct `run_gui()`. **The GUI is started outside the async runtime** because Iced owns its own Tokio runtime — re-entering Tokio would panic. The CLI builds a `tokio::runtime::Runtime` and calls `block_on` for the async subcommands.

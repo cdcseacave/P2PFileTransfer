@@ -51,7 +51,21 @@ where
     match reader.read(&mut magic[..1]).await {
         Ok(0) => return Err(Error::Disconnected),
         Ok(_) => {}
-        Err(e) => return Err(Error::Network(e)),
+        Err(e) => {
+            // Between-frames close: a peer that called `close(0, "")` surfaces
+            // here as an io::Error with one of these kinds (depending on the
+            // quinn version and which path the close took). Treat it as a
+            // graceful disconnect so the receive loop can re-accept instead of
+            // bubbling up "Error: connection lost" after a successful transfer.
+            use std::io::ErrorKind::*;
+            if matches!(
+                e.kind(),
+                ConnectionAborted | ConnectionReset | NotConnected | BrokenPipe | UnexpectedEof
+            ) {
+                return Err(Error::Disconnected);
+            }
+            return Err(Error::Network(e));
+        }
     }
     reader
         .read_exact(&mut magic[1..])

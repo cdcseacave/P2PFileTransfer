@@ -1,6 +1,5 @@
 //! Resume operations.
 
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -9,23 +8,24 @@ use tokio::signal;
 use tracing::{debug, info, warn};
 
 use p2p_core::{
-    identity::Identity, protocol::Capabilities, session::P2PSession,
-    transfer_folder::FolderTransferState, Uuid,
+    identity::Identity, progress::ProgressState, protocol::Capabilities,
+    reconnect::ReconnectConfig, transfer_folder::FolderTransferState, Uuid,
 };
+
+use crate::cli::SessionParams;
+use crate::rendezvous::establish_session;
 
 pub async fn handle_resume(
     transfer_id: String,
-    to: String,
-    peer_fingerprint_hex: String,
     path: PathBuf,
     state_dir: Option<PathBuf>,
     max_reconnect_attempts: u32,
+    session_params: SessionParams,
     identity_dir: Option<PathBuf>,
 ) -> Result<()> {
     info!("Resuming transfer");
     info!("  Transfer ID: {}", transfer_id);
     info!("  Path: {}", path.display());
-    info!("  Peer address: {}", to);
 
     if !path.exists() {
         anyhow::bail!("Path does not exist: {}", path.display());
@@ -48,41 +48,27 @@ pub async fn handle_resume(
         state.progress_percentage()
     );
 
-    let peer_addr = to.parse::<SocketAddr>()?;
-
-    if peer_fingerprint_hex.len() != 64 {
-        anyhow::bail!(
-            "--peer-fingerprint must be 64 hex chars, got {}",
-            peer_fingerprint_hex.len()
-        );
-    }
-    let mut peer_fp = [0u8; 32];
-    peer_fp.copy_from_slice(&hex::decode(&peer_fingerprint_hex)?);
-
     let identity = Arc::new(Identity::load_or_generate(identity_dir.as_deref())?);
-    let device_id = Uuid::new_v4();
-    let capabilities = Capabilities::all();
+
+    info!("Reconnecting to peer...");
     // Resume the original negotiated config — using ConfigMessage::default
     // here would mis-align the .partial on disk because the receiver and
     // ChunkWriter compute offsets from this chunk_size.
-    let config = state.to_config_message();
-
-    info!("Reconnecting to peer...");
-    let mut session = P2PSession::connect(
-        peer_addr,
-        peer_fp,
+    let mut session = establish_session(
+        &session_params,
+        "client",
         identity,
-        device_id,
-        capabilities,
-        config,
+        Uuid::new_v4(),
+        Capabilities::all(),
+        Some(state.to_config_message()),
     )
     .await?;
     info!("Session established");
 
-    let mut progress = p2p_core::progress::ProgressState::new(state.total_bytes);
+    let mut progress = ProgressState::new(state.total_bytes);
     progress.add_bytes(state.transferred_bytes);
 
-    let reconnect_config = p2p_core::reconnect::ReconnectConfig {
+    let reconnect_config = ReconnectConfig {
         max_attempts: max_reconnect_attempts,
         ..Default::default()
     };
@@ -101,18 +87,9 @@ pub async fn handle_resume(
             // completed mid-file since the last file boundary will be
             // re-sent on the next resume.
             warn!("Transfer interrupted. State persisted up to the most recent file boundary.");
-            info!(
-                "Use 'p2p-transfer resume {} --to {} --peer-fingerprint {} --path {}{}' to continue",
-                transfer_id,
-                to,
-                peer_fingerprint_hex,
-                path.display(),
-                state_dir
-                    .as_deref()
-                    .map(|d| format!(" --state-dir {}", d.display()))
-                    .unwrap_or_default(),
+            warn!(
+                "Re-run the same `p2p-transfer resume` command to continue from where this stopped."
             );
-            return Ok(());
         }
     }
 
@@ -123,16 +100,28 @@ pub async fn handle_resume(
 mod tests {
     use super::*;
 
+    fn empty_session_params() -> SessionParams {
+        SessionParams {
+            role: None,
+            peer: Some("127.0.0.1:1".into()),
+            peer_fingerprint: Some("0".repeat(64)),
+            port: 14567,
+            discover: false,
+            rendezvous: None,
+            code: None,
+            force_relay: false,
+        }
+    }
+
     #[tokio::test]
     async fn rejects_nonexistent_path() {
         let tid = Uuid::new_v4().to_string();
         let result = handle_resume(
             tid,
-            "127.0.0.1:1".into(),
-            "0".repeat(64),
             PathBuf::from("definitely/does/not/exist"),
             None,
             1,
+            empty_session_params(),
             None,
         )
         .await;
@@ -166,11 +155,10 @@ mod tests {
 
         let result = handle_resume(
             tid,
-            "127.0.0.1:1".into(),
-            "0".repeat(64),
             file_path,
             Some(state_dir.clone()),
             1,
+            empty_session_params(),
             None,
         )
         .await;
@@ -191,16 +179,7 @@ mod tests {
         tokio::fs::write(&file_path, b"hello").await.unwrap();
 
         let tid = Uuid::new_v4().to_string();
-        let result = handle_resume(
-            tid,
-            "127.0.0.1:1".into(),
-            "0".repeat(64),
-            file_path,
-            None,
-            1,
-            None,
-        )
-        .await;
+        let result = handle_resume(tid, file_path, None, 1, empty_session_params(), None).await;
         let err = result
             .expect_err("no state file → should error later")
             .to_string();

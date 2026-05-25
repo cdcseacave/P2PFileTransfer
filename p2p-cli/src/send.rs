@@ -16,6 +16,7 @@ use p2p_core::{
 };
 
 use crate::cli::{SessionParams, TransferParams};
+use crate::rendezvous::establish_session;
 use crate::util::{derive_base_name, resolve_state_file};
 
 pub async fn handle_send(
@@ -55,31 +56,16 @@ pub async fn handle_send(
 
     let device_id = Uuid::new_v4();
     let capabilities = Capabilities::all();
-    let peer_fp = session_params.parsed_fingerprint()?;
 
-    let mut session = if crate::rendezvous::is_rendezvous_mode(&session_params) {
-        crate::rendezvous::establish(
-            &session_params,
-            identity,
-            device_id,
-            capabilities,
-            config.clone(),
-        )
-        .await?
-    } else {
-        P2PSession::establish(
-            &role,
-            session_params.peer.clone(),
-            peer_fp,
-            session_params.discover,
-            session_params.port,
-            identity,
-            device_id,
-            capabilities,
-            Some(config.clone()),
-        )
-        .await?
-    };
+    let mut session = establish_session(
+        &session_params,
+        "client",
+        identity,
+        device_id,
+        capabilities,
+        Some(config.clone()),
+    )
+    .await?;
 
     info!("Session established");
     info!("    Peer: {}", session.peer_device_id());
@@ -155,7 +141,12 @@ async fn send(
             if state_file.exists() {
                 warn!("Transfer interrupted");
                 warn!("State saved to: {}", state_file.display());
-                warn!("Resume with: p2p-transfer resume {}", state_file.display());
+                warn!(
+                    "Resume with: p2p-transfer resume {} --path <orig-path> \
+                     (then your original pairing flags: --peer + --peer-fingerprint, \
+                     or --rendezvous + --code)",
+                    transfer_id
+                );
             }
             record.fail(e.to_string());
             if let Err(rec_err) = record_transfer(record, None).await {

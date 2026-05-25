@@ -181,9 +181,7 @@ curl -fsSL https://raw.githubusercontent.com/cdcseacave/P2PFileTransfer/develop/
 Then drive it:
 
 ```bash
-# First install (clones to /opt/p2p, builds, starts the service)
-sudo python3 deploy.py install /opt/p2p
-
+# First install (clones to /opt/p2p, builds, starts the service) or same command to
 # Update later (pulls latest develop, rebuilds, restarts only if changed)
 sudo python3 deploy.py install /opt/p2p
 
@@ -207,18 +205,30 @@ no-op re-runs don't interrupt active pairings. A `clean-build` + later
 
 ### Resume
 
+`resume` accepts the same pairing flags as `send`/`receive` — either
+direct addressing or rendezvous-mediated. Pick whichever matches how the
+original `send` reached the peer.
+
 ```
+# Direct (same LAN, or a stable port-forwarded receiver)
 p2p-transfer resume <transfer_id> \
-    --to 192.168.1.42:14567 \
-    --peer-fingerprint <hex> \
-    --path ./bigfile.bin
+    --path ./bigfile.bin \
+    --peer 192.168.1.42:14567 \
+    --peer-fingerprint <hex>
+
+# Cross-NAT (the receiver is still listening through the same rendezvous + code)
+p2p-transfer resume <transfer_id> \
+    --path ./bigfile.bin \
+    --rendezvous rendezvous.example.com:14570 \
+    --code ABC123
 ```
 
 Reads `transfer_<transfer_id>.json` (written when a transfer is
 interrupted) and continues from the chunk bitmap. The state file lives
-in the working directory where the transfer started; the original
-`--path` and `--peer-fingerprint` aren't stored, so you have to supply
-them again on resume.
+in the working directory where the transfer started — pass
+`--state-dir` if you started the original `send` from somewhere else.
+The original `--path` and pairing flags aren't stored, so you have to
+supply them again on resume.
 
 ### History
 

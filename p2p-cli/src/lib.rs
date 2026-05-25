@@ -7,14 +7,18 @@
 //! - `discover`: Peer discovery functionality
 //! - `resume`: Resume interrupted transfers
 
-mod cli;
+// `cli`, `send`, `receive`, and `resume` are `pub` so the workspace-level
+// integration test in `tests/rendezvous_disconnect_resume_test.rs` can
+// drive the same handler functions the binary dispatches to. The rest
+// stay private — they're not stable surface for external consumers.
+pub mod cli;
 mod discover;
 mod history;
 mod nat_test;
-mod receive;
+pub mod receive;
 mod rendezvous;
-mod resume;
-mod send;
+pub mod resume;
+pub mod send;
 mod util;
 
 use anyhow::Result;
@@ -151,19 +155,17 @@ async fn run_cli_async(cli: Cli) -> Result<()> {
         }
         Some(cli::Commands::Resume {
             transfer_id,
-            to,
-            peer_fingerprint,
             path,
             state_dir,
             max_reconnect_attempts,
+            session,
         }) => {
             resume::handle_resume(
                 transfer_id,
-                to,
-                peer_fingerprint,
                 path,
                 state_dir,
                 max_reconnect_attempts,
+                session,
                 identity_dir,
             )
             .await?;
