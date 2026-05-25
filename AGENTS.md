@@ -75,6 +75,7 @@ p2p-rendezvous/                   pairing-by-code rendezvous server + relay; pro
 tests/integration_test.rs         workspace-level QUIC handshake smoke test
 tests/traversal_loopback_test.rs  rendezvous + race-connect-and-accept punch
 tests/relay_loopback_test.rs      rendezvous + UDP relay + QUIC-over-relay end-to-end
+scripts/deploy.py                 idempotent installer for `rendezvousd` on Ubuntu 24+ (install / uninstall / clean-build)
 ```
 
 `src/main.rs` dispatches by feature: `cli` -> `p2p_cli::run_cli_sync()` (which itself routes the no-arg case to `p2p_gui::run_gui` when the `gui` feature is on); `gui` without `cli` -> direct `run_gui()`. **The GUI is started outside the async runtime** because Iced owns its own Tokio runtime — re-entering Tokio would panic. The CLI builds a `tokio::runtime::Runtime` and calls `block_on` for the async subcommands.

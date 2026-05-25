@@ -108,6 +108,38 @@ The binary uses its own `tracing_subscriber` (separate from `p2p-cli`'s init) be
 - **Slot-binding invariants live in `reserve_session`.** If a future feature needs to relax the fingerprint check, change it there explicitly — don't loosen the `forward_loop` lookup.
 - **`PROTOCOL_VERSION` is equality-checked.** Bump it together on server + client and fail the build if anything still references the old constant.
 
+## Deploying to a VPS
+
+`scripts/deploy.py` is the supported way to run `rendezvousd` on a real
+server (Ubuntu 24+). It's a single-file Python 3 stdlib script with three
+subcommands: `install`, `uninstall`, and `clean-build`. Every step is
+idempotent — `dpkg -s` checks each apt package, the cargo binary's SHA256
+is compared against the installed copy before any restart, the systemd
+unit is compared byte-for-byte before re-writing, etc. Safe to re-run.
+
+Key invariants worth knowing if you touch the script:
+
+- **Build identity** is `$SUDO_USER` when invoked via sudo, else root.
+  Cargo state lives in that user's `~/.cargo`. Don't switch to a global
+  cargo install — keeping per-user state means a `clean-build` only wipes
+  `<dest>/target/` and rust itself survives.
+- **Restart only on change.** `install_binary` and `install_service_unit`
+  each return a "changed?" bool; `systemd_enable_and_start` restarts the
+  daemon only when one of them flips. A no-op `install` re-run does not
+  drop in-flight pairings.
+- **`clean-build` is recoverable.** Removing `<dest>/target/` doesn't
+  break the running service (the binary is at `/usr/local/bin/rendezvousd`,
+  not under the repo). A later `install` rebuilds the target dir from
+  scratch and the SHA256 compare keeps the no-op restart suppression
+  working.
+- **Service-unit constants** live next to `SERVICE_UNIT` at the top of the
+  file. When the binary's CLI surface changes (new flag, renamed flag, new
+  default), update the `ExecStart=` line — that's the single source of
+  truth the script writes to `/etc/systemd/system/rendezvousd.service`.
+- **UFW handling is opt-in.** If `ufw` isn't installed or isn't `active`,
+  the firewall step is skipped (logged as a warning) — the script never
+  enables a firewall the operator didn't choose to run.
+
 ## Tests
 
 ```bash

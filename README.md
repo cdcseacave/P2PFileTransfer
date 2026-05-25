@@ -163,6 +163,48 @@ the IP is forgeable for traffic reflection), and the relay's slot
 binding pins each session's two seats to specific cert fingerprints
 upfront so impostors with only the session token can't take a seat.
 
+### Self-hosting `rendezvousd` on a VPS
+
+A scripted, idempotent installer for Ubuntu 24+ lives at `scripts/deploy.py`.
+It runs end-to-end from a clean box — apt deps, rust toolchain, repo clone,
+release build, systemd unit, dedicated `rendezvous` system user, UFW rules
+— and is safe to re-run any time to update.
+
+On a fresh VPS you don't need to clone the repo first — fetch just the
+deploy script and it will do the clone itself:
+
+```bash
+sudo apt-get install -y python3 curl
+curl -fsSL https://raw.githubusercontent.com/cdcseacave/P2PFileTransfer/develop/scripts/deploy.py -o deploy.py
+```
+
+Then drive it:
+
+```bash
+# First install (clones to /opt/p2p, builds, starts the service)
+sudo python3 deploy.py install /opt/p2p
+
+# Update later (pulls latest develop, rebuilds, restarts only if changed)
+sudo python3 deploy.py install /opt/p2p
+
+# Pin to a different branch
+sudo python3 deploy.py install /opt/p2p --branch main
+
+# Reclaim disk after a successful install (deletes target/, keeps the
+# /usr/local/bin/rendezvousd binary and the running service)
+sudo python3 deploy.py install /opt/p2p --prune-build
+sudo python3 deploy.py clean-build /opt/p2p     # standalone form
+
+# Full teardown
+sudo python3 deploy.py uninstall                       # keeps repo
+sudo python3 deploy.py uninstall --purge-repo /opt/p2p # removes repo too
+```
+
+The installer compares the freshly built binary's SHA256 against the
+installed copy and only restarts the service when it actually changed, so
+no-op re-runs don't interrupt active pairings. A `clean-build` + later
+`install` works fine — cargo just rebuilds `target/` from scratch.
+
 ### Resume
 
 ```
