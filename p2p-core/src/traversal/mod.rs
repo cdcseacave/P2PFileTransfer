@@ -65,14 +65,16 @@ pub struct RendezvousParams {
 ///
 /// Steps:
 /// 1. Bind a fresh UDP socket on `0.0.0.0:0`.
-/// 2. Query STUN on that socket to learn our public endpoint and check
-///    whether we're on a symmetric NAT (returns
-///    [`Error::HolePunchFailed`] up front if so — Phase 2 will route
-///    around this via the relay fallback).
+/// 2. Query STUN on that socket to learn our public endpoint and
+///    classify the local NAT. On Cone NAT we register for direct
+///    punching; on Symmetric NAT we set `want_relay = true` so the
+///    rendezvous returns a relay endpoint instead of trying to punch.
 /// 3. Register at the rendezvous and wait for the peer to do the same.
 /// 4. Convert the socket to a `std::net::UdpSocket` and hand it to
 ///    [`QuicEndpoint::from_socket`].
-/// 5. Race connect/accept as the actual punch.
+/// 5. Either race connect/accept as the actual punch (Direct outcome)
+///    or send a [`RelayHello`] and run QUIC through the relay (Relay
+///    outcome).
 pub async fn establish_via_rendezvous(params: RendezvousParams) -> Result<EstablishedSession> {
     let RendezvousParams {
         rendezvous,

@@ -15,9 +15,12 @@ pub fn derive_base_name(path: &Path) -> Result<String> {
     if let Some(name) = path.file_name() {
         return Ok(name.to_string_lossy().to_string());
     }
-    let canonical = path
-        .canonicalize()
-        .with_context(|| format!("path has no file name and cannot be canonicalised: {}", path.display()))?;
+    let canonical = path.canonicalize().with_context(|| {
+        format!(
+            "path has no file name and cannot be canonicalised: {}",
+            path.display()
+        )
+    })?;
     if let Some(name) = canonical.file_name() {
         return Ok(name.to_string_lossy().to_string());
     }
@@ -37,9 +40,8 @@ pub fn resolve_state_file(state_dir: Option<&Path>, transfer_id: &str) -> Result
     let file_name = format!("transfer_{transfer_id}.json");
     match state_dir {
         Some(dir) => {
-            std::fs::create_dir_all(dir).with_context(|| {
-                format!("failed to create state dir {}", dir.display())
-            })?;
+            std::fs::create_dir_all(dir)
+                .with_context(|| format!("failed to create state dir {}", dir.display()))?;
             Ok(dir.join(file_name))
         }
         None => Ok(PathBuf::from(file_name)),

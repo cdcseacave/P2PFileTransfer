@@ -7,10 +7,15 @@
 //! travels on one unidirectional QUIC stream per chunk with the wire format
 //!
 //! ```text
-//! [chunk_index : u64 little-endian | payload bytes (compressed iff config.compression_enabled)]
+//! [chunk_index : u64 little-endian | flags : u8 | payload bytes]
 //! ```
 //!
-//! and never goes through this control-plane [`Message`] enum.
+//! `flags` is a per-chunk bitfield (`transfer_file::FLAG_COMPRESSED = 0x01`
+//! is the only bit defined today). The adaptive compressor decides per chunk
+//! whether to compress, so even when `config.compression_enabled` is `true`
+//! some chunks ride uncompressed (with `flags = 0`). When negotiation
+//! disabled compression the sender never sets the bit. Chunk data never
+//! goes through this control-plane [`Message`] enum.
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;

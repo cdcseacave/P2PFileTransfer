@@ -340,14 +340,29 @@ impl P2PSession {
                     }
                     Err(e) => {
                         warn!("Failed to load state file: {}", e);
-                        FolderTransferState::new(Uuid::new_v4(), String::new(), vec![], &self.handshake.config)
+                        FolderTransferState::new(
+                            Uuid::new_v4(),
+                            String::new(),
+                            vec![],
+                            &self.handshake.config,
+                        )
                     }
                 }
             } else {
-                FolderTransferState::new(Uuid::new_v4(), String::new(), vec![], &self.handshake.config)
+                FolderTransferState::new(
+                    Uuid::new_v4(),
+                    String::new(),
+                    vec![],
+                    &self.handshake.config,
+                )
             }
         } else {
-            FolderTransferState::new(Uuid::new_v4(), String::new(), vec![], &self.handshake.config)
+            FolderTransferState::new(
+                Uuid::new_v4(),
+                String::new(),
+                vec![],
+                &self.handshake.config,
+            )
         };
 
         let transfer_id = if state.files.is_empty() {
@@ -481,8 +496,11 @@ impl P2PSession {
             self.endpoint.local_addr()?
         );
         let mut new_connection = self.endpoint.accept().await?;
-        let handshake_server =
-            HandshakeServer::new(self.device_id, self.handshake.agreed_capabilities, &self.identity);
+        let handshake_server = HandshakeServer::new(
+            self.device_id,
+            self.handshake.agreed_capabilities,
+            &self.identity,
+        );
         let handshake = handshake_server
             .perform_handshake(&mut new_connection)
             .await?;

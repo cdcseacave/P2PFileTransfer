@@ -175,7 +175,9 @@ mod tests {
         )
         .await;
 
-        let err = result.expect_err("should fail later for unrelated reasons").to_string();
+        let err = result
+            .expect_err("should fail later for unrelated reasons")
+            .to_string();
         assert!(
             !err.contains("State file not found"),
             "--state-dir must let resume locate the file; got: {err}"

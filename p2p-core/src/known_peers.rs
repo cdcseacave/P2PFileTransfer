@@ -147,10 +147,35 @@ impl KnownPeers {
         self.state.lock().unwrap_or_else(|p| p.into_inner())
     }
 
+    /// Serialize `store` and write it atomically: a sibling `*.tmp` file
+    /// is fully written + `fsync`ed, then `rename`ed over the real path.
+    /// A crash before the rename leaves the previous `known_peers.json`
+    /// intact; a crash after leaves the new one durable.
     fn flush(&self, store: &Store) -> Result<()> {
+        use std::io::Write;
         let bytes = serde_json::to_vec_pretty(store)
             .map_err(|e| Error::Other(format!("known_peers.json serialize: {e}")))?;
-        std::fs::write(&self.path, bytes).map_err(Error::Network)
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent).map_err(Error::Network)?;
+        }
+        let mut tmp = self.path.clone();
+        let mut name = tmp
+            .file_name()
+            .map(|n| n.to_os_string())
+            .unwrap_or_default();
+        name.push(".tmp");
+        tmp.set_file_name(name);
+        {
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&tmp)
+                .map_err(Error::Network)?;
+            f.write_all(&bytes).map_err(Error::Network)?;
+            f.sync_all().map_err(Error::Network)?;
+        }
+        std::fs::rename(&tmp, &self.path).map_err(Error::Network)
     }
 }
 

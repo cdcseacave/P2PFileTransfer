@@ -139,11 +139,7 @@ fn accept_or_prompt(auto_accept: bool, info: &TransferInfo) -> AcceptDecision {
         return AcceptDecision::Accept;
     }
     let total: u64 = info.items.iter().map(|f| f.size).sum();
-    let first = info
-        .items
-        .first()
-        .map(|f| f.path.as_str())
-        .unwrap_or("?");
+    let first = info.items.first().map(|f| f.path.as_str()).unwrap_or("?");
     eprint!(
         "Incoming transfer: {} files starting with {:?} ({} bytes total). Accept? [y/N]: ",
         info.items.len(),

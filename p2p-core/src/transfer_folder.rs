@@ -291,8 +291,7 @@ impl<'a> FolderTransferSession<'a> {
             };
 
             let file_list: Vec<FileMetadata> = files.iter().map(|(_, m)| m.clone()).collect();
-            *state =
-                FolderTransferState::new(self.transfer_id, base_name, file_list, &self.config);
+            *state = FolderTransferState::new(self.transfer_id, base_name, file_list, &self.config);
             None
         };
 
@@ -303,8 +302,7 @@ impl<'a> FolderTransferSession<'a> {
         }
 
         let is_resuming = resume_point.is_some();
-        let completed_files: Vec<u32> =
-            state.completed_files.iter().map(|i| *i as u32).collect();
+        let completed_files: Vec<u32> = state.completed_files.iter().map(|i| *i as u32).collect();
         let transfer_info = TransferInfo {
             transfer_id: self.transfer_id,
             items: state.files.clone(),
@@ -326,12 +324,7 @@ impl<'a> FolderTransferSession<'a> {
             // sending Cancel without waiting for our acknowledgement —
             // that surfaces here as Disconnected/Network/Quic instead of
             // a clean Cancel message. Treat as a rejection.
-            Err(e)
-                if matches!(
-                    &e,
-                    Error::Disconnected | Error::Network(_) | Error::Quic(_)
-                ) =>
-            {
+            Err(e) if matches!(&e, Error::Disconnected | Error::Network(_) | Error::Quic(_)) => {
                 info!("Receiver disconnected before sending Ready; treating as cancel.");
                 return Err(Error::Cancelled);
             }
@@ -562,11 +555,7 @@ impl<'a> FolderTransferSession<'a> {
                 .first()
                 .map(|f| f.path.clone())
                 .unwrap_or_default(),
-            files: transfer_info
-                .items
-                .iter()
-                .map(|f| f.path.clone())
-                .collect(),
+            files: transfer_info.items.iter().map(|f| f.path.clone()).collect(),
             bytes: total_bytes.saturating_sub(already_transferred),
         };
         Ok(summary)
