@@ -134,8 +134,50 @@ The GUI holds the active `P2PSession` in shared state so transfer tabs can drive
 - **Errors**: `p2p-core` returns its own `Error`/`Result` from `error.rs`; CLI layer uses `anyhow::Context` to add user-facing context. Don't `panic!` in library code.
 - **Async**: all I/O is `tokio` async. Don't block the runtime; use `tokio::select!` for timeouts/cancellation.
 - **Hot path**: the per-chunk loop in `transfer_file.rs` — avoid per-chunk allocations, prefer buffer reuse and references over cloning.
-- **Documentation policy** (from `.github/copilot-instructions.md`): keep all docs in the four canonical files — `README.md`, `DESIGN.md`, `TODO.md`, `CHANGELOG.md`. Do **not** create per-feature markdown files. When a feature ships: remove its entry from `TODO.md`, document usage in `README.md`, document architecture in `DESIGN.md`, add a dated `CHANGELOG.md` entry.
+- **Documentation policy**: keep all docs in the four canonical files — `README.md`, `DESIGN.md`, `TODO.md`, `CHANGELOG.md`. Do **not** create per-feature markdown files (e.g. `FEATURE_NAME.md`, `IMPLEMENTATION_SUMMARY.md`, `QUICK_REFERENCE.md`). When a feature ships: remove its entry from `TODO.md`, document usage in `README.md`, document architecture in `DESIGN.md`, add a dated `CHANGELOG.md` entry. Rationale: keep documentation centralized so it doesn't fragment.
+- **Module docs**: every module needs a `//!` header; every public item needs `///` docstrings.
 - **Branches**: `main` stable, `develop` integration (default), `feature/*`, `bugfix/*`, `hotfix/*`. Conventional commit prefixes (`feat:`, `fix:`, `docs:`, `test:`, `refactor:`, `perf:`, `chore:`).
+
+## Workflow
+
+### Before committing
+
+Run the full pipeline locally — every step must be green:
+
+```bash
+cargo build --release                                     # compiles cleanly
+cargo test --all                                          # unit + integration + doc
+cargo clippy --all-targets --all-features -- -D warnings  # zero-warning policy
+cargo fmt -- --check                                      # rustfmt clean
+cargo doc --no-deps                                       # docs build without warnings
+```
+
+The end-to-end Python harness is the last gate when you've touched the wire protocol or transfer engine:
+
+```bash
+rm -f test_file
+python3 test_transfer.py --size 50                 # incompressible
+python3 test_transfer.py --size 50 --compressible  # ratio > 100×
+```
+
+### When refactoring
+
+1. Run the full pipeline above.
+2. Never remove a field or method without grepping every caller first.
+3. Per the "no compat shim" rule, when a wire format changes, bump `PROTOCOL_VERSION` and update the call sites in place — don't leave deprecated paths.
+
+### When adding a feature
+
+1. Add unit tests in the module's `#[cfg(test)] mod tests`.
+2. Follow the existing async/error/callback patterns.
+3. Update `TODO.md` (remove the entry when fully shipped), `README.md` (usage), `DESIGN.md` (architecture), and `CHANGELOG.md` (dated entry).
+
+### When fixing a bug
+
+1. Write a failing test that reproduces the bug.
+2. Fix it; the test goes green.
+3. Run the full pipeline.
+4. Add a dated `CHANGELOG.md` entry referencing the finding/symptom.
 
 ## Gotchas
 

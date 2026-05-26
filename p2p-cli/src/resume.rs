@@ -8,8 +8,8 @@ use tokio::signal;
 use tracing::{debug, info, warn};
 
 use p2p_core::{
-    identity::Identity, progress::ProgressState, protocol::Capabilities,
-    reconnect::ReconnectConfig, transfer_folder::FolderTransferState, Uuid,
+    identity::Identity, progress::ProgressState, reconnect::ReconnectConfig,
+    transfer_folder::FolderTransferState, Uuid,
 };
 
 use crate::cli::SessionParams;
@@ -59,8 +59,7 @@ pub async fn handle_resume(
         "client",
         identity,
         Uuid::new_v4(),
-        Capabilities::all(),
-        Some(state.to_config_message()),
+        Some(state.config.clone()),
     )
     .await?;
     info!("Session established");

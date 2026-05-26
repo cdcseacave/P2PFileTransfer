@@ -103,7 +103,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{Capabilities, HelloMessage};
+    use crate::protocol::HelloMessage;
     use uuid::Uuid;
 
     #[tokio::test]
@@ -150,7 +150,6 @@ mod tests {
             protocol_version: crate::PROTOCOL_VERSION,
             min_version: crate::MIN_PROTOCOL_VERSION,
             device_id: Uuid::new_v4(),
-            capabilities: Capabilities::all(),
             cert_fingerprint: [0u8; 32],
         });
 

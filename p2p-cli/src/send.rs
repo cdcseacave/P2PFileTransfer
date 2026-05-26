@@ -10,7 +10,7 @@ use tracing::{info, warn};
 use p2p_core::{
     history::{record_transfer, TransferDirection, TransferRecord},
     identity::Identity,
-    protocol::{Capabilities, ConfigMessage},
+    protocol::ConfigMessage,
     session::P2PSession,
     Uuid,
 };
@@ -55,14 +55,12 @@ pub async fn handle_send(
     info!("  Identity fingerprint: {}", identity.fingerprint_hex());
 
     let device_id = Uuid::new_v4();
-    let capabilities = Capabilities::all();
 
     let mut session = establish_session(
         &session_params,
         "client",
         identity,
         device_id,
-        capabilities,
         Some(config.clone()),
     )
     .await?;
@@ -73,7 +71,6 @@ pub async fn handle_send(
         "    Peer fingerprint: {}",
         hex::encode(session.peer_fingerprint())
     );
-    info!("    Capabilities: {:?}", session.capabilities());
 
     let peer_addr = session.peer_addr().to_string();
 

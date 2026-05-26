@@ -3,8 +3,10 @@
 //! A session is an established, authenticated QUIC connection between two
 //! peers. Once the handshake completes, both sides are fully symmetric:
 //! either peer can initiate sends or receives over the same connection.
-//! The [`ConnectionRole`] is preserved only for `reconnect()` (only the
-//! initiator knows where to reconnect to).
+//! Whether this end is the initiator or responder is captured by
+//! `initiator_target`: it's `Some(addr, fp)` on the initiator (which uses
+//! it for `reconnect()`) and `None` on the responder (which uses
+//! `reaccept()` to keep listening on the same endpoint).
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
@@ -19,7 +21,7 @@ use crate::handshake::{HandshakeClient, HandshakeResult, HandshakeServer};
 use crate::identity::{Fingerprint, Identity};
 use crate::network::quic::{QuicConnection, QuicEndpoint};
 use crate::progress::ProgressState;
-use crate::protocol::{Capabilities, ConfigMessage};
+use crate::protocol::ConfigMessage;
 use crate::transfer_folder::{
     AcceptDecision, FolderTransferSession, FolderTransferState, TransferSummary,
 };
@@ -33,18 +35,9 @@ pub struct P2PSession {
     session_id: Uuid,
     device_id: Uuid,
     handshake: HandshakeResult,
-    role: ConnectionRole,
     /// For initiators: the peer's address + fingerprint, kept so we can
-    /// reconnect after a transient failure.
+    /// reconnect after a transient failure. `None` on the responder.
     initiator_target: Option<(SocketAddr, Fingerprint)>,
-}
-
-/// Connection role — only relevant during establishment and reconnection.
-/// After handshake, both peers can send and receive on the same connection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ConnectionRole {
-    Initiator,
-    Responder,
 }
 
 impl P2PSession {
@@ -59,7 +52,6 @@ impl P2PSession {
         peer_fingerprint: Fingerprint,
         identity: Arc<Identity>,
         device_id: Uuid,
-        capabilities: Capabilities,
         config: ConfigMessage,
     ) -> Result<Self> {
         debug!("Creating client session to {}", peer_addr);
@@ -71,14 +63,14 @@ impl P2PSession {
         let mut connection = endpoint.connect(peer_addr, peer_fingerprint).await?;
         trace!("QUIC connection established");
 
-        let handshake_client = HandshakeClient::new(device_id, capabilities, &identity);
+        let handshake_client = HandshakeClient::new(device_id, &identity);
         let handshake = handshake_client
             .perform_handshake(&mut connection, config)
             .await?;
 
         debug!(
-            "Session established as initiator (peer: {}, capabilities: {:?})",
-            handshake.peer_device_id, handshake.agreed_capabilities
+            "Session established as initiator (peer: {})",
+            handshake.peer_device_id
         );
 
         Ok(Self {
@@ -88,7 +80,6 @@ impl P2PSession {
             session_id: Uuid::new_v4(),
             device_id,
             handshake,
-            role: ConnectionRole::Initiator,
             initiator_target: Some((peer_addr, peer_fingerprint)),
         })
     }
@@ -100,15 +91,13 @@ impl P2PSession {
     /// on it, exchanges public endpoints + cert fingerprints over the
     /// rendezvous, then races `QuicEndpoint::connect`/`accept` as the
     /// hole-punch. After the QUIC connection is up, both peers run the
-    /// application handshake — initiator role is decided by lexical
-    /// comparison of cert fingerprints so it's deterministic without
-    /// extra coordination.
+    /// application handshake — initiator role is decided by comparing
+    /// device IDs so it's deterministic without extra coordination.
     pub async fn from_rendezvous(
         rendezvous: SocketAddr,
         code: String,
         identity: Arc<Identity>,
         device_id: Uuid,
-        capabilities: Capabilities,
         config: ConfigMessage,
         force_relay: bool,
     ) -> Result<Self> {
@@ -129,40 +118,29 @@ impl P2PSession {
             endpoint,
             mut connection,
             peer_endpoint,
-            peer_fingerprint,
+            peer_fingerprint: _,
             peer_device_id,
         } = session;
 
-        // Deterministic initiator/responder split. Compare device IDs
-        // (fresh UUIDs per process — always unique even when both
-        // peers run on the same machine with a shared identity).
-        // Fingerprints would alias when a user pairs themselves;
-        // device_id is always fresh.
+        // Deterministic initiator/responder split: compare device IDs.
+        // Fresh per-process UUIDs are always unique even when both peers
+        // run on the same machine sharing an identity; fingerprints would
+        // alias when a user pairs themselves.
         let we_initiate = device_id < peer_device_id;
         let handshake = if we_initiate {
-            HandshakeClient::new(device_id, capabilities, &identity)
+            HandshakeClient::new(device_id, &identity)
                 .perform_handshake(&mut connection, config)
                 .await?
         } else {
-            HandshakeServer::new(device_id, capabilities, &identity)
+            HandshakeServer::new(device_id, &identity)
                 .perform_handshake(&mut connection)
                 .await?
         };
 
         info!(
-            "rendezvous session established (peer device {}, addr {peer_endpoint}, capabilities {:?})",
-            handshake.peer_device_id, handshake.agreed_capabilities,
+            "rendezvous session established (peer device {}, addr {peer_endpoint})",
+            handshake.peer_device_id,
         );
-
-        let role = if we_initiate {
-            ConnectionRole::Initiator
-        } else {
-            ConnectionRole::Responder
-        };
-
-        // Suppress unused warning when peer_fingerprint isn't needed beyond
-        // the handshake result.
-        let _ = peer_fingerprint;
 
         Ok(Self {
             endpoint,
@@ -171,10 +149,9 @@ impl P2PSession {
             session_id: Uuid::new_v4(),
             device_id,
             handshake,
-            role,
             // Rendezvous codes are single-use and expire; reconnect()
             // would need a fresh code re-coordinated with the peer.
-            // Skip auto-reconnect for traversal sessions in Phase 1.
+            // Skip auto-reconnect for traversal sessions.
             initiator_target: None,
         })
     }
@@ -185,7 +162,6 @@ impl P2PSession {
         bind_addr: SocketAddr,
         identity: Arc<Identity>,
         device_id: Uuid,
-        capabilities: Capabilities,
     ) -> Result<Self> {
         let endpoint = QuicEndpoint::bind(bind_addr, identity.clone())?;
         trace!(
@@ -196,12 +172,12 @@ impl P2PSession {
         let mut connection = endpoint.accept().await?;
         trace!("QUIC connection accepted from {}", connection.peer_addr());
 
-        let handshake_server = HandshakeServer::new(device_id, capabilities, &identity);
+        let handshake_server = HandshakeServer::new(device_id, &identity);
         let handshake = handshake_server.perform_handshake(&mut connection).await?;
 
         debug!(
-            "Session established as responder (peer: {}, capabilities: {:?})",
-            handshake.peer_device_id, handshake.agreed_capabilities
+            "Session established as responder (peer: {})",
+            handshake.peer_device_id
         );
 
         Ok(Self {
@@ -211,97 +187,60 @@ impl P2PSession {
             session_id: Uuid::new_v4(),
             device_id,
             handshake,
-            role: ConnectionRole::Responder,
             initiator_target: None,
         })
     }
 
-    /// High-level establish: dispatch based on the role string.
-    ///
-    /// * `role = "client"` — direct `--peer` if `peer_addr` is `Some`, else
-    ///   use LAN discovery if `use_discovery` is true.
-    /// * `role = "server"` — bind on `0.0.0.0:port` and accept.
-    ///
-    /// `peer_fingerprint` is required for direct `--peer` mode; LAN discovery
-    /// pulls it from the beacon.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn establish(
-        role: &str,
-        peer_addr: Option<String>,
-        peer_fingerprint: Option<Fingerprint>,
-        use_discovery: bool,
-        port: u16,
-        identity: Arc<Identity>,
-        device_id: Uuid,
-        capabilities: Capabilities,
-        config: Option<ConfigMessage>,
-    ) -> Result<Self> {
-        if role == "client" {
-            let (peer, fp) = if let Some(addr_str) = peer_addr {
-                let parsed: SocketAddr = match addr_str.parse() {
-                    Ok(sa) => sa,
-                    Err(_) => match addr_str.parse::<IpAddr>() {
-                        Ok(ip) => SocketAddr::new(ip, port),
-                        Err(e) => {
-                            return Err(Error::Protocol(format!(
-                                "Invalid peer address '{}': {}",
-                                addr_str, e
-                            )))
-                        }
-                    },
-                };
-                let fp = peer_fingerprint.ok_or_else(|| {
-                    Error::Protocol(
-                        "--peer-fingerprint is required for direct connections".to_string(),
-                    )
-                })?;
-                (parsed, fp)
-            } else if use_discovery {
-                info!("Using peer discovery on port {}...", port);
-
-                let device_name = format!("p2p-{}", &device_id.to_string()[..8]);
-                let manager = Arc::new(
-                    crate::discovery::DiscoveryManager::new(
-                        device_name,
-                        port,
-                        capabilities,
-                        identity.fingerprint(),
-                        Duration::from_secs(10),
-                    )
-                    .await?,
-                );
-
-                let manager_clone = manager.clone();
-                let discovery_handle = tokio::spawn(async move {
-                    let _ = manager_clone.start().await;
-                });
-
-                tokio::time::sleep(Duration::from_secs(3)).await;
-                let peers = manager.get_peers().await;
-                discovery_handle.abort();
-
-                let peer = peers.into_iter().next().ok_or_else(|| {
-                    Error::Protocol(
-                        "No peers discovered. Make sure a peer is running in server mode."
-                            .to_string(),
-                    )
-                })?;
-                (peer.socket_addr(), peer.cert_fingerprint)
-            } else {
-                return Err(Error::Protocol(
-                    "Peer address or discovery required for client role".to_string(),
-                ));
-            };
-
-            let cfg = config
-                .ok_or_else(|| Error::Protocol("Config required for client role".to_string()))?;
-            Self::connect(peer, fp, identity, device_id, capabilities, cfg).await
-        } else {
-            let bind_addr: SocketAddr = format!("0.0.0.0:{}", port)
-                .parse()
-                .map_err(|e| Error::Protocol(format!("Invalid port {}: {}", port, e)))?;
-            Self::accept(bind_addr, identity, device_id, capabilities).await
+    /// Parse a user-supplied peer string (`host:port`, `host`, or bare IP)
+    /// into a `SocketAddr`, defaulting to `port` when no port was given.
+    pub fn parse_peer_addr(addr_str: &str, port: u16) -> Result<SocketAddr> {
+        if let Ok(sa) = addr_str.parse::<SocketAddr>() {
+            return Ok(sa);
         }
+        if let Ok(ip) = addr_str.parse::<IpAddr>() {
+            return Ok(SocketAddr::new(ip, port));
+        }
+        Err(Error::Protocol(format!(
+            "invalid peer address '{addr_str}'"
+        )))
+    }
+
+    /// Run LAN UDP-beacon discovery for up to ~3 s and return the first
+    /// peer that announces itself, plus its cert fingerprint pulled from
+    /// the beacon. Used by direct-mode `--discover` and the GUI's
+    /// "discover toggle".
+    pub async fn discover_one_peer(
+        port: u16,
+        identity: &Identity,
+        device_id: Uuid,
+    ) -> Result<(SocketAddr, Fingerprint)> {
+        info!("Using peer discovery on port {}...", port);
+        let device_name = format!("p2p-{}", &device_id.to_string()[..8]);
+        let manager = Arc::new(
+            crate::discovery::DiscoveryManager::new(
+                device_name,
+                port,
+                identity.fingerprint(),
+                Duration::from_secs(10),
+            )
+            .await?,
+        );
+
+        let manager_clone = manager.clone();
+        let handle = tokio::spawn(async move {
+            let _ = manager_clone.start().await;
+        });
+
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let peers = manager.get_peers().await;
+        handle.abort();
+
+        let peer = peers.into_iter().next().ok_or_else(|| {
+            Error::Protocol(
+                "No peers discovered. Make sure a peer is running in server mode.".to_string(),
+            )
+        })?;
+        Ok((peer.socket_addr(), peer.cert_fingerprint))
     }
 
     // ------------------------------------------------------------------
@@ -325,8 +264,17 @@ impl P2PSession {
 
         let mut attempt = 0;
 
-        let mut state = if let Some(state_file) = state_path {
-            if state_file.exists() {
+        let fresh_state = || {
+            FolderTransferState::new(
+                Uuid::new_v4(),
+                String::new(),
+                vec![],
+                &self.handshake.config,
+            )
+        };
+
+        let mut state = match state_path {
+            Some(state_file) if state_file.exists() => {
                 info!("Loading existing transfer state from {:?}", state_file);
                 match FolderTransferState::load_from_file(state_file).await {
                     Ok(loaded) => {
@@ -340,29 +288,11 @@ impl P2PSession {
                     }
                     Err(e) => {
                         warn!("Failed to load state file: {}", e);
-                        FolderTransferState::new(
-                            Uuid::new_v4(),
-                            String::new(),
-                            vec![],
-                            &self.handshake.config,
-                        )
+                        fresh_state()
                     }
                 }
-            } else {
-                FolderTransferState::new(
-                    Uuid::new_v4(),
-                    String::new(),
-                    vec![],
-                    &self.handshake.config,
-                )
             }
-        } else {
-            FolderTransferState::new(
-                Uuid::new_v4(),
-                String::new(),
-                vec![],
-                &self.handshake.config,
-            )
+            _ => fresh_state(),
         };
 
         let transfer_id = if state.files.is_empty() {
@@ -460,7 +390,7 @@ impl P2PSession {
     /// consulted after TransferInfo arrives and before any data flows —
     /// the CLI uses this to honour `--auto-accept` and/or prompt the
     /// user. Returns a `TransferSummary` describing what landed on disk
-    /// so callers can record an accurate history entry (findings 2.1, 2.3).
+    /// so callers can record an accurate history entry.
     pub async fn receive_to(
         &mut self,
         output_dir: &Path,
@@ -484,9 +414,9 @@ impl P2PSession {
 
     /// Re-accept on the existing endpoint and re-perform the handshake.
     /// Used by the receive CLI to keep listening after a peer disconnects
-    /// without re-binding (so the user's --port stays stable) (finding 2.4).
+    /// without re-binding (so the user's --port stays stable).
     pub async fn reaccept(&mut self) -> Result<()> {
-        if self.role != ConnectionRole::Responder {
+        if self.initiator_target.is_some() {
             return Err(Error::Protocol(
                 "reaccept() is only valid for responder sessions".into(),
             ));
@@ -496,11 +426,7 @@ impl P2PSession {
             self.endpoint.local_addr()?
         );
         let mut new_connection = self.endpoint.accept().await?;
-        let handshake_server = HandshakeServer::new(
-            self.device_id,
-            self.handshake.agreed_capabilities,
-            &self.identity,
-        );
+        let handshake_server = HandshakeServer::new(self.device_id, &self.identity);
         let handshake = handshake_server
             .perform_handshake(&mut new_connection)
             .await?;
@@ -531,18 +457,14 @@ impl P2PSession {
         )?;
         let mut new_connection = endpoint.connect(peer_addr, peer_fp).await?;
 
-        let handshake_client = HandshakeClient::new(
-            self.device_id,
-            self.handshake.agreed_capabilities,
-            &self.identity,
-        );
+        let handshake_client = HandshakeClient::new(self.device_id, &self.identity);
         let handshake = handshake_client
             .perform_handshake(&mut new_connection, self.handshake.config.clone())
             .await?;
 
         info!(
-            "Reconnection successful (peer: {}, capabilities: {:?})",
-            handshake.peer_device_id, handshake.agreed_capabilities
+            "Reconnection successful (peer: {})",
+            handshake.peer_device_id
         );
 
         self.endpoint = endpoint;
@@ -575,19 +497,7 @@ impl P2PSession {
         self.handshake.peer_fingerprint
     }
 
-    pub fn connection_role(&self) -> ConnectionRole {
-        self.role
-    }
-
     pub fn config(&self) -> &ConfigMessage {
         &self.handshake.config
-    }
-
-    pub fn capabilities(&self) -> &Capabilities {
-        &self.handshake.agreed_capabilities
-    }
-
-    pub fn is_alive(&self) -> bool {
-        true
     }
 }

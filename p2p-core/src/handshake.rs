@@ -4,14 +4,14 @@
 //! peer's certificate against the pinned fingerprint (client side) or
 //! accepted whatever cert the peer presented (server side, Phase 0). This
 //! handshake layer is concerned with the *application* protocol: version
-//! negotiation, capability negotiation, configuration exchange, and an
-//! application-level cross-check that the cert fingerprint the peer claims
-//! in HELLO matches the one the TLS layer observed.
+//! check, configuration exchange, and an application-level cross-check
+//! that the cert fingerprint the peer claims in HELLO matches the one the
+//! TLS layer observed.
 
 use crate::error::{Error, Result};
 use crate::identity::{Fingerprint, Identity};
 use crate::network::quic::QuicConnection;
-use crate::protocol::{Capabilities, ConfigMessage, HelloMessage, Message, TransferInfo};
+use crate::protocol::{ConfigMessage, HelloMessage, Message, TransferInfo};
 use crate::{MIN_PROTOCOL_VERSION, PROTOCOL_VERSION};
 use tracing::{debug, trace};
 use uuid::Uuid;
@@ -20,9 +20,7 @@ use uuid::Uuid;
 #[derive(Debug, Clone)]
 pub struct HandshakeResult {
     pub peer_device_id: Uuid,
-    pub peer_capabilities: Capabilities,
     pub peer_fingerprint: Fingerprint,
-    pub agreed_capabilities: Capabilities,
     pub config: ConfigMessage,
 }
 
@@ -41,15 +39,13 @@ fn cross_check_fingerprint(claimed: Fingerprint, observed: Option<Fingerprint>) 
 /// Handshake initiator side.
 pub struct HandshakeClient {
     device_id: Uuid,
-    capabilities: Capabilities,
     fingerprint: Fingerprint,
 }
 
 impl HandshakeClient {
-    pub fn new(device_id: Uuid, capabilities: Capabilities, identity: &Identity) -> Self {
+    pub fn new(device_id: Uuid, identity: &Identity) -> Self {
         Self {
             device_id,
-            capabilities,
             fingerprint: identity.fingerprint(),
         }
     }
@@ -66,7 +62,6 @@ impl HandshakeClient {
             protocol_version: PROTOCOL_VERSION,
             min_version: MIN_PROTOCOL_VERSION,
             device_id: self.device_id,
-            capabilities: self.capabilities,
             cert_fingerprint: self.fingerprint,
         });
         conn.send_message(&hello).await?;
@@ -93,9 +88,6 @@ impl HandshakeClient {
         // match its TLS cert.
         cross_check_fingerprint(peer_hello.cert_fingerprint, conn.peer_fingerprint())?;
 
-        let agreed_capabilities = self.capabilities.intersect(&peer_hello.capabilities);
-        trace!("Agreed capabilities: {:?}", agreed_capabilities);
-
         trace!("Sending CONFIG");
         conn.send_message(&Message::Config(config.clone())).await?;
 
@@ -116,9 +108,7 @@ impl HandshakeClient {
         debug!("Handshake completed");
         Ok(HandshakeResult {
             peer_device_id: peer_hello.device_id,
-            peer_capabilities: peer_hello.capabilities,
             peer_fingerprint: peer_hello.cert_fingerprint,
-            agreed_capabilities,
             config,
         })
     }
@@ -129,7 +119,8 @@ impl HandshakeClient {
         info: TransferInfo,
     ) -> Result<()> {
         trace!("Sending TRANSFER_INFO");
-        conn.send_message(&Message::TransferInfo(info)).await?;
+        conn.send_message(&Message::TransferInfo(Box::new(info)))
+            .await?;
 
         trace!("Waiting for READY");
         match conn.recv_message().await? {
@@ -143,15 +134,13 @@ impl HandshakeClient {
 /// Handshake responder side.
 pub struct HandshakeServer {
     device_id: Uuid,
-    capabilities: Capabilities,
     fingerprint: Fingerprint,
 }
 
 impl HandshakeServer {
-    pub fn new(device_id: Uuid, capabilities: Capabilities, identity: &Identity) -> Self {
+    pub fn new(device_id: Uuid, identity: &Identity) -> Self {
         Self {
             device_id,
-            capabilities,
             fingerprint: identity.fingerprint(),
         }
     }
@@ -182,13 +171,9 @@ impl HandshakeServer {
             protocol_version: PROTOCOL_VERSION,
             min_version: MIN_PROTOCOL_VERSION,
             device_id: self.device_id,
-            capabilities: self.capabilities,
             cert_fingerprint: self.fingerprint,
         });
         conn.send_message(&hello_ack).await?;
-
-        let agreed_capabilities = self.capabilities.intersect(&peer_hello.capabilities);
-        trace!("Agreed capabilities: {:?}", agreed_capabilities);
 
         trace!("Waiting for CONFIG");
         let config = match conn.recv_message().await? {
@@ -196,21 +181,13 @@ impl HandshakeServer {
             msg => return Err(Error::Protocol(format!("Expected Config, got {:?}", msg))),
         };
 
-        if config.compression_enabled && !agreed_capabilities.has_compression() {
-            return Err(Error::UnsupportedCapability(
-                "Compression not supported".to_string(),
-            ));
-        }
-
         trace!("Sending CONFIG_ACK");
         conn.send_message(&Message::ConfigAck).await?;
 
         debug!("Handshake completed");
         Ok(HandshakeResult {
             peer_device_id: peer_hello.device_id,
-            peer_capabilities: peer_hello.capabilities,
             peer_fingerprint: peer_hello.cert_fingerprint,
-            agreed_capabilities,
             config,
         })
     }
@@ -218,7 +195,7 @@ impl HandshakeServer {
     pub async fn recv_transfer_info(&self, conn: &mut QuicConnection) -> Result<TransferInfo> {
         trace!("Waiting for TRANSFER_INFO");
         let info = match conn.recv_message().await? {
-            Message::TransferInfo(i) => i,
+            Message::TransferInfo(i) => *i,
             msg => {
                 return Err(Error::Protocol(format!(
                     "Expected TransferInfo, got {:?}",
@@ -253,12 +230,11 @@ mod tests {
         let server_addr = server_ep.local_addr().unwrap();
 
         let server_device_id = Uuid::new_v4();
-        let server_caps = Capabilities::all();
         let server_id_for_task = server_identity.clone();
         let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
         let server_task = tokio::spawn(async move {
             let mut conn = server_ep.accept().await.unwrap();
-            let h = HandshakeServer::new(server_device_id, server_caps, &server_id_for_task);
+            let h = HandshakeServer::new(server_device_id, &server_id_for_task);
             let result = h.perform_handshake(&mut conn).await.unwrap();
             // Hold the connection until the test signals the client is done
             // reading the last handshake message. P2PSession does the same in
@@ -275,7 +251,7 @@ mod tests {
         .unwrap();
         let mut client_conn = client_ep.connect(server_addr, server_fp).await.unwrap();
 
-        let client = HandshakeClient::new(Uuid::new_v4(), Capabilities::all(), &client_identity);
+        let client = HandshakeClient::new(Uuid::new_v4(), &client_identity);
         let client_result = client
             .perform_handshake(&mut client_conn, ConfigMessage::default())
             .await
@@ -283,8 +259,6 @@ mod tests {
 
         done_tx.send(()).ok();
         let server_result = server_task.await.unwrap();
-        assert!(client_result.agreed_capabilities.has_compression());
-        assert!(server_result.agreed_capabilities.has_compression());
         assert_eq!(client_result.peer_fingerprint, server_fp);
         // Mutual TLS: the responder now also observes the initiator's
         // cert. The HELLO cross-check on the responder side would have

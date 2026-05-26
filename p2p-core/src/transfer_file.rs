@@ -27,7 +27,6 @@ use sha2::{Digest, Sha256};
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tracing::{debug, info, trace, warn};
-use uuid::Uuid;
 
 use crate::bandwidth::BandwidthLimiter;
 use crate::compression::{AdaptiveCompressor, Decompressor};
@@ -58,6 +57,15 @@ pub fn validate_file_size(size: u64) -> Result<()> {
     Ok(())
 }
 
+/// Ceiling-divide a file size by chunk size — number of full + final
+/// chunks needed to cover `file_size` bytes when laid out under
+/// `chunk_size`. Single source of truth (the sender, receiver, and
+/// resume state all must agree).
+pub const fn chunk_count(file_size: u64, chunk_size: u32) -> u64 {
+    let cs = chunk_size as u64;
+    (file_size + cs - 1) / cs
+}
+
 /// Per-chunk header: `[index: u64 LE | flags: u8]`.
 const CHUNK_HEADER_BYTES: usize = 9;
 
@@ -68,22 +76,13 @@ const FLAG_COMPRESSED: u8 = 0b0000_0001;
 pub struct FileTransferSession<'a> {
     connection: &'a mut QuicConnection,
     config: ConfigMessage,
-    #[allow(dead_code)]
-    transfer_id: Uuid,
-    #[allow(dead_code)]
-    file_index: u32,
     bandwidth_limiter: Option<BandwidthLimiter>,
     pub compressed_bytes_sent: u64,
     pub uncompressed_bytes_sent: u64,
 }
 
 impl<'a> FileTransferSession<'a> {
-    pub fn new(
-        connection: &'a mut QuicConnection,
-        config: ConfigMessage,
-        transfer_id: Uuid,
-        file_index: u32,
-    ) -> Self {
+    pub fn new(connection: &'a mut QuicConnection, config: ConfigMessage) -> Self {
         let bandwidth_limiter = if config.bandwidth_limit > 0 {
             Some(BandwidthLimiter::new(config.bandwidth_limit))
         } else {
@@ -92,8 +91,6 @@ impl<'a> FileTransferSession<'a> {
         Self {
             connection,
             config,
-            transfer_id,
-            file_index,
             bandwidth_limiter,
             compressed_bytes_sent: 0,
             uncompressed_bytes_sent: 0,
@@ -142,8 +139,12 @@ impl<'a> FileTransferSession<'a> {
             None
         };
 
+        // O(1) lookup vs O(n) on a slice — matters once a resume bitmap
+        // covers tens of thousands of chunks.
+        let completed: HashSet<u64> = completed_chunks.iter().copied().collect();
+
         for chunk_index in 0..total_chunks {
-            if completed_chunks.contains(&chunk_index) {
+            if completed.contains(&chunk_index) {
                 trace!("Skipping already-completed chunk {}", chunk_index);
                 // ChunkReader.read_chunk seeks per call, so skipping is safe;
                 // but we still need to fold the chunk into the SHA-256.
@@ -256,19 +257,23 @@ impl<'a> FileTransferSession<'a> {
             let flags = raw[8];
             let payload = &raw[CHUNK_HEADER_BYTES..];
 
-            let final_data = if flags & FLAG_COMPRESSED != 0 {
+            // Avoid an allocation per uncompressed chunk: write the slice
+            // straight into the chunk writer. Decompression still has to
+            // produce an owned Vec because zstd needs scratch space.
+            let written = if flags & FLAG_COMPRESSED != 0 {
                 let decomp = decompressor.as_mut().ok_or_else(|| {
                     Error::Protocol(
                         "compressed chunk but compression disabled in config".to_string(),
                     )
                 })?;
-                decomp.decompress(payload)?
+                let decompressed = decomp.decompress(payload)?;
+                let len = decompressed.len() as u64;
+                writer.write_chunk(chunk_index, &decompressed).await?;
+                len
             } else {
-                payload.to_vec()
+                writer.write_chunk(chunk_index, payload).await?;
+                payload.len() as u64
             };
-
-            let written = final_data.len() as u64;
-            writer.write_chunk(chunk_index, &final_data).await?;
 
             if let Some(ref mut p) = progress {
                 p.add_bytes(written);
@@ -297,15 +302,15 @@ impl<'a> FileTransferSession<'a> {
         data: &[u8],
     ) -> Result<()> {
         let mut stream = self.connection.open_uni().await?;
+        // Pack `index || flags` into one fixed-size header so the whole
+        // 9-byte preamble lands in a single write_all call.
+        let mut header = [0u8; CHUNK_HEADER_BYTES];
+        header[..8].copy_from_slice(&chunk_index.to_le_bytes());
+        header[8] = if compressed { FLAG_COMPRESSED } else { 0 };
         stream
-            .write_all(&chunk_index.to_le_bytes())
+            .write_all(&header)
             .await
-            .map_err(|e| Error::Quic(format!("write index: {e}")))?;
-        let flags: u8 = if compressed { FLAG_COMPRESSED } else { 0 };
-        stream
-            .write_all(&[flags])
-            .await
-            .map_err(|e| Error::Quic(format!("write flags: {e}")))?;
+            .map_err(|e| Error::Quic(format!("write header: {e}")))?;
         stream
             .write_all(data)
             .await
@@ -346,7 +351,7 @@ impl ChunkReader {
         })?;
         let metadata = file.metadata().await?;
         let file_size = metadata.len();
-        let total_chunks = (file_size + chunk_size as u64 - 1) / chunk_size as u64;
+        let total_chunks = chunk_count(file_size, chunk_size as u32);
         Ok(Self {
             file,
             chunk_size,
@@ -358,10 +363,6 @@ impl ChunkReader {
 
     pub fn total_chunks(&self) -> u64 {
         self.total_chunks
-    }
-
-    pub fn file_size(&self) -> u64 {
-        self.file_size
     }
 
     /// Read `index`-th chunk from disk, updating the running SHA-256.
@@ -476,7 +477,9 @@ impl ChunkWriter {
 
         let mut hasher = Sha256::new();
         let mut f = File::open(&final_path).await?;
-        let mut buf = vec![0u8; 64 * 1024];
+        // 1 MiB buffer amortises syscall overhead on the post-transfer
+        // re-read (the limiting factor here is `read` cost, not CPU).
+        let mut buf = vec![0u8; 1024 * 1024];
         loop {
             let n = f.read(&mut buf).await?;
             if n == 0 {
@@ -555,7 +558,7 @@ mod tests {
         let recv_task = tokio::spawn(async move {
             let mut conn = server_ep.accept().await.unwrap();
             let _ = conn.recv_message().await.unwrap(); // drive accept_bi
-            let mut session = FileTransferSession::new(&mut conn, cfg_recv, Uuid::new_v4(), 0);
+            let mut session = FileTransferSession::new(&mut conn, cfg_recv);
             session
                 .receive_file(
                     &dst_recv,
@@ -577,7 +580,7 @@ mod tests {
         conn.send_message(&crate::protocol::Message::Ping)
             .await
             .unwrap();
-        let mut session = FileTransferSession::new(&mut conn, cfg, Uuid::new_v4(), 0);
+        let mut session = FileTransferSession::new(&mut conn, cfg);
         let send_fut = session.send_file(&src, &completed, None::<fn(u64)>, None);
 
         let recv_result = tokio::time::timeout(Duration::from_secs(5), async {
@@ -661,7 +664,7 @@ mod tests {
         let recv_task = tokio::spawn(async move {
             let mut conn = server_ep.accept().await.unwrap();
             let _ = conn.recv_message().await.unwrap();
-            let mut session = FileTransferSession::new(&mut conn, cfg_recv, Uuid::new_v4(), 0);
+            let mut session = FileTransferSession::new(&mut conn, cfg_recv);
             // Pass total_chunks for both — sender opens 3 distinct streams
             // plus 1 duplicate of chunk 0.
             session

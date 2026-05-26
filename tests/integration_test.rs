@@ -1,20 +1,17 @@
 //! Workspace-level integration smoke test.
 //!
 //! Spins up a `P2PSession` on each side of a QUIC loopback connection and
-//! verifies the handshake completes, the cert fingerprint pin holds, and
-//! both peers agree on capabilities. Per-module unit tests cover the
-//! detailed protocol behavior; this file exists so one failing
-//! workspace-level test surfaces "the whole pipeline doesn't even spin up."
+//! verifies the handshake completes and the cert fingerprint pin holds.
+//! Per-module unit tests cover the detailed protocol behavior; this file
+//! exists so one failing workspace-level test surfaces "the whole pipeline
+//! doesn't even spin up."
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
 use p2p_core::{
-    identity::Identity,
-    network::quic::QuicEndpoint,
-    protocol::{Capabilities, ConfigMessage},
-    session::P2PSession,
+    identity::Identity, network::quic::QuicEndpoint, protocol::ConfigMessage, session::P2PSession,
     Uuid,
 };
 use tokio::time::timeout;
@@ -44,11 +41,8 @@ async fn full_session_handshake_over_quic() {
         // P2PSession::accept re-binds; emulate it inline using ep so we
         // don't race the port number.
         let mut conn = ep.accept().await.unwrap();
-        let handshake = p2p_core::handshake::HandshakeServer::new(
-            Uuid::new_v4(),
-            Capabilities::all(),
-            &server_id_for_task,
-        );
+        let handshake =
+            p2p_core::handshake::HandshakeServer::new(Uuid::new_v4(), &server_id_for_task);
         let result = handshake.perform_handshake(&mut conn).await.unwrap();
         // Hold the connection until the test signals the client is done
         // reading the last handshake message; real P2PSession::accept holds
@@ -68,7 +62,6 @@ async fn full_session_handshake_over_quic() {
             server_fp,
             client_identity,
             Uuid::new_v4(),
-            Capabilities::all(),
             ConfigMessage::default(),
         ),
     )
@@ -77,9 +70,7 @@ async fn full_session_handshake_over_quic() {
     .expect("connect failed");
 
     done_tx.send(()).ok();
-    let server_handshake = server_task.await.expect("server task panicked");
+    let _server_handshake = server_task.await.expect("server task panicked");
 
     assert_eq!(session.peer_fingerprint(), server_fp);
-    assert!(session.capabilities().has_compression());
-    assert!(server_handshake.agreed_capabilities.has_compression());
 }

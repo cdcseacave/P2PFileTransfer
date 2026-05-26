@@ -291,7 +291,7 @@ pub fn bind_wildcard(port: u16, identity: Arc<Identity>) -> Result<QuicEndpoint>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{Capabilities, HelloMessage};
+    use crate::protocol::HelloMessage;
     use std::sync::Arc;
     use uuid::Uuid;
 
@@ -327,7 +327,6 @@ mod tests {
             protocol_version: crate::PROTOCOL_VERSION,
             min_version: crate::MIN_PROTOCOL_VERSION,
             device_id: Uuid::new_v4(),
-            capabilities: Capabilities::all(),
             cert_fingerprint: [0u8; 32],
         });
         conn.send_message(&msg).await.unwrap();

@@ -10,25 +10,28 @@ use anyhow::Result;
 use iced::Command;
 use p2p_core::{
     error::Error,
-    protocol::{Capabilities, ConfigMessage, TransferInfo},
+    protocol::{ConfigMessage, TransferInfo},
     session::P2PSession,
     transfer_folder::AcceptDecision,
     Uuid,
 };
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::{info, warn};
+use tracing::info;
 
 /// Receive-loop equivalent for the GUI: accept transfers per `auto_accept`,
 /// re-accept on peer disconnect, propagate disk errors. Mirrors the CLI
 /// loop in p2p-cli/src/receive.rs but without stdin prompting (GUI users
-/// flip the auto-accept toggle in the UI).
+/// flip the auto-accept toggle in the UI). Returns the cumulative byte
+/// count across every accepted transfer so the GUI can surface it in
+/// history.
 async fn run_gui_receive_loop(
     session: &mut P2PSession,
     output_dir: &Path,
     auto_accept: bool,
-) -> Result<()> {
+) -> Result<u64> {
     let policy = move |_info: &TransferInfo| {
         if auto_accept {
             AcceptDecision::Accept
@@ -38,6 +41,7 @@ async fn run_gui_receive_loop(
             AcceptDecision::Reject
         }
     };
+    let mut total_bytes = 0u64;
     loop {
         match session.receive_to(output_dir, None, policy, None).await {
             Ok(summary) => {
@@ -46,13 +50,11 @@ async fn run_gui_receive_loop(
                     summary.files.len(),
                     summary.bytes
                 );
+                total_bytes = total_bytes.saturating_add(summary.bytes);
             }
             Err(e) if matches!(&e, Error::Disconnected | Error::Quic(_)) => {
-                info!("Peer disconnected; re-accepting");
-                if let Err(reaccept_err) = session.reaccept().await {
-                    warn!("Failed to re-accept: {}", reaccept_err);
-                    return Err(reaccept_err.into());
-                }
+                info!("Peer disconnected after {total_bytes} bytes");
+                return Ok(total_bytes);
             }
             Err(e) => return Err(e.into()),
         }
@@ -132,54 +134,6 @@ pub fn handle_message(state: &mut AppState, message: Message) -> Command<Message
             state.add_console_message(format!("Connection failed: {}", msg), ConsoleIcon::Error);
             Command::none()
         }
-        Message::ListenerWaiting => {
-            state.connection_state.status_message = String::from("Listening");
-            state.add_console_message(
-                String::from("Waiting for incoming connection..."),
-                ConsoleIcon::Info,
-            );
-            Command::none()
-        }
-        Message::ListenerActive(peer_id) => {
-            state.connection_state.status_message = String::from("Connected");
-            state.add_console_message(
-                format!("Connected to peer: {}", peer_id),
-                ConsoleIcon::Success,
-            );
-
-            // Create transfer record for incoming transfer
-            let transfer_id = Uuid::new_v4();
-            state.current_transfer = Some(p2p_core::history::TransferRecord::new(
-                transfer_id,
-                p2p_core::history::TransferDirection::Receive,
-                peer_id.clone(),
-            ));
-
-            Command::none()
-        }
-        Message::TransferStarted(msg) => {
-            state.receive_state.status_message = format!("📥 {}", msg);
-            state.add_console_message(msg, ConsoleIcon::Info);
-            Command::none()
-        }
-        Message::TransferInProgress(msg) => {
-            state.receive_state.status_message = msg.clone();
-            state.add_console_message(msg, ConsoleIcon::Info);
-            Command::none()
-        }
-        Message::TransferCompleted(msg) => {
-            state.receive_state.status_message = format!("✅ {}", msg);
-            state.transfer_progress = None;
-            state.add_console_message(msg, ConsoleIcon::Success);
-            Command::none()
-        }
-        Message::TransferError(msg) => {
-            state.receive_state.status_message = format!("❌ {}", msg);
-            state.transfer_progress = None;
-            state.add_console_message(format!("Transfer error: {}", msg), ConsoleIcon::Error);
-            Command::none()
-        }
-
         // Send tab
         Message::PathInputChanged(path) => {
             state.send_state.path_input = path;
@@ -212,7 +166,6 @@ pub fn handle_message(state: &mut AppState, message: Message) -> Command<Message
         }
         Message::StartSend => handle_start_send(state),
         Message::SendComplete(msg, bytes_transferred) => {
-            state.send_state.status_message = msg.clone();
             state.add_console_message(msg, ConsoleIcon::Success);
 
             // Log completed transfer to history
@@ -234,7 +187,6 @@ pub fn handle_message(state: &mut AppState, message: Message) -> Command<Message
             Command::none()
         }
         Message::SendFailed(msg) => {
-            state.send_state.status_message = format!("Error: {}", msg);
             state.transfer_progress = None;
             state.add_console_message(format!("Send failed: {}", msg), ConsoleIcon::Error);
 
@@ -306,46 +258,6 @@ pub fn handle_message(state: &mut AppState, message: Message) -> Command<Message
             state.receive_state.auto_accept = enabled;
             Command::none()
         }
-        Message::StartReceive => handle_start_receive(state),
-        Message::ReceiveComplete(msg, bytes_transferred) => {
-            state.receive_state.status_message = msg.clone();
-            state.add_console_message(msg, ConsoleIcon::Success);
-
-            // Log completed transfer to history
-            if let Some(mut transfer) = state.current_transfer.take() {
-                let file_name = if let Some(progress) = state.transfer_progress.as_ref() {
-                    progress.name.clone()
-                } else {
-                    String::from("received files")
-                };
-
-                transfer.complete(vec![file_name], bytes_transferred);
-
-                if let Ok(mut history) = state.history.lock() {
-                    history.add_record(transfer);
-                }
-            }
-
-            state.transfer_progress = None;
-            Command::none()
-        }
-        Message::ReceiveFailed(msg) => {
-            state.receive_state.status_message = format!("Error: {}", msg);
-            state.transfer_progress = None;
-            state.add_console_message(format!("Receive failed: {}", msg), ConsoleIcon::Error);
-
-            // Log failed transfer to history
-            if let Some(mut transfer) = state.current_transfer.take() {
-                transfer.fail(msg.clone());
-
-                if let Ok(mut history) = state.history.lock() {
-                    history.add_record(transfer);
-                }
-            }
-
-            Command::none()
-        }
-
         // Settings
         Message::CompressionToggled(enabled) => {
             state.settings.compression_enabled = enabled;
@@ -353,10 +265,6 @@ pub fn handle_message(state: &mut AppState, message: Message) -> Command<Message
         }
         Message::CompressionLevelChanged(level) => {
             state.settings.compression_level = level;
-            Command::none()
-        }
-        Message::AdaptiveCompressionToggled(enabled) => {
-            state.settings.adaptive_compression = enabled;
             Command::none()
         }
         Message::ChunkSizeChanged(size) => {
@@ -374,25 +282,6 @@ pub fn handle_message(state: &mut AppState, message: Message) -> Command<Message
             state.settings.max_retries = retries;
             Command::none()
         }
-
-        // Progress
-        Message::ProgressUpdate {
-            transferred,
-            total,
-            speed,
-            eta,
-        } => {
-            if let Some(progress) = &mut state.transfer_progress {
-                progress.transferred_bytes = transferred;
-                progress.total_bytes = total;
-                progress.speed_bps = speed;
-                progress.eta_seconds = eta;
-            }
-            Command::none()
-        }
-
-        // History
-        Message::RefreshHistory => Command::none(),
 
         // Console - handle text editor actions for selection/copy
         Message::ConsoleAction(action) => {
@@ -563,8 +452,10 @@ fn handle_start_connection(state: &mut AppState) -> Command<Message> {
 
 fn handle_start_send(state: &mut AppState) -> Command<Message> {
     if state.session.is_none() {
-        state.send_state.status_message =
-            String::from("Error: Not connected. Please establish a connection first.");
+        state.add_console_message(
+            String::from("Not connected. Please establish a connection first."),
+            ConsoleIcon::Error,
+        );
         return Command::none();
     }
 
@@ -573,12 +464,11 @@ fn handle_start_send(state: &mut AppState) -> Command<Message> {
     } else if !state.send_state.path_input.is_empty() {
         PathBuf::from(&state.send_state.path_input)
     } else {
-        state.send_state.status_message = String::from("Error: No path selected");
+        state.add_console_message(String::from("No path selected"), ConsoleIcon::Error);
         return Command::none();
     };
 
     if !path.exists() {
-        state.send_state.status_message = format!("Error: Path does not exist: {}", path.display());
         state.add_console_message(
             format!("Path does not exist: {}", path.display()),
             ConsoleIcon::Error,
@@ -586,7 +476,6 @@ fn handle_start_send(state: &mut AppState) -> Command<Message> {
         return Command::none();
     }
 
-    state.send_state.status_message = format!("Sending {}...", path.display());
     state.add_console_message(
         format!("Starting send: {}", path.display()),
         ConsoleIcon::Info,
@@ -602,7 +491,6 @@ fn handle_start_send(state: &mut AppState) -> Command<Message> {
         total_bytes: 0,
         transferred_bytes: 0,
         speed_bps: 0.0,
-        eta_seconds: 0,
         is_sending: true,
     });
 
@@ -636,52 +524,6 @@ fn handle_start_send(state: &mut AppState) -> Command<Message> {
     )
 }
 
-fn handle_start_receive(state: &mut AppState) -> Command<Message> {
-    use crate::state::ConnectionMode;
-
-    // In Listen mode, receiving is automatic when you start the connection
-    // No need for a separate "Start Receive" action
-    if matches!(state.connection_state.mode, ConnectionMode::Listen) {
-        state.receive_state.status_message = String::from(
-            "Note: In Listen mode, receiving starts automatically when a sender connects.",
-        );
-        return Command::none();
-    }
-
-    if state.session.is_none() {
-        state.receive_state.status_message =
-            String::from("Error: Not connected. Please establish a connection first.");
-        return Command::none();
-    }
-
-    let output_dir = state.receive_state.output_dir.clone();
-    let auto_accept = state.receive_state.auto_accept;
-
-    state.receive_state.status_message = String::from("Waiting for incoming transfer...");
-
-    // Initialize progress
-    state.transfer_progress = Some(crate::state::TransferProgress {
-        name: String::from("Incoming transfer"),
-        total_bytes: 0,
-        transferred_bytes: 0,
-        speed_bps: 0.0,
-        eta_seconds: 0,
-        is_sending: false,
-    });
-
-    let session = state.session.clone();
-
-    Command::perform(
-        async move {
-            match setup_receive(session, output_dir, auto_accept).await {
-                Ok((msg, bytes)) => Message::ReceiveComplete(msg, bytes),
-                Err(e) => Message::ReceiveFailed(e.to_string()),
-            }
-        },
-        |msg| msg,
-    )
-}
-
 // ============================================================================
 // Async Operations
 // ============================================================================
@@ -695,7 +537,6 @@ async fn start_listener_once(
     transfer_count: usize,
     cancel_flag: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<(String, bool, usize)> {
-    let capabilities = Capabilities::all();
     let identity = Arc::new(p2p_core::identity::Identity::load_or_generate(None)?);
 
     info!(
@@ -706,18 +547,12 @@ async fn start_listener_once(
     );
 
     tokio::fs::create_dir_all(&output_dir).await?;
+    let _ = config; // server role doesn't negotiate config until handshake
 
-    let session_fut = P2PSession::establish(
-        "server",
-        None,
-        None,
-        false,
-        port,
-        identity,
-        device_id,
-        capabilities,
-        Some(config),
-    );
+    let bind_addr: SocketAddr = format!("0.0.0.0:{port}")
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid port {port}: {e}"))?;
+    let session_fut = P2PSession::accept(bind_addr, identity, device_id);
 
     // Poll the session establishment with periodic cancel checks
     let mut session = tokio::select! {
@@ -739,7 +574,7 @@ async fn start_listener_once(
 
     // Start event loop to handle incoming transfers
     info!("Starting event loop for incoming transfers...");
-    run_gui_receive_loop(&mut session, &output_dir, auto_accept).await?;
+    let _ = run_gui_receive_loop(&mut session, &output_dir, auto_accept).await?;
 
     info!("✅ Transfer complete from peer: {}", peer_id);
 
@@ -762,7 +597,6 @@ async fn connect_to_peer(
     device_id: Uuid,
     config: ConfigMessage,
 ) -> Result<(P2PSession, String)> {
-    let capabilities = Capabilities::all();
     let identity = Arc::new(p2p_core::identity::Identity::load_or_generate(None)?);
 
     info!(
@@ -770,39 +604,28 @@ async fn connect_to_peer(
         identity.fingerprint_hex()
     );
 
-    let peer_addr_opt = if !address.is_empty() {
-        Some(address)
-    } else {
-        None
-    };
-
-    let peer_fingerprint = if peer_fp_hex.is_empty() {
-        None
-    } else if peer_fp_hex.len() != 64 {
-        return Err(anyhow::anyhow!(
-            "peer fingerprint must be 64 hex chars, got {}",
-            peer_fp_hex.len()
-        ));
-    } else {
+    let (peer_addr, peer_fp) = if !address.is_empty() {
+        if peer_fp_hex.len() != 64 {
+            return Err(anyhow::anyhow!(
+                "peer fingerprint must be 64 hex chars, got {}",
+                peer_fp_hex.len()
+            ));
+        }
         let bytes = hex::decode(&peer_fp_hex)
             .map_err(|e| anyhow::anyhow!("invalid peer fingerprint hex: {e}"))?;
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(&bytes);
-        Some(arr)
+        let mut fp = [0u8; 32];
+        fp.copy_from_slice(&bytes);
+        let parsed = P2PSession::parse_peer_addr(&address, port)?;
+        (parsed, fp)
+    } else if use_discovery {
+        P2PSession::discover_one_peer(port, &identity, device_id).await?
+    } else {
+        return Err(anyhow::anyhow!(
+            "peer address or discovery required for client mode"
+        ));
     };
 
-    let session = P2PSession::establish(
-        "client",
-        peer_addr_opt,
-        peer_fingerprint,
-        use_discovery,
-        port,
-        identity,
-        device_id,
-        capabilities,
-        Some(config),
-    )
-    .await?;
+    let session = P2PSession::connect(peer_addr, peer_fp, identity, device_id, config).await?;
 
     let peer_id = session.peer_device_id();
     info!("Connection established with peer: {}", peer_id);
@@ -819,7 +642,6 @@ async fn pair_via_rendezvous(
     use std::net::SocketAddr;
     use tokio::net::lookup_host;
 
-    let capabilities = Capabilities::all();
     let identity = Arc::new(p2p_core::identity::Identity::load_or_generate(None)?);
 
     // Default the rendezvous port when only a hostname was supplied.
@@ -835,16 +657,9 @@ async fn pair_via_rendezvous(
         identity.fingerprint_hex(),
     );
 
-    let session = P2PSession::from_rendezvous(
-        rendezvous_addr,
-        code,
-        identity,
-        device_id,
-        capabilities,
-        config,
-        false,
-    )
-    .await?;
+    let session =
+        P2PSession::from_rendezvous(rendezvous_addr, code, identity, device_id, config, false)
+            .await?;
 
     let peer_id = session.peer_device_id();
     info!("Rendezvous pairing established with peer: {peer_id}");
@@ -900,33 +715,5 @@ async fn send_path(
             path.file_name().unwrap_or_default().to_string_lossy()
         ),
         bytes_transferred,
-    ))
-}
-
-async fn setup_receive(
-    session: Option<Arc<Mutex<P2PSession>>>,
-    output_dir: PathBuf,
-    auto_accept: bool,
-) -> Result<(String, u64)> {
-    let session = session.ok_or_else(|| anyhow::anyhow!("No active session"))?;
-
-    info!("Starting receive mode, output: {}", output_dir.display());
-
-    tokio::fs::create_dir_all(&output_dir).await?;
-
-    let mut session_guard = session.lock().await;
-
-    run_gui_receive_loop(&mut session_guard, &output_dir, auto_accept).await?;
-
-    drop(session_guard);
-
-    // TODO: Get actual bytes received from run_event_loop
-    // For now, return 0 as placeholder
-    let bytes_received = 0u64;
-
-    info!("✅ Receive complete!");
-    Ok((
-        String::from("✅ Received transfer successfully"),
-        bytes_received,
     ))
 }

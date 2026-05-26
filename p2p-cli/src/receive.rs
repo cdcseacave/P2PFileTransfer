@@ -12,7 +12,7 @@ use p2p_core::{
     history::{record_transfer, TransferDirection, TransferRecord},
     identity::Identity,
     progress::ProgressState,
-    protocol::{Capabilities, ConfigMessage, TransferInfo},
+    protocol::{ConfigMessage, TransferInfo},
     session::P2PSession,
     transfer_folder::AcceptDecision,
     Uuid,
@@ -46,9 +46,7 @@ pub async fn handle_receive(
     let identity = Arc::new(Identity::load_or_generate(identity_dir.as_deref())?);
     info!("  Identity fingerprint: {}", identity.fingerprint_hex());
 
-    let capabilities = Capabilities::all();
-
-    let mut session = pair_or_listen(&session_params, &identity, capabilities).await?;
+    let mut session = pair_or_listen(&session_params, &identity).await?;
     log_session(&session);
 
     info!("Session ready - waiting for incoming transfers... (Ctrl+C to exit)");
@@ -58,7 +56,6 @@ pub async fn handle_receive(
         auto_accept,
         &session_params,
         &identity,
-        capabilities,
     )
     .await
 }
@@ -69,14 +66,12 @@ pub async fn handle_receive(
 async fn pair_or_listen(
     session_params: &SessionParams,
     identity: &Arc<Identity>,
-    capabilities: Capabilities,
 ) -> Result<P2PSession> {
     establish_session(
         session_params,
         "server",
         identity.clone(),
         Uuid::new_v4(),
-        capabilities,
         Some(ConfigMessage::default()),
     )
     .await
@@ -100,7 +95,6 @@ async fn receive_loop(
     auto_accept: bool,
     session_params: &SessionParams,
     identity: &Arc<Identity>,
-    capabilities: Capabilities,
 ) -> Result<()> {
     let mut peer_addr = session.peer_addr().to_string();
     loop {
@@ -112,7 +106,7 @@ async fn receive_loop(
             // session. The recovery mechanism depends on the original
             // pairing mode — see [`recover_after_disconnect`].
             ReceiveOutcome::PeerDisconnected => {
-                recover_after_disconnect(session, session_params, identity, capabilities).await?;
+                recover_after_disconnect(session, session_params, identity).await?;
                 peer_addr = session.peer_addr().to_string();
                 log_new_peer(session);
             }
@@ -186,7 +180,6 @@ async fn recover_after_disconnect(
     session: &mut P2PSession,
     session_params: &SessionParams,
     identity: &Arc<Identity>,
-    capabilities: Capabilities,
 ) -> Result<()> {
     if is_rendezvous_mode(session_params) {
         info!(
@@ -198,7 +191,6 @@ async fn recover_after_disconnect(
             "server",
             identity.clone(),
             Uuid::new_v4(),
-            capabilities,
             Some(ConfigMessage::default()),
         )
         .await?;

@@ -70,7 +70,10 @@ pub enum Message {
     HelloAck(HelloMessage),
     Config(ConfigMessage),
     ConfigAck,
-    TransferInfo(TransferInfo),
+    // Boxed: TransferInfo is the largest variant by far (file list + resume
+    // bitmap) and we don't want every `Message` value on the recv path
+    // bloated to the size of the manifest.
+    TransferInfo(Box<TransferInfo>),
     Ready,
     Resume(ResumeRequest),
 
@@ -97,8 +100,6 @@ pub struct DiscoveryBeacon {
     pub device_name: String,
     /// QUIC/UDP listening port for transfers
     pub port: u16,
-    /// Supported capabilities
-    pub capabilities: Capabilities,
     /// SHA-256 of the device's self-signed certificate. Required: discovered
     /// peers pin this fingerprint when initiating their first QUIC connection.
     #[serde(with = "checksum_hex")]
@@ -114,8 +115,6 @@ pub struct HelloMessage {
     pub min_version: u8,
     /// Device identifier
     pub device_id: Uuid,
-    /// Supported capabilities
-    pub capabilities: Capabilities,
     /// SHA-256 of the sender's self-signed certificate. Cross-checked
     /// against the cert actually presented in the QUIC/TLS handshake.
     #[serde(with = "checksum_hex")]
@@ -248,79 +247,6 @@ pub struct ErrorMessage {
     pub message: String,
 }
 
-/// Device capabilities. Encryption is mandatory under QUIC/TLS 1.3 so it's
-/// no longer a negotiated bit; the windowed/sequential split is gone too
-/// because chunks always go on per-chunk QUIC uni streams.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Capabilities {
-    bits: u32,
-}
-
-impl Default for Capabilities {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Capabilities {
-    pub const COMPRESSION: u32 = 0b0000_0001;
-    pub const RESUME: u32 = 0b0000_0010;
-    pub const BATCH_TRANSFER: u32 = 0b0000_0100;
-    pub const FOLDER_TRANSFER: u32 = 0b0000_1000;
-
-    pub const fn new() -> Self {
-        Self { bits: 0 }
-    }
-
-    pub const fn all() -> Self {
-        Self {
-            bits: Self::COMPRESSION | Self::RESUME | Self::BATCH_TRANSFER | Self::FOLDER_TRANSFER,
-        }
-    }
-
-    pub const fn with_compression(mut self) -> Self {
-        self.bits |= Self::COMPRESSION;
-        self
-    }
-
-    pub const fn with_resume(mut self) -> Self {
-        self.bits |= Self::RESUME;
-        self
-    }
-
-    pub const fn with_batch_transfer(mut self) -> Self {
-        self.bits |= Self::BATCH_TRANSFER;
-        self
-    }
-
-    pub const fn with_folder_transfer(mut self) -> Self {
-        self.bits |= Self::FOLDER_TRANSFER;
-        self
-    }
-
-    pub const fn has_compression(&self) -> bool {
-        (self.bits & Self::COMPRESSION) != 0
-    }
-
-    pub const fn has_resume(&self) -> bool {
-        (self.bits & Self::RESUME) != 0
-    }
-
-    pub const fn has_batch_transfer(&self) -> bool {
-        (self.bits & Self::BATCH_TRANSFER) != 0
-    }
-
-    pub const fn has_folder_transfer(&self) -> bool {
-        (self.bits & Self::FOLDER_TRANSFER) != 0
-    }
-
-    pub const fn intersect(&self, other: &Self) -> Self {
-        Self {
-            bits: self.bits & other.bits,
-        }
-    }
-}
-
 /// Error codes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ErrorCode {
@@ -330,33 +256,4 @@ pub enum ErrorCode {
     FileSystemError,
     TransferCancelled,
     Other,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_capabilities() {
-        let caps = Capabilities::new().with_compression().with_resume();
-        assert!(caps.has_compression());
-        assert!(caps.has_resume());
-        assert!(!caps.has_batch_transfer());
-
-        let all = Capabilities::all();
-        assert!(all.has_compression());
-        assert!(all.has_resume());
-        assert!(all.has_batch_transfer());
-        assert!(all.has_folder_transfer());
-    }
-
-    #[test]
-    fn test_capabilities_intersect() {
-        let caps1 = Capabilities::new().with_compression().with_resume();
-        let caps2 = Capabilities::new().with_resume().with_batch_transfer();
-        let common = caps1.intersect(&caps2);
-        assert!(!common.has_compression());
-        assert!(common.has_resume());
-        assert!(!common.has_batch_transfer());
-    }
 }

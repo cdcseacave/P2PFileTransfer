@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use crate::error::{Error, Result};
 use crate::identity::Fingerprint;
-use crate::protocol::{Capabilities, DiscoveryBeacon};
+use crate::protocol::DiscoveryBeacon;
 use crate::{DEFAULT_DISCOVERY_PORT, PROTOCOL_VERSION};
 
 const MAX_PACKET_SIZE: usize = 1500;
@@ -23,7 +23,6 @@ pub struct DiscoveryService {
     device_id: Uuid,
     device_name: String,
     transfer_port: u16,
-    capabilities: Capabilities,
     cert_fingerprint: Fingerprint,
     broadcast_addr: SocketAddr,
 }
@@ -32,7 +31,6 @@ impl DiscoveryService {
     pub async fn new(
         device_name: String,
         transfer_port: u16,
-        capabilities: Capabilities,
         cert_fingerprint: Fingerprint,
     ) -> Result<Self> {
         let discovery_port = DEFAULT_DISCOVERY_PORT;
@@ -49,7 +47,6 @@ impl DiscoveryService {
             device_id: Uuid::new_v4(),
             device_name,
             transfer_port,
-            capabilities,
             cert_fingerprint,
             broadcast_addr,
         })
@@ -61,7 +58,6 @@ impl DiscoveryService {
             device_id: self.device_id,
             device_name: self.device_name.clone(),
             port: self.transfer_port,
-            capabilities: self.capabilities,
             cert_fingerprint: self.cert_fingerprint,
         }
     }
@@ -120,7 +116,6 @@ pub struct PeerInfo {
     pub device_name: String,
     pub address: IpAddr,
     pub port: u16,
-    pub capabilities: Capabilities,
     pub cert_fingerprint: Fingerprint,
     pub last_seen: SystemTime,
 }
@@ -149,7 +144,6 @@ impl From<(DiscoveryBeacon, IpAddr)> for PeerInfo {
             device_name: beacon.device_name,
             address,
             port: beacon.port,
-            capabilities: beacon.capabilities,
             cert_fingerprint: beacon.cert_fingerprint,
             last_seen: SystemTime::now(),
         }
@@ -166,7 +160,6 @@ mod tests {
             device_id: Uuid::new_v4(),
             device_name: "Test".to_string(),
             port: crate::DEFAULT_TRANSFER_PORT,
-            capabilities: Capabilities::all(),
             cert_fingerprint: [0u8; 32],
         }
     }

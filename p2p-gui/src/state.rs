@@ -128,8 +128,6 @@ pub struct SendState {
     pub selected_path: Option<PathBuf>,
     /// Path input field
     pub path_input: String,
-    /// Status message
-    pub status_message: String,
 }
 
 /// Receive tab state
@@ -141,8 +139,6 @@ pub struct ReceiveState {
     pub output_input: String,
     /// Auto-accept transfers
     pub auto_accept: bool,
-    /// Status message
-    pub status_message: String,
 }
 
 /// Application settings
@@ -191,8 +187,7 @@ impl AppSettings {
 
 /// Transfer progress information
 pub struct TransferProgress {
-    /// File/folder name
-    #[allow(dead_code)] // Will be used for display in future enhancements
+    /// File/folder name (used when logging completed transfers to history)
     pub name: String,
     /// Total bytes
     pub total_bytes: u64,
@@ -200,8 +195,6 @@ pub struct TransferProgress {
     pub transferred_bytes: u64,
     /// Transfer speed (bytes per second)
     pub speed_bps: f64,
-    /// Estimated time remaining (seconds)
-    pub eta_seconds: u64,
     /// Is sending (true) or receiving (false)
     pub is_sending: bool,
 }

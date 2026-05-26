@@ -5,7 +5,6 @@
 
 pub mod bandwidth;
 pub mod compression;
-pub mod config;
 pub mod discovery;
 pub mod error;
 pub mod handshake;
@@ -19,7 +18,6 @@ pub mod reconnect;
 pub mod session;
 pub mod state;
 pub mod tls; // rustls config + fingerprint-pinning verifier
-pub mod transfer;
 pub mod transfer_file;
 pub mod transfer_folder;
 pub mod traversal; // STUN + hole punch + rendezvous orchestration
@@ -31,11 +29,14 @@ pub use protocol::Message;
 // Re-export commonly used types
 pub use uuid::Uuid;
 
-/// Protocol version. Bumped to 2 for the QUIC + TLS 1.3 rewrite.
-pub const PROTOCOL_VERSION: u8 = 2;
+/// Protocol version. Bumped to 3 to drop the now-unused `capabilities`
+/// field from `HelloMessage`/`DiscoveryBeacon` — the single-codebase
+/// deployment doesn't need feature negotiation, and `ConfigMessage`
+/// already carries every knob that actually matters.
+pub const PROTOCOL_VERSION: u8 = 3;
 
-/// Minimum supported protocol version. Equal to PROTOCOL_VERSION — no v1 compat.
-pub const MIN_PROTOCOL_VERSION: u8 = 2;
+/// Minimum supported protocol version. Equal to PROTOCOL_VERSION — no compat.
+pub const MIN_PROTOCOL_VERSION: u8 = 3;
 
 /// Default chunk size (1 MiB). Sized for QUIC, where the chunk is not
 /// the ACK unit — retransmits happen at the packet layer regardless,
@@ -56,7 +57,7 @@ pub const DEFAULT_RENDEZVOUS_PORT: u16 = 14570;
 pub const PROTOCOL_MAGIC: [u8; 4] = *b"P2PF";
 
 /// ALPN protocol name negotiated over QUIC's TLS 1.3 handshake.
-pub const ALPN_PROTOCOL: &[u8] = b"p2pf/2";
+pub const ALPN_PROTOCOL: &[u8] = b"p2pf/3";
 
 /// Normalize a user-supplied `host[:port]` string to one that always carries
 /// a port, suitable for `tokio::net::lookup_host`. Handles IPv4 / IPv6 /
@@ -92,23 +93,15 @@ pub fn with_default_port(host_port: &str, default_port: u16) -> String {
 #[cfg(test)]
 mod default_chunk_size_tests {
     use super::DEFAULT_CHUNK_SIZE;
-    use crate::config::TransferConfig;
     use crate::protocol::ConfigMessage;
 
-    /// Every public default that carries a chunk size must agree with the
-    /// single source-of-truth [`DEFAULT_CHUNK_SIZE`]. Without this guard the
-    /// CLI, GUI, and on-the-wire defaults can drift, silently downgrading
-    /// the negotiated chunk size in any session that touches the mismatched
-    /// side (see post-`f07aae4` review finding 1.3).
+    /// `DEFAULT_CHUNK_SIZE` is the single source of truth used on the wire
+    /// (`ConfigMessage::default`), in CLI flags, and in GUI settings. Any
+    /// future field that carries a default chunk size must also assert
+    /// equality here so the three sides cannot silently drift.
     #[test]
     fn config_message_default_matches_default_chunk_size() {
         assert_eq!(ConfigMessage::default().chunk_size, DEFAULT_CHUNK_SIZE);
-    }
-
-    #[test]
-    fn transfer_config_default_matches_default_chunk_size() {
-        let cfg = TransferConfig::default();
-        assert_eq!(cfg.chunk_size_kb * 1024, DEFAULT_CHUNK_SIZE);
     }
 }
 

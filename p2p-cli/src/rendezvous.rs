@@ -23,12 +23,7 @@ use anyhow::{anyhow, Context, Result};
 use tokio::net::lookup_host;
 use tracing::info;
 
-use p2p_core::{
-    identity::Identity,
-    protocol::{Capabilities, ConfigMessage},
-    session::P2PSession,
-    Uuid,
-};
+use p2p_core::{identity::Identity, protocol::ConfigMessage, session::P2PSession, Uuid};
 
 use crate::cli::SessionParams;
 
@@ -41,46 +36,52 @@ pub fn is_rendezvous_mode(params: &SessionParams) -> bool {
 /// Establish a session using whichever mode `params` selects.
 ///
 /// * `--rendezvous` set → pair via [`establish`] (rendezvous + code).
-/// * otherwise → direct mode via [`P2PSession::establish`] (peer addr or
-///   LAN discovery).
+/// * otherwise → direct mode:
+///     - `role_default == "server"` → bind `0.0.0.0:port` and accept.
+///     - `role_default == "client"` → connect to `--peer` or LAN-discover.
 ///
 /// `role_default` is the per-command default (`"client"` for `send` /
-/// `resume`, `"server"` for `receive`) used only in direct mode; the
-/// rendezvous path is symmetric and ignores it.
+/// `resume`, `"server"` for `receive`); the rendezvous path is symmetric
+/// and ignores it.
 pub async fn establish_session(
     params: &SessionParams,
     role_default: &str,
     identity: Arc<Identity>,
     device_id: Uuid,
-    capabilities: Capabilities,
     config: Option<ConfigMessage>,
 ) -> Result<P2PSession> {
     if is_rendezvous_mode(params) {
-        establish(
-            params,
-            identity,
-            device_id,
-            capabilities,
-            config.unwrap_or_default(),
-        )
-        .await
+        return establish(params, identity, device_id, config.unwrap_or_default()).await;
+    }
+
+    let role = params.get_role(role_default);
+    if role == "server" {
+        let bind_addr: SocketAddr = format!("0.0.0.0:{}", params.port)
+            .parse()
+            .map_err(|e| anyhow!("invalid port {}: {}", params.port, e))?;
+        return P2PSession::accept(bind_addr, identity, device_id)
+            .await
+            .map_err(Into::into);
+    }
+
+    let cfg = config.ok_or_else(|| anyhow!("config required for client role"))?;
+    let (peer_addr, peer_fp) = if let Some(addr_str) = params.peer.as_deref() {
+        let parsed = P2PSession::parse_peer_addr(addr_str, params.port)?;
+        let fp = params
+            .parsed_fingerprint()?
+            .ok_or_else(|| anyhow!("--peer-fingerprint is required for direct connections"))?;
+        (parsed, fp)
+    } else if params.discover {
+        P2PSession::discover_one_peer(params.port, &identity, device_id).await?
     } else {
-        let role = params.get_role(role_default);
-        let peer_fp = params.parsed_fingerprint()?;
-        P2PSession::establish(
-            &role,
-            params.peer.clone(),
-            peer_fp,
-            params.discover,
-            params.port,
-            identity,
-            device_id,
-            capabilities,
-            config,
-        )
+        return Err(anyhow!(
+            "peer address (--peer) or --discover required for client role"
+        ));
+    };
+
+    P2PSession::connect(peer_addr, peer_fp, identity, device_id, cfg)
         .await
         .map_err(Into::into)
-    }
 }
 
 /// Establish a session via rendezvous + code. Validates that `--code`
@@ -89,7 +90,6 @@ pub async fn establish(
     params: &SessionParams,
     identity: Arc<Identity>,
     device_id: Uuid,
-    capabilities: Capabilities,
     config: ConfigMessage,
 ) -> Result<P2PSession> {
     let rendezvous_host = params
@@ -116,7 +116,6 @@ pub async fn establish(
         code,
         identity,
         device_id,
-        capabilities,
         config,
         params.force_relay,
     )

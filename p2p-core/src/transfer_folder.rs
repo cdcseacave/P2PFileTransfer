@@ -64,7 +64,7 @@ use crate::protocol::{
     CompleteMessage, ConfigMessage, FileChecksumMessage, FileMetadata, Message, ResumePoint,
     TransferInfo,
 };
-use crate::transfer_file::{validate_file_size, FileTransferSession};
+use crate::transfer_file::{chunk_count, validate_file_size, FileTransferSession};
 
 /// Statistics emitted at end of a folder transfer.
 #[derive(Debug, Clone)]
@@ -162,62 +162,47 @@ impl<'a> FolderTransferSession<'a> {
     ) {
         info!("Transfer Statistics:");
         let action = if is_sender { "sent" } else { "received" };
+        let mb_per_sec = |bytes: u64| {
+            if duration_secs > 0.0 {
+                bytes as f64 / duration_secs / 1_048_576.0
+            } else {
+                0.0
+            }
+        };
 
         if self.config.compression_enabled && self.total_compressed_bytes > 0 {
             let (ratio, percent) = self.calc_compression_stats(total_bytes);
-            let network_speed = if duration_secs > 0.0 {
-                self.total_compressed_bytes as f64 / duration_secs / 1_048_576.0
-            } else {
-                0.0
-            };
-            let felt_speed = if duration_secs > 0.0 {
-                total_bytes as f64 / duration_secs / 1_048_576.0
-            } else {
-                0.0
-            };
             let direction = if is_sender { "->" } else { "<-" };
-            if percent >= 0.0 {
-                info!(
-                    "   Data: {} {} {} ({:.1}% saved, {:.2}x compression)",
-                    bandwidth::format_bandwidth(total_bytes),
-                    direction,
-                    bandwidth::format_bandwidth(self.total_compressed_bytes),
+            let (label, abs_percent) = if percent >= 0.0 {
+                (
+                    format!("{percent:.1}% saved, {ratio:.2}x compression"),
                     percent,
-                    ratio
-                );
+                )
             } else {
-                info!(
-                    "   Data: {} {} {} ({:.1}% overhead)",
-                    bandwidth::format_bandwidth(total_bytes),
-                    direction,
-                    bandwidth::format_bandwidth(self.total_compressed_bytes),
-                    -percent
-                );
-            }
+                (format!("{:.1}% overhead", -percent), -percent)
+            };
+            let _ = abs_percent;
+            info!(
+                "   Data: {} {} {} ({})",
+                bandwidth::format_bandwidth(total_bytes),
+                direction,
+                bandwidth::format_bandwidth(self.total_compressed_bytes),
+                label,
+            );
             info!(
                 "   Speed: {:.2} MB/s network, {:.2} MB/s throughput",
-                network_speed, felt_speed
+                mb_per_sec(self.total_compressed_bytes),
+                mb_per_sec(total_bytes),
             );
-            info!(
-                "Folder transfer complete: {} files, {} {}",
-                total_files,
-                bandwidth::format_bandwidth(total_bytes),
-                action
-            );
-        } else {
-            if duration_secs > 0.0 {
-                info!(
-                    "   Speed: {:.2} MB/s",
-                    total_bytes as f64 / duration_secs / 1_048_576.0
-                );
-            }
-            info!(
-                "Folder transfer complete: {} files, {} {}",
-                total_files,
-                bandwidth::format_bandwidth(total_bytes),
-                action
-            );
+        } else if duration_secs > 0.0 {
+            info!("   Speed: {:.2} MB/s", mb_per_sec(total_bytes));
         }
+        info!(
+            "Folder transfer complete: {} files, {} {}",
+            total_files,
+            bandwidth::format_bandwidth(total_bytes),
+            action
+        );
     }
 
     /// Send a file or folder, updating `state` as chunks complete (for resume).
@@ -310,7 +295,7 @@ impl<'a> FolderTransferSession<'a> {
             completed_files,
         };
         self.connection
-            .send_message(&Message::TransferInfo(transfer_info))
+            .send_message(&Message::TransferInfo(Box::new(transfer_info)))
             .await?;
 
         match self.connection.recv_message().await {
@@ -405,7 +390,7 @@ impl<'a> FolderTransferSession<'a> {
         mut progress: Option<&mut ProgressState>,
     ) -> Result<TransferSummary> {
         let transfer_info = match self.connection.recv_message().await? {
-            Message::TransferInfo(info) => info,
+            Message::TransferInfo(info) => *info,
             msg => {
                 return Err(Error::Protocol(format!(
                     "Expected TransferInfo, got {:?}",
@@ -460,12 +445,11 @@ impl<'a> FolderTransferSession<'a> {
                 already_transferred += transfer_info.items[i].size;
             }
             if file_index < transfer_info.items.len() {
-                let chunk_size = self.config.chunk_size as u64;
                 let current_size = transfer_info.items[file_index].size;
-                let total_chunks = (current_size + chunk_size - 1) / chunk_size;
+                let total_chunks = chunk_count(current_size, self.config.chunk_size);
                 let completed_chunks = resume_point.completed_chunks.len() as u64;
                 let added = if completed_chunks < total_chunks {
-                    completed_chunks * chunk_size
+                    completed_chunks * self.config.chunk_size as u64
                 } else {
                     current_size
                 };
@@ -511,8 +495,7 @@ impl<'a> FolderTransferSession<'a> {
                 fs::create_dir_all(parent).await?;
             }
 
-            let total_chunks = (file_meta.size + self.config.chunk_size as u64 - 1)
-                / self.config.chunk_size as u64;
+            let total_chunks = chunk_count(file_meta.size, self.config.chunk_size);
             let already_sent = transfer_info
                 .resume_from
                 .as_ref()
@@ -572,12 +555,7 @@ impl<'a> FolderTransferSession<'a> {
     where
         F: FnMut(u64),
     {
-        let mut file_session = FileTransferSession::new(
-            self.connection,
-            self.config.clone(),
-            self.transfer_id,
-            file_index,
-        );
+        let mut file_session = FileTransferSession::new(self.connection, self.config.clone());
 
         let sender_checksum = file_session
             .send_file(path, completed_chunks, chunk_complete_callback, progress)
@@ -627,12 +605,7 @@ impl<'a> FolderTransferSession<'a> {
         streams_to_receive: u64,
         progress: Option<&mut ProgressState>,
     ) -> Result<()> {
-        let mut file_session = FileTransferSession::new(
-            self.connection,
-            self.config.clone(),
-            self.transfer_id,
-            file_index,
-        );
+        let mut file_session = FileTransferSession::new(self.connection, self.config.clone());
 
         let receiver_checksum = file_session
             .receive_file(
@@ -685,17 +658,10 @@ impl<'a> FolderTransferSession<'a> {
     async fn scan_folder(&self, folder_path: &Path) -> Result<Vec<(PathBuf, FileMetadata)>> {
         let mut files = Vec::new();
         let base_path = folder_path.parent().unwrap_or(folder_path);
-        Self::scan_folder_recursive(base_path, folder_path, &mut files).await?;
-        Ok(files)
-    }
-
-    fn scan_folder_recursive<'b>(
-        base_path: &'b Path,
-        current_path: &'b Path,
-        files: &'b mut Vec<(PathBuf, FileMetadata)>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'b>> {
-        Box::pin(async move {
-            let mut entries = fs::read_dir(current_path).await?;
+        let mut stack: std::collections::VecDeque<PathBuf> = std::collections::VecDeque::new();
+        stack.push_back(folder_path.to_path_buf());
+        while let Some(current) = stack.pop_front() {
+            let mut entries = fs::read_dir(&current).await?;
             while let Some(entry) = entries.next_entry().await? {
                 let path = entry.path();
                 let metadata = entry.metadata().await?;
@@ -723,16 +689,16 @@ impl<'a> FolderTransferSession<'a> {
                     ));
                     trace!("Found file: {} ({} bytes)", path.display(), size);
                 } else if metadata.is_dir() {
-                    Self::scan_folder_recursive(base_path, &path, files).await?;
+                    stack.push_back(path);
                 }
             }
-            Ok(())
-        })
+        }
+        Ok(files)
     }
 }
 
-/// On-disk state for chunk-level resume. Carries the negotiated
-/// [`ConfigMessage`] fields so resume rehydrates the same chunk_size and
+/// On-disk state for chunk-level resume. Embeds the negotiated
+/// [`ConfigMessage`] verbatim so resume rehydrates the same chunk_size and
 /// compression settings the original session used — without this the
 /// `.partial` on disk (laid out under the original chunk_size) and the
 /// resumed session's offsets disagree, silently corrupting the file.
@@ -746,13 +712,9 @@ pub struct FolderTransferState {
     pub total_bytes: u64,
     pub transferred_bytes: u64,
     pub file_chunks: HashMap<usize, Vec<u64>>,
-    /// Chunk size in bytes — must match what the `.partial` on disk was
-    /// laid out with. Mirrors `ConfigMessage::chunk_size`.
-    pub chunk_size: u32,
-    pub compression_enabled: bool,
-    pub compression_level: i32,
-    pub adaptive_compression: bool,
-    pub bandwidth_limit: u64,
+    /// Negotiated config snapshot — must match what the `.partial` on
+    /// disk was laid out with. Resume reads `config.chunk_size` directly.
+    pub config: ConfigMessage,
 }
 
 impl FolderTransferState {
@@ -772,24 +734,7 @@ impl FolderTransferState {
             total_bytes,
             transferred_bytes: 0,
             file_chunks: HashMap::new(),
-            chunk_size: config.chunk_size,
-            compression_enabled: config.compression_enabled,
-            compression_level: config.compression_level,
-            adaptive_compression: config.adaptive_compression,
-            bandwidth_limit: config.bandwidth_limit,
-        }
-    }
-
-    /// Rebuild the [`ConfigMessage`] that was negotiated when the
-    /// transfer started. Used by resume to avoid `ConfigMessage::default`
-    /// (whose chunk_size would mis-align the on-disk `.partial`).
-    pub fn to_config_message(&self) -> ConfigMessage {
-        ConfigMessage {
-            compression_enabled: self.compression_enabled,
-            compression_level: self.compression_level,
-            adaptive_compression: self.adaptive_compression,
-            chunk_size: self.chunk_size,
-            bandwidth_limit: self.bandwidth_limit,
+            config: config.clone(),
         }
     }
 
@@ -941,18 +886,15 @@ mod tests {
         }];
         let cfg = make_cfg(1024 * 1024);
         let state = FolderTransferState::new(Uuid::new_v4(), "f".into(), files, &cfg);
-        assert_eq!(state.chunk_size, 1024 * 1024);
+        assert_eq!(state.config.chunk_size, 1024 * 1024);
 
         let json = serde_json::to_string(&state).unwrap();
         let round: FolderTransferState = serde_json::from_str(&json).unwrap();
-        assert_eq!(round.chunk_size, 1024 * 1024);
-
-        let restored = round.to_config_message();
-        assert_eq!(restored.chunk_size, 1024 * 1024);
-        assert_eq!(restored.compression_enabled, cfg.compression_enabled);
-        assert_eq!(restored.compression_level, cfg.compression_level);
-        assert_eq!(restored.adaptive_compression, cfg.adaptive_compression);
-        assert_eq!(restored.bandwidth_limit, cfg.bandwidth_limit);
+        assert_eq!(round.config.chunk_size, 1024 * 1024);
+        assert_eq!(round.config.compression_enabled, cfg.compression_enabled);
+        assert_eq!(round.config.compression_level, cfg.compression_level);
+        assert_eq!(round.config.adaptive_compression, cfg.adaptive_compression);
+        assert_eq!(round.config.bandwidth_limit, cfg.bandwidth_limit);
     }
 
     /// Finding 1.1: multi-file folder resume must not deadlock when the

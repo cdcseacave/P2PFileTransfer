@@ -6,7 +6,7 @@ use std::time::Duration;
 use anyhow::Result;
 use tracing::info;
 
-use p2p_core::{discovery::DiscoveryManager, identity::Identity, protocol::Capabilities, Uuid};
+use p2p_core::{discovery::DiscoveryManager, identity::Identity, Uuid};
 
 pub async fn handle_discover(
     timeout_secs: u64,
@@ -22,7 +22,6 @@ pub async fn handle_discover(
         DiscoveryManager::new(
             device_name,
             port,
-            Capabilities::all(),
             identity.fingerprint(),
             Duration::from_secs(10),
         )

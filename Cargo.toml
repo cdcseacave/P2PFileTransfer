@@ -25,12 +25,7 @@ p2p-core = { path = "./p2p-core" }
 p2p-cli = { path = "./p2p-cli", optional = true }
 p2p-gui = { path = "./p2p-gui", optional = true }
 
-tokio = { version = "1.40", features = ["full"] }
 anyhow = "1.0"
-thiserror = "1.0"
-log = "0.4"
-env_logger = "0.11"
-tracing = "0.1"
 
 [dev-dependencies]
 # Used by tests/traversal_loopback_test.rs to drive the rendezvous +
@@ -60,10 +55,3 @@ lto = true
 codegen-units = 1
 strip = true
 panic = "abort"
-
-[profile.release-small]
-inherits = "release"
-opt-level = "z"
-lto = true
-codegen-units = 1
-strip = true
