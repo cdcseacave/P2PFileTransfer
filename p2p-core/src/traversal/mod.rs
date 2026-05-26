@@ -69,6 +69,9 @@ pub struct RendezvousParams {
 ///    classify the local NAT. On Cone NAT we register for direct
 ///    punching; on Symmetric NAT we set `want_relay = true` so the
 ///    rendezvous returns a relay endpoint instead of trying to punch.
+///    A loopback rendezvous (`127.0.0.0/8` or `::1`, i.e. local-dev or
+///    tests) is by definition not behind a discoverable NAT — skip
+///    STUN there and use the bound socket address directly.
 /// 3. Register at the rendezvous and wait for the peer to do the same.
 /// 4. Convert the socket to a `std::net::UdpSocket` and hand it to
 ///    [`QuicEndpoint::from_socket`].
@@ -92,20 +95,33 @@ pub async fn establish_via_rendezvous(params: RendezvousParams) -> Result<Establ
         socket.local_addr().map_err(Error::Network)?
     );
 
-    let stun_a = resolve_first(&stun_servers[0]).await?;
-    let stun_b = resolve_first(&stun_servers[1]).await?;
-    debug!("traversal: STUN servers resolved to {stun_a} and {stun_b}");
+    // A loopback rendezvous (tests, local dev) is by definition not
+    // behind any NAT we can discover with STUN. Worse, STUN against a
+    // real server would return our public-NAT-mapped port, which has
+    // no bearing on the loopback socket — the rendezvous then stamps
+    // the request with `127.0.0.1` (TCP source) + that STUN-mapped
+    // port, and the resulting punch target never reaches the local
+    // socket. Skip STUN here and use the bound socket address directly.
+    let (public_endpoint, want_relay) = if rendezvous.ip().is_loopback() {
+        let local = socket.local_addr().map_err(Error::Network)?;
+        info!("traversal: loopback rendezvous {rendezvous} — skipping STUN, using local {local}");
+        (local, force_relay)
+    } else {
+        let stun_a = resolve_first(&stun_servers[0]).await?;
+        let stun_b = resolve_first(&stun_servers[1]).await?;
+        debug!("traversal: STUN servers resolved to {stun_a} and {stun_b}");
 
-    let class = classify_nat(&socket, stun_a, stun_b).await?;
-    let (public_endpoint, want_relay) = match class {
-        NatClass::Cone { public } => (public, force_relay),
-        NatClass::Symmetric => {
-            // Use the local socket address as a placeholder public endpoint
-            // for the rendezvous request — the rendezvous won't use it
-            // for relay mode (it gives back the relay's address), but
-            // serde still expects a SocketAddr.
-            let local = socket.local_addr().map_err(Error::Network)?;
-            (local, true)
+        let class = classify_nat(&socket, stun_a, stun_b).await?;
+        match class {
+            NatClass::Cone { public } => (public, force_relay),
+            NatClass::Symmetric => {
+                // Use the local socket address as a placeholder public endpoint
+                // for the rendezvous request — the rendezvous won't use it
+                // for relay mode (it gives back the relay's address), but
+                // serde still expects a SocketAddr.
+                let local = socket.local_addr().map_err(Error::Network)?;
+                (local, true)
+            }
         }
     };
     info!(

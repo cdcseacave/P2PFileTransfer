@@ -58,6 +58,12 @@ async fn receiver_re_pairs_after_sender_disconnect_and_resume_uses_rendezvous() 
     // sender exits, the receiver's QUIC connection closes; this is the
     // point at which the receive loop must successfully re-pair through
     // the rendezvous (and not call `reaccept()`).
+    //
+    // Give the receiver a head-start so its register arrives first; the
+    // rendezvous treats whichever side arrives second as the match.
+    // Without this both can race for the "first peer" slot and the
+    // loser sees "code already in use".
+    sleep(Duration::from_millis(200)).await;
     phase1_send_file(rzv_addr, &dirs, &payloads.a).await;
     wait_until_file_at(&dirs.dst, &payloads.a.name, PAYLOAD_SIZE).await;
     assert_file_matches(&payloads.a, &dirs.dst.join(&payloads.a.name)).await;
@@ -68,7 +74,13 @@ async fn receiver_re_pairs_after_sender_disconnect_and_resume_uses_rendezvous() 
     // fail at CLI signature or session establish; post-fix it pairs
     // through the rendezvous (the receiver is now in re-pair after
     // phase 1) and transfers file B.
+    //
+    // Same ordering caveat as phase 1: the receiver loops back into a
+    // fresh rendezvous registration after the phase-1 sender disconnects;
+    // give it a moment to land in the waiter slot before the phase-2
+    // sender arrives.
     let resume_id = synthesize_state_for_resume(&dirs, &payloads.b).await;
+    sleep(Duration::from_millis(500)).await;
     phase2_resume_file(rzv_addr, &dirs, &payloads.b, resume_id).await;
     wait_until_file_at(&dirs.dst, &payloads.b.name, PAYLOAD_SIZE).await;
     assert_file_matches(&payloads.b, &dirs.dst.join(&payloads.b.name)).await;
