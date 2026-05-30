@@ -16,14 +16,12 @@
 //! - `message`: Message types for event handling
 //! - `operations`: Message handlers and async operations
 //! - `views`: View implementations for each tab
-//! - `styles`: Custom styling for professional appearance
 //! - `utils`: Utility functions for formatting
 
 mod app;
 mod message;
 mod operations;
 mod state;
-mod styles;
 mod utils;
 mod views;
 

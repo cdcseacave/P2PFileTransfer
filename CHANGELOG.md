@@ -5,6 +5,163 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed — 2026-05-23 — Security & robustness audit (16 findings)
+
+Landed all 16 findings from a code review on the `quic` branch (4
+Critical, 6 High, 6 Medium). Per the project's no-backwards-compat
+rule, the fixes change wire formats and call sites in place; no
+deprecated paths or shims.
+
+Data integrity:
+- **C1** — `FileTransferSession::send_chunk_stream` awaits
+  `stream.stopped().await` after `finish()` so the last chunk isn't
+  lost when the sender closes the connection.
+- **C3** — `FileTransferSession::receive_file` rejects
+  `chunk_index >= total_chunks` with `Error::Protocol` before
+  writing.
+- **H4 + M4** — Chunk indices are `u64` end-to-end:
+  `ChunkReader::total_chunks` / `read_chunk` / `fold_chunk` and
+  `ChunkWriter::write_chunk` all take `u64`. Files larger than `2^32`
+  chunks no longer truncate.
+- **C4** — Receiver SHA-256 mismatch returns `Error::Verification`,
+  not a silent warn.
+
+Security:
+- **H1** — Mutual TLS. `tls::server_config` now uses
+  `with_client_cert_verifier(AcceptAnyClientCert)`; client presents
+  its cert via `with_client_auth_cert`. `cross_check_fingerprint`
+  rejects `None` observations too, closing the responder-side TOFU
+  bypass.
+- **M3** — `transfer_folder::sanitize_relative_path` rejects
+  absolute, `..`, `.`, drive/root, and empty paths; applied on both
+  the receive join site and the sender's `scan_folder` output.
+- **M6** — Rendezvous server rewrites
+  `RegisterRequest.public_endpoint` IP to the TCP peer's IP
+  (keeping the user-supplied UDP port), blocking traffic reflection
+  via forged endpoints.
+- **M1** — `stun::query` rejects responses whose transaction id
+  doesn't match the request.
+
+Robustness:
+- **C2** — `traversal::punch::race_connect_and_accept` now launches
+  `connect` *and* an address-validating `accept_from` on both peers;
+  the larger-device-id peer staggers its `connect` by 50 ms to avoid
+  Initial-packet collisions. First successful handshake wins.
+- **H5** — `accept_from` loops on `endpoint.accept()` and drops
+  connections whose source address doesn't match the rendezvous-
+  supplied peer.
+- **H6** — `Server::bind_with(max_concurrent)` caps in-flight
+  rendezvous handlers via `tokio::sync::Semaphore` (default 1024)
+  with backpressure on the listener.
+- **H3** — Relay recv buffer increased to 65 KiB; warns on
+  full-buffer reads as a truncation tripwire.
+- **H2** — Relay slot binding is fingerprint-keyed lookup;
+  `reserve_session` refuses identical fingerprints on both slots.
+- **M5** — Relay idle-session eviction moved to a 30 s background
+  task off the per-packet forward path.
+- **M2** — `framing::read_message` maps `UnexpectedEof` on the magic
+  read to `Error::Disconnected` and frame-interior short reads to
+  `Error::Protocol`; `session::run_event_loop` drops its
+  string-matching arm in favor of typed `matches!(...)`.
+
+### Added — 2026-05-23 — GUI pair-with-code + nat-test self-loop (Phase 3)
+- GUI Connection tab gains a third mode `Pair with code (cross-NAT)`:
+  inputs for rendezvous server (host:port) and shared code, with a
+  Generate button that mints a fresh 6-char code. Connect mode now
+  exposes the `--peer-fingerprint` field needed for direct mode.
+- Session establishment runs inside `Command::perform` and only the
+  resulting `P2PSession` is wrapped in `Arc<tokio::Mutex<...>>` and
+  installed in app state — the message loop stays responsive even
+  during a multi-second rendezvous wait.
+- `p2p-transfer nat-test --rendezvous <host[:port]>` now runs a real
+  self-loop punch test: spawns two local peers, registers both at the
+  rendezvous with a fresh code, races a QUIC handshake between them,
+  and reports `direct` / `relay` / `failed` plus latency.
+
+### Added — 2026-05-23 — QUIC relay fallback (Phase 2)
+- `p2p_rendezvous::relay::Relay`: a tiny UDP packet forwarder. Each
+  session is reserved by the rendezvous and joined by both peers via
+  a `RelayHello` (magic + token + cert fingerprint). Subsequent UDP
+  packets from a paired peer are forwarded verbatim to the other.
+  Because the forwarder doesn't inspect the QUIC bytes, end-to-end
+  TLS still terminates between the two real peers — the relay sees
+  ciphertext only.
+- New rendezvous wire variant `Message::RelayMatch` (with relay
+  endpoint + session token + peer fingerprint + peer device id). The
+  `RegisterRequest` gains a `want_relay: bool` field (defaults to
+  `false` for back-compat with the v1 wire format inside the same
+  protocol version — equality check is on `protocol_version`, which
+  stays at 1).
+- `rendezvousd` flags `--relay-bind <addr>` and `--max-relay-mbps <n>`
+  (token-bucket rate cap across all sessions).
+- `p2p-transfer send` / `receive` gain a `--force-relay` flag to skip
+  the punch and head straight for the relay (useful for testing).
+- `traversal::establish_via_rendezvous`: when STUN spots symmetric NAT
+  (or `force_relay` is set), the registrant asks for relay mode and
+  the orchestrator joins the relay session before handing the socket
+  to quinn; the QUIC handshake races against the relay's address as
+  the apparent peer endpoint.
+- New `tests/relay_loopback_test.rs` exercising the full rendezvous +
+  relay + QUIC-over-relay handshake on localhost.
+
+### Added — 2026-05-23 — Rendezvous + UDP hole punching (Phase 1)
+- New `p2p-rendezvous` workspace crate with a tiny pairing-by-code
+  rendezvous protocol (MessagePack-over-TCP) and a `rendezvousd` binary.
+- `p2p-core::traversal::establish_via_rendezvous` orchestrator: binds a
+  UDP socket, runs STUN on it, registers with the rendezvous + code,
+  and on match races `QuicEndpoint::connect`/`accept` as the hole
+  punch (`traversal::punch::race_connect_and_accept`).
+- CLI flags `--rendezvous <host:port>` and `--code <code>` on
+  `send` / `receive`. When `--rendezvous` is set, `--peer` and
+  `--discover` are ignored.
+- Symmetric-NAT detection up front via `stun::classify_nat` (two
+  servers, compare mapped ports); surfaces `Error::HolePunchFailed`
+  before any handshake attempt.
+- Loopback regression test in `tests/traversal_loopback_test.rs`
+  exercising the rendezvous + punch primitives end-to-end without STUN.
+
+### Added — 2026-05-23 — Clean QUIC rewrite (Phase 0)
+- **QUIC transport** via `quinn` 0.11 on a single UDP socket per endpoint
+  (`p2p-core/src/network/quic.rs`: `QuicEndpoint`, `QuicConnection`).
+- **Mandatory TLS 1.3** with per-device self-signed certs (rcgen) and
+  fingerprint-pinning verifier (`p2p-core/src/{identity.rs, tls.rs}`).
+- **TOFU trust store** at `<config_dir>/p2p-transfer/known_peers.json`
+  (`p2p-core/src/known_peers.rs`).
+- **STUN primitives** on the shared UDP socket
+  (`p2p-core/src/traversal/stun.rs`): async `query` +
+  `classify_nat` (Cone vs Symmetric).
+- **`--peer-fingerprint` CLI flag** on `send` / `receive` / `resume`;
+  required for direct-IP connections.
+- **`cert_fingerprint` in discovery beacons** so LAN-discovered peers
+  can pin TLS without an extra round trip.
+- New error variants `Quic`, `Tls`, `Rendezvous`, `HolePunchFailed`,
+  `FingerprintMismatch`; `Error::is_recoverable` updated for QUIC.
+
+### Changed
+- `PROTOCOL_VERSION` bumped to 2; equality check only (no v1 compat).
+- Chunks now travel on per-chunk unidirectional QUIC streams
+  (`[u64 LE index | u8 flags | payload]`) instead of `ProtocolMessage`
+  frames — `transfer_file.rs` / `transfer_folder.rs` collapsed.
+- `nat-test` CLI now classifies NAT via two STUN servers on a real
+  `tokio::net::UdpSocket` (the same socket type quinn owns).
+
+### Removed
+- TCP transport (`p2p-core/src/network/tcp.rs`).
+- Sliding-window protocol (`p2p-core/src/window.rs`,
+  `send_file_windowed`, `InFlightChunk`, etc.) — QUIC stream
+  multiplexing replaces it.
+- Per-chunk CRC32 (`crc32fast` dependency) — TLS AEAD authenticates
+  every byte.
+- Per-chunk ACK protocol (`ChunkAck`, `AckStatus`,
+  `ChunkMessage`/`ChunkMessage.checksum`/`ChunkMessage.flags`).
+- Capability bits `ENCRYPTION` (always on) and `WINDOWED` (one mode).
+- CLI flags `--window-size`, `--max-retries`.
+- Legacy blocking `p2p-core/src/nat.rs` (collapsed into `traversal/stun.rs`).
+- The TCP-specific `is_transient_error` matrix in `reconnect.rs` (now
+  one `Error::is_recoverable`).
+
 ### Added
 - **GUI Implementation** (2025-10-10): Complete graphical user interface using Iced framework
   - Tabbed interface with Connection, Send, Receive, Settings, and History tabs

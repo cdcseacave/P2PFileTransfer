@@ -11,26 +11,28 @@ tokio = { version = "1.40", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 rmp-serde = "1.3"  # MessagePack serialization
 zstd = "0.13"
-crc32fast = "1.4"
 sha2 = "0.10"
 uuid = { version = "1.10", features = ["v4", "serde"] }
 thiserror = "1.0"
-anyhow = "1.0"
-log = "0.4"
 bitvec = { version = "1.0", features = ["serde"] }
 bytes = "1.7"
-futures = "0.3"
 tracing = "0.1.41"
 serde_json = "1.0.145"
 rand = "0.8"
 dirs = "5.0"
-local-ip-address = "0.6"
-indicatif = "0.17"
+hex = "0.4"
+base64 = "0.22"
+fs2 = "0.4"
+indicatif = "0.17"  # ProgressState UI hooks (TODO: move to p2p-cli via callback)
+
+# QUIC transport (TLS 1.3 mandatory) + cert-pinned identity.
+# rcgen owns the Ed25519 keypair material so we don't need ed25519-dalek directly.
+quinn = "0.11"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rustls-pki-types = "1"
+rcgen = "0.13"
+p2p-rendezvous = { path = "../p2p-rendezvous" }
 
 [dev-dependencies]
 tokio-test = "0.4"
 tempfile = "3.12"
-
-[package.metadata]
-# Re-export uuid for use in integration tests
-uuid = { version = "1.10", features = ["v4"] }

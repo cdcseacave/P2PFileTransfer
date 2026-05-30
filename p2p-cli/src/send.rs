@@ -1,38 +1,37 @@
-//! Send operations
+//! Send operations.
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::Result;
+use tokio::signal;
+use tracing::{info, warn};
+
 use p2p_core::{
-    protocol::{Capabilities, ConfigMessage},
+    history::{record_transfer, TransferDirection, TransferRecord},
+    identity::Identity,
+    protocol::ConfigMessage,
     session::P2PSession,
     Uuid,
 };
-use std::path::{Path, PathBuf};
-use tokio::signal;
 
 use crate::cli::{SessionParams, TransferParams};
-use tracing::{info, warn};
+use crate::rendezvous::establish_session;
+use crate::util::{derive_base_name, resolve_state_file};
 
 pub async fn handle_send(
     path: PathBuf,
+    state_dir: Option<PathBuf>,
     session_params: SessionParams,
     transfer_params: TransferParams,
+    identity_dir: Option<PathBuf>,
 ) -> Result<()> {
-    info!("📤 Starting send operation");
+    info!("Starting send operation");
     info!("  Path: {}", path.display());
 
-    // Determine role (default to client for send)
     let role = session_params.get_role("client");
     info!("  Session role: {}", role);
 
-    info!(
-        "  Mode: {} (window size: {})",
-        if transfer_params.window_size == 1 {
-            "Sequential"
-        } else {
-            "Windowed"
-        },
-        transfer_params.window_size
-    );
     if transfer_params.max_speed > 0 {
         info!(
             "  Speed limit: {}",
@@ -40,104 +39,71 @@ pub async fn handle_send(
         );
     }
 
-    // Validate path exists
     if !path.exists() {
         anyhow::bail!("Path does not exist: {}", path.display());
     }
 
-    // Build configuration
     let config = ConfigMessage {
         compression_enabled: transfer_params.compress,
         compression_level: transfer_params.compress_level,
         adaptive_compression: transfer_params.adaptive,
-        chunk_size: transfer_params.chunk_size * 1024, // Convert KB to bytes
-        window_size: transfer_params.window_size,
+        chunk_size: transfer_params.chunk_size * 1024,
         bandwidth_limit: transfer_params.max_speed,
     };
 
-    // Establish session based on role (with discovery support)
-    // Peer address parsing and status messages are handled by P2PSession::establish()
-    let device_id = Uuid::new_v4();
-    let capabilities = Capabilities::all();
+    let identity = Arc::new(Identity::load_or_generate(identity_dir.as_deref())?);
+    info!("  Identity fingerprint: {}", identity.fingerprint_hex());
 
-    let mut session = P2PSession::establish(
-        &role,
-        session_params.peer.clone(),
-        session_params.discover,
-        session_params.port,
+    let device_id = Uuid::new_v4();
+
+    let mut session = establish_session(
+        &session_params,
+        "client",
+        identity,
         device_id,
-        capabilities,
         Some(config.clone()),
     )
     .await?;
 
-    info!("✅ Session established");
+    info!("Session established");
     info!("    Peer: {}", session.peer_device_id());
-    info!("    Capabilities: {:?}", session.capabilities());
+    info!(
+        "    Peer fingerprint: {}",
+        hex::encode(session.peer_fingerprint())
+    );
 
-    // Send file or folder with signal handling (unified)
-    let result = tokio::select! {
-        result = send(&mut session, &path, config, transfer_params.max_retries) => {
-            result
-        }
-        _ = signal::ctrl_c() => {
-            Err(anyhow::anyhow!("Transfer interrupted by user (Ctrl+C)"))
-        }
-    };
-    result
+    let peer_addr = session.peer_addr().to_string();
+
+    tokio::select! {
+        result = send(&mut session, &path, state_dir.as_deref(), transfer_params.max_reconnect_attempts, &peer_addr) => result,
+        _ = signal::ctrl_c() => Err(anyhow::anyhow!("Transfer interrupted by user (Ctrl+C)")),
+    }
 }
 
 async fn send(
     session: &mut P2PSession,
     path: &Path,
-    _config: ConfigMessage,
-    max_retries: u32,
+    state_dir: Option<&Path>,
+    max_reconnect_attempts: u32,
+    peer_addr: &str,
 ) -> Result<()> {
-    let base_name = path.file_name().unwrap().to_string_lossy().to_string();
-
+    let base_name = derive_base_name(path)?;
     if path.is_file() {
-        info!("📄 Sending file: {}", base_name);
+        info!("Sending file: {}", base_name);
     } else {
-        info!("📁 Sending folder: {}", base_name);
+        info!("Sending folder: {}", base_name);
     }
 
-    let config = session.config();
-    if config.window_size == 1 {
-        info!("   Using sequential transfer (window size: 1)");
-    } else {
-        info!(
-            "   Using windowed transfer protocol (window size: {})",
-            config.window_size
-        );
-    }
-
-    // Display reconnection behavior based on max_retries
-    if max_retries == 0 {
-        info!("   Auto-reconnect: enabled (unlimited retries)");
-    } else if max_retries == 1 {
-        info!("   Auto-reconnect: disabled (no retry)");
-    } else {
-        info!("   Auto-reconnect: enabled (max {} retries)", max_retries);
-    }
-
-    // Generate transfer ID for this operation (or use existing one from state file)
     let transfer_id = Uuid::new_v4();
-
-    // Create state file path
-    let state_file = PathBuf::from(format!("transfer_{}.json", transfer_id));
-
-    // Create progress state for unified progress tracking
+    let state_file = resolve_state_file(state_dir, &transfer_id.to_string())?;
     let mut progress = p2p_core::progress::ProgressState::new(0);
-
-    // Configure reconnection behavior
     let reconnect_config = p2p_core::reconnect::ReconnectConfig {
-        max_attempts: max_retries,
-        initial_backoff_secs: 3,
-        max_backoff_secs: 180,
-        exponential: true,
+        max_attempts: max_reconnect_attempts,
+        ..Default::default()
     };
 
-    // Send file or folder (state is managed internally by session)
+    let mut record = TransferRecord::new(transfer_id, TransferDirection::Send, peer_addr.into());
+
     let result = session
         .send_path(
             path,
@@ -148,23 +114,40 @@ async fn send(
         .await;
 
     match result {
-        Ok(_) => {
-            // Success - clean up state file (already done by send_path)
+        Ok(summary) => {
             if state_file.exists() {
                 let _ = tokio::fs::remove_file(&state_file).await;
             }
-            info!("✅ Transfer complete!");
+            // Prefer the per-file list from the summary so folder
+            // transfers record every file rather than just the folder
+            // name (finding 3.2). Fall back to base_name when the summary
+            // is empty (e.g. a single-file transfer with no inner list).
+            let files = if summary.files.is_empty() {
+                vec![base_name]
+            } else {
+                summary.files
+            };
+            record.complete(files, progress.transferred_bytes());
+            if let Err(e) = record_transfer(record, None).await {
+                warn!("Failed to record transfer history: {}", e);
+            }
+            info!("Transfer complete!");
             Ok(())
         }
         Err(e) => {
-            // Error - state was already saved by send_path for resume
             if state_file.exists() {
-                warn!("  ⚠️  Transfer interrupted after {} attempts", max_retries);
-                warn!("  📝 State saved to: {}", state_file.display());
+                warn!("Transfer interrupted");
+                warn!("State saved to: {}", state_file.display());
                 warn!(
-                    "  💡 Resume with: p2p-transfer resume {}",
-                    state_file.display()
+                    "Resume with: p2p-transfer resume {} --path <orig-path> \
+                     (then your original pairing flags: --peer + --peer-fingerprint, \
+                     or --rendezvous + --code)",
+                    transfer_id
                 );
+            }
+            record.fail(e.to_string());
+            if let Err(rec_err) = record_transfer(record, None).await {
+                warn!("Failed to record transfer history: {}", rec_err);
             }
             Err(e.into())
         }

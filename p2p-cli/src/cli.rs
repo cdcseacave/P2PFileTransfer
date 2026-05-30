@@ -20,9 +20,15 @@ pub struct SessionParams {
     #[arg(long, value_parser = ["client", "server"])]
     pub role: Option<String>,
 
-    /// Peer address (IP:PORT) - required when role is 'client'
+    /// Peer address (IP:PORT) - required when role is 'client' and not using discovery
     #[arg(long)]
     pub peer: Option<String>,
+
+    /// Hex-encoded SHA-256 fingerprint of the peer's TLS cert (64 hex chars).
+    /// Required when --peer is used; populated automatically from LAN beacons
+    /// when --discover is used.
+    #[arg(long)]
+    pub peer_fingerprint: Option<String>,
 
     /// Port to use - for 'client' role, this is the destination port; for 'server' role, this is the listen port
     #[arg(short = 'p', long, default_value = "14567")]
@@ -31,6 +37,45 @@ pub struct SessionParams {
     /// Use peer discovery to find the peer address (only for 'client' role)
     #[arg(short = 'd', long)]
     pub discover: bool,
+
+    /// Rendezvous server (host:port) for cross-NAT pairing. When set,
+    /// `--peer` and `--discover` are ignored and pairing happens via
+    /// `--code` instead.
+    #[arg(long)]
+    pub rendezvous: Option<String>,
+
+    /// Shared pairing code (4–32 ASCII alphanumeric). Required when
+    /// `--rendezvous` is set. Both peers must use the same value: agree
+    /// out-of-band, pick any conforming string, or generate one with the
+    /// GUI's "Generate" button.
+    #[arg(long)]
+    pub code: Option<String>,
+
+    /// Force relay mode even when STUN says the local NAT is Cone.
+    /// Useful for testing the relay path; normal pairing should leave
+    /// this off and let symmetric-NAT detection decide.
+    #[arg(long)]
+    pub force_relay: bool,
+}
+
+impl SessionParams {
+    /// Decode `--peer-fingerprint` into a 32-byte array, if provided.
+    pub fn parsed_fingerprint(&self) -> anyhow::Result<Option<[u8; 32]>> {
+        let Some(hex_str) = self.peer_fingerprint.as_deref() else {
+            return Ok(None);
+        };
+        if hex_str.len() != 64 {
+            anyhow::bail!(
+                "--peer-fingerprint must be 64 hex chars, got {} chars",
+                hex_str.len()
+            );
+        }
+        let bytes = hex::decode(hex_str)
+            .map_err(|e| anyhow::anyhow!("--peer-fingerprint hex decode: {e}"))?;
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&bytes);
+        Ok(Some(out))
+    }
 }
 
 impl SessionParams {
@@ -69,20 +114,16 @@ pub struct TransferParams {
     pub adaptive: bool,
 
     /// Chunk size in KB
-    #[arg(long, default_value = "64")]
+    #[arg(long, default_value = "1024")]
     pub chunk_size: u32,
-
-    /// Window size (number of chunks in-flight). Use 1 for sequential mode, 2+ for windowed mode
-    #[arg(long, default_value = "16")]
-    pub window_size: usize,
 
     /// Maximum transfer speed (e.g., "10M", "1G", "512K", "unlimited"). Default: unlimited
     #[arg(long, value_parser = parse_bandwidth_arg, default_value = "0")]
     pub max_speed: u64,
 
-    /// Maximum reconnection attempts on network failures (0 = unlimited, 1 = no retry)
+    /// Max reconnect attempts after a connection drop (0 = retry forever)
     #[arg(long, default_value = "5")]
-    pub max_retries: u32,
+    pub max_reconnect_attempts: u32,
 }
 
 #[derive(Parser)]
@@ -96,6 +137,10 @@ pub struct Cli {
     /// Set logging level: off, error, warn, info, debug, trace
     #[arg(short = 'v', long = "verbosity", default_value = "info", global = true)]
     pub verbosity: String,
+
+    /// Directory holding identity.{key,cert} (default: <config_dir>/p2p-transfer)
+    #[arg(long, global = true)]
+    pub identity_dir: Option<PathBuf>,
 }
 
 #[derive(Subcommand)]
@@ -108,6 +153,13 @@ pub enum Commands {
     Send {
         /// File or folder to send
         path: PathBuf,
+
+        /// Directory to write the resume state file into. Defaults to the
+        /// current working directory. Pass an absolute path here so
+        /// `p2p-transfer resume <id> --state-dir <same>` works regardless
+        /// of where the user runs the resume command from.
+        #[arg(long)]
+        state_dir: Option<PathBuf>,
 
         #[command(flatten)]
         session: SessionParams,
@@ -145,25 +197,48 @@ pub enum Commands {
         port: u16,
     },
 
-    /// Test NAT traversal - discover public IP and port
+    /// Test NAT traversal — STUN-based by default; with `--rendezvous`,
+    /// runs a real self-loop punch test through a live rendezvous server.
     NatTest {
-        /// STUN server to use (default: Google's public STUN)
+        /// STUN server to use (defaults to two of Google's public servers
+        /// so symmetric-vs-cone classification is possible)
         #[arg(long)]
         stun_server: Option<String>,
+
+        /// Rendezvous server (host[:port]) to self-loop punch against.
+        /// When present, the tool spawns two local peers that pair
+        /// through the rendezvous and races a QUIC handshake between
+        /// them — reports `direct`, `relay`, or `failed`.
+        #[arg(long)]
+        rendezvous: Option<String>,
     },
 
     /// Resume a previous transfer
+    ///
+    /// Reconnects to the original receiver and continues from the last
+    /// persisted chunk boundary. Use the same pairing flags you used for
+    /// the original `send`: either `--peer` + `--peer-fingerprint` (direct
+    /// mode) or `--rendezvous` + `--code` (cross-NAT).
     Resume {
         /// Transfer ID to resume (or state file path)
         transfer_id: String,
 
-        /// Peer address (IP:PORT) to reconnect to
-        #[arg(long)]
-        to: String,
-
-        /// Original folder path to resume from
+        /// Original file or folder path to resume from
         #[arg(long)]
         path: PathBuf,
+
+        /// Directory the resume state file lives in. Must match whatever
+        /// `--state-dir` the original `send` used; defaults to the current
+        /// working directory.
+        #[arg(long)]
+        state_dir: Option<PathBuf>,
+
+        /// Max reconnect attempts after a connection drop (0 = retry forever)
+        #[arg(long, default_value = "5")]
+        max_reconnect_attempts: u32,
+
+        #[command(flatten)]
+        session: SessionParams,
     },
 
     /// View transfer history

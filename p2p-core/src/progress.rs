@@ -63,6 +63,11 @@ impl ProgressState {
             // Enable steady tick for smooth updates (every 250ms)
             self.progress_bar
                 .enable_steady_tick(std::time::Duration::from_millis(250));
+            // Reset the elapsed clock so the bytes/sec rate doesn't include
+            // whatever happened before the real total was known (most
+            // commonly the interactive y/N accept prompt).
+            self.progress_bar.reset_elapsed();
+            self.progress_bar.reset_eta();
         }
 
         self.total_bytes = total_bytes;

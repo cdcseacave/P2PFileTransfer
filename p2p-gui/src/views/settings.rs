@@ -25,14 +25,6 @@ pub fn view_settings_tab(state: &AppState) -> Element<'_, Message> {
         })
         .padding(8);
 
-    let window_size_input = text_input("Window size", &state.settings.window_size.to_string())
-        .on_input(|s| {
-            s.parse::<usize>()
-                .map(Message::WindowSizeChanged)
-                .unwrap_or(Message::WindowSizeChanged(state.settings.window_size))
-        })
-        .padding(8);
-
     let bandwidth_input = text_input(
         "Bandwidth limit (MB/s, 0 = unlimited)",
         &state.settings.bandwidth_input,
@@ -80,10 +72,6 @@ pub fn view_settings_tab(state: &AppState) -> Element<'_, Message> {
                 text("Chunk Size").size(13),
                 Space::with_height(4),
                 chunk_size_input,
-                Space::with_height(12),
-                text("Window Size").size(13),
-                Space::with_height(4),
-                window_size_input,
                 Space::with_height(12),
                 text("Bandwidth Limit").size(13),
                 Space::with_height(4),

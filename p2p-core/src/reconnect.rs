@@ -20,7 +20,7 @@ pub struct ReconnectConfig {
 impl Default for ReconnectConfig {
     fn default() -> Self {
         Self {
-            max_attempts: 0,
+            max_attempts: 5,
             initial_backoff_secs: 3,
             max_backoff_secs: 180,
             exponential: true,
@@ -143,22 +143,8 @@ where
     }
 }
 
-/// Check if an error is a transient network error that should trigger retry
-pub fn is_transient_error(error: &crate::error::Error) -> bool {
-    use crate::error::Error;
-
-    match error {
-        Error::Network(_) => true, // All network errors are transient
-        Error::Protocol(msg) => {
-            // Some protocol errors are transient
-            msg.contains("timeout")
-                || msg.contains("connection")
-                || msg.contains("reset")
-                || msg.contains("broken pipe")
-        }
-        _ => false, // Other errors are not transient
-    }
-}
+// `is_transient_error` removed: callers should use `Error::is_recoverable()`,
+// which now covers all the QUIC-era transport error variants in one place.
 
 #[cfg(test)]
 mod tests {
@@ -214,6 +200,16 @@ mod tests {
         assert!(config.should_retry(0));
         assert!(config.should_retry(100));
         assert!(config.should_retry(1000));
+    }
+
+    #[test]
+    fn test_default_caps_at_5_attempts() {
+        let config = ReconnectConfig::default();
+        assert_eq!(config.max_attempts, 5);
+        assert!(config.should_retry(0));
+        assert!(config.should_retry(3));
+        assert!(!config.should_retry(4));
+        assert!(!config.should_retry(10));
     }
 
     #[tokio::test]

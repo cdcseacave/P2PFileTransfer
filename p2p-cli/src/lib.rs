@@ -7,13 +7,19 @@
 //! - `discover`: Peer discovery functionality
 //! - `resume`: Resume interrupted transfers
 
-mod cli;
+// `cli`, `send`, `receive`, and `resume` are `pub` so the workspace-level
+// integration test in `tests/rendezvous_disconnect_resume_test.rs` can
+// drive the same handler functions the binary dispatches to. The rest
+// stay private — they're not stable surface for external consumers.
+pub mod cli;
 mod discover;
 mod history;
 mod nat_test;
-mod receive;
-mod resume;
-mod send;
+pub mod receive;
+mod rendezvous;
+pub mod resume;
+pub mod send;
+mod util;
 
 use anyhow::Result;
 use clap::Parser;
@@ -86,7 +92,11 @@ pub fn run_cli_sync() -> Result<()> {
 
     #[cfg(not(feature = "gui"))]
     {
-        if cli.command.is_none() {
+        // Both the no-command launcher and the explicit `gui` subcommand
+        // map to the GUI in a full build; without the gui feature both
+        // need to exit cleanly with the same hint, not fall through to
+        // the async dispatcher's unreachable arm.
+        if matches!(cli.command, None | Some(cli::Commands::Gui)) {
             eprintln!("GUI not available. This binary was built without GUI support.");
             eprintln!("To use GUI, rebuild with: cargo build --release --features full");
             eprintln!("\nAvailable CLI commands:");
@@ -104,6 +114,7 @@ pub fn run_cli_sync() -> Result<()> {
 }
 
 async fn run_cli_async(cli: Cli) -> Result<()> {
+    let identity_dir = cli.identity_dir;
     match cli.command {
         // GUI cases already handled in run_cli_sync
         #[cfg(feature = "gui")]
@@ -120,30 +131,44 @@ async fn run_cli_async(cli: Cli) -> Result<()> {
         }
         Some(cli::Commands::Send {
             path,
+            state_dir,
             session,
             transfer,
         }) => {
-            send::handle_send(path, session, transfer).await?;
+            send::handle_send(path, state_dir, session, transfer, identity_dir).await?;
         }
         Some(cli::Commands::Receive {
             output,
             auto_accept,
             session,
         }) => {
-            receive::handle_receive(output, auto_accept, session).await?;
+            receive::handle_receive(output, auto_accept, session, identity_dir).await?;
         }
         Some(cli::Commands::Discover { timeout, port }) => {
-            discover::handle_discover(timeout, port).await?;
+            discover::handle_discover(timeout, port, identity_dir).await?;
         }
-        Some(cli::Commands::NatTest { stun_server }) => {
-            nat_test::handle_nat_test(stun_server).await?;
+        Some(cli::Commands::NatTest {
+            stun_server,
+            rendezvous,
+        }) => {
+            nat_test::handle_nat_test(stun_server, rendezvous).await?;
         }
         Some(cli::Commands::Resume {
             transfer_id,
-            to,
             path,
+            state_dir,
+            max_reconnect_attempts,
+            session,
         }) => {
-            resume::handle_resume(transfer_id, to, path).await?;
+            resume::handle_resume(
+                transfer_id,
+                path,
+                state_dir,
+                max_reconnect_attempts,
+                session,
+                identity_dir,
+            )
+            .await?;
         }
         Some(cli::Commands::History {
             limit,

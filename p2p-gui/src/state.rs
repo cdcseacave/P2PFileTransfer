@@ -68,14 +68,22 @@ impl Tab {
 pub struct ConnectionState {
     /// Connection mode
     pub mode: ConnectionMode,
-    /// Peer address input
+    /// Peer address input (Connect mode)
     pub peer_address: String,
+    /// Hex-encoded SHA-256 cert fingerprint of the peer (Connect mode).
+    /// 64 hex chars; pulled from beacons in Discovery mode and from the
+    /// rendezvous in Rendezvous mode.
+    pub peer_fingerprint: String,
     /// Port input
     pub port: String,
     /// Device ID
     pub device_id: Option<Uuid>,
-    /// Use peer discovery
+    /// Use peer discovery (Connect mode only)
     pub use_discovery: bool,
+    /// Rendezvous server (host[:port]) for cross-NAT pairing
+    pub rendezvous_address: String,
+    /// Shared pairing code for the rendezvous
+    pub code: String,
     /// Connection status message
     pub status_message: String,
     /// Is currently connecting/listening
@@ -88,11 +96,18 @@ pub enum ConnectionMode {
     #[default]
     Listen,
     Connect,
+    /// Pair with another peer through a rendezvous server using a short
+    /// shared code (works across NATs).
+    Rendezvous,
 }
 
 impl ConnectionMode {
     pub fn all() -> Vec<ConnectionMode> {
-        vec![ConnectionMode::Listen, ConnectionMode::Connect]
+        vec![
+            ConnectionMode::Listen,
+            ConnectionMode::Connect,
+            ConnectionMode::Rendezvous,
+        ]
     }
 }
 
@@ -100,7 +115,8 @@ impl std::fmt::Display for ConnectionMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ConnectionMode::Listen => write!(f, "Listen for connections"),
-            ConnectionMode::Connect => write!(f, "Connect to peer"),
+            ConnectionMode::Connect => write!(f, "Connect to peer (direct)"),
+            ConnectionMode::Rendezvous => write!(f, "Pair with code (cross-NAT)"),
         }
     }
 }
@@ -112,8 +128,6 @@ pub struct SendState {
     pub selected_path: Option<PathBuf>,
     /// Path input field
     pub path_input: String,
-    /// Status message
-    pub status_message: String,
 }
 
 /// Receive tab state
@@ -125,8 +139,6 @@ pub struct ReceiveState {
     pub output_input: String,
     /// Auto-accept transfers
     pub auto_accept: bool,
-    /// Status message
-    pub status_message: String,
 }
 
 /// Application settings
@@ -139,8 +151,6 @@ pub struct AppSettings {
     pub adaptive_compression: bool,
     /// Chunk size in KB
     pub chunk_size_kb: u32,
-    /// Window size
-    pub window_size: usize,
     /// Bandwidth limit (0 = unlimited)
     pub bandwidth_limit: u64,
     /// Max retries
@@ -155,8 +165,7 @@ impl Default for AppSettings {
             compression_enabled: true,
             compression_level: 3,
             adaptive_compression: true,
-            chunk_size_kb: 64,
-            window_size: 16,
+            chunk_size_kb: p2p_core::DEFAULT_CHUNK_SIZE / 1024,
             bandwidth_limit: 0,
             max_retries: 5,
             bandwidth_input: String::from("unlimited"),
@@ -171,7 +180,6 @@ impl AppSettings {
             compression_level: self.compression_level,
             adaptive_compression: self.adaptive_compression,
             chunk_size: self.chunk_size_kb * 1024,
-            window_size: self.window_size,
             bandwidth_limit: self.bandwidth_limit,
         }
     }
@@ -179,8 +187,7 @@ impl AppSettings {
 
 /// Transfer progress information
 pub struct TransferProgress {
-    /// File/folder name
-    #[allow(dead_code)] // Will be used for display in future enhancements
+    /// File/folder name (used when logging completed transfers to history)
     pub name: String,
     /// Total bytes
     pub total_bytes: u64,
@@ -188,8 +195,6 @@ pub struct TransferProgress {
     pub transferred_bytes: u64,
     /// Transfer speed (bytes per second)
     pub speed_bps: f64,
-    /// Estimated time remaining (seconds)
-    pub eta_seconds: u64,
     /// Is sending (true) or receiving (false)
     pub is_sending: bool,
 }
