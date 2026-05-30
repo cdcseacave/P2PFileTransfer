@@ -244,38 +244,7 @@ impl<'a> FolderTransferSession<'a> {
                 .to_string_lossy()
                 .to_string();
 
-            let files = if path.is_file() {
-                let metadata = fs::metadata(path).await?;
-                let size = metadata.len();
-                let modified = metadata
-                    .modified()
-                    .unwrap_or(SystemTime::UNIX_EPOCH)
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-                let file_name = path.file_name().unwrap().to_string_lossy().to_string();
-                vec![(
-                    PathBuf::from(file_name.clone()),
-                    FileMetadata {
-                        path: file_name,
-                        size,
-                        modified,
-                        checksum: [0u8; 32],
-                    },
-                )]
-            } else if path.is_dir() {
-                let files = self.scan_folder(path).await?;
-                if files.is_empty() {
-                    return Err(Error::Protocol("Folder is empty".to_string()));
-                }
-                files
-            } else {
-                return Err(Error::Protocol(
-                    "Path is neither a file nor a directory".to_string(),
-                ));
-            };
-
-            let file_list: Vec<FileMetadata> = files.iter().map(|(_, m)| m.clone()).collect();
+            let file_list = enumerate_files(path).await?;
             *state = FolderTransferState::new(self.transfer_id, base_name, file_list, &self.config);
             None
         };
@@ -654,47 +623,88 @@ impl<'a> FolderTransferSession<'a> {
         }
         Ok(())
     }
+}
 
-    async fn scan_folder(&self, folder_path: &Path) -> Result<Vec<(PathBuf, FileMetadata)>> {
-        let mut files = Vec::new();
-        let base_path = folder_path.parent().unwrap_or(folder_path);
-        let mut stack: std::collections::VecDeque<PathBuf> = std::collections::VecDeque::new();
-        stack.push_back(folder_path.to_path_buf());
-        while let Some(current) = stack.pop_front() {
-            let mut entries = fs::read_dir(&current).await?;
-            while let Some(entry) = entries.next_entry().await? {
-                let path = entry.path();
-                let metadata = entry.metadata().await?;
-                if metadata.is_file() {
-                    let relative_path = path
-                        .strip_prefix(base_path)
-                        .map_err(|e| Error::Protocol(format!("Invalid path: {}", e)))?
-                        .to_path_buf();
-                    let relative_path = sanitize_relative_path(&relative_path)?;
-                    let size = metadata.len();
-                    let modified = metadata
-                        .modified()
-                        .unwrap_or(SystemTime::UNIX_EPOCH)
-                        .duration_since(SystemTime::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs();
-                    files.push((
-                        relative_path.clone(),
-                        FileMetadata {
-                            path: relative_path.to_string_lossy().to_string(),
-                            size,
-                            modified,
-                            checksum: [0u8; 32],
-                        },
-                    ));
-                    trace!("Found file: {} ({} bytes)", path.display(), size);
-                } else if metadata.is_dir() {
-                    stack.push_back(path);
-                }
+/// Enumerate the files a `send` of `path` would transfer, in the same shape
+/// (relative path + size + mtime) that [`FolderTransferState`] records.
+///
+/// Shared by the live send and by the CLI's resume-detection
+/// (`find_resumable_state`) so the two always produce byte-identical file
+/// lists to compare against. A single file yields a one-element list keyed
+/// by its bare name; a directory is walked recursively with paths relative
+/// to its parent (so the top-level folder name is preserved on the wire).
+pub async fn enumerate_files(path: &Path) -> Result<Vec<FileMetadata>> {
+    if path.is_file() {
+        let metadata = fs::metadata(path).await?;
+        let modified = metadata
+            .modified()
+            .unwrap_or(SystemTime::UNIX_EPOCH)
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let file_name = path
+            .file_name()
+            .ok_or_else(|| Error::Protocol("Invalid path".to_string()))?
+            .to_string_lossy()
+            .to_string();
+        Ok(vec![FileMetadata {
+            path: file_name,
+            size: metadata.len(),
+            modified,
+            checksum: [0u8; 32],
+        }])
+    } else if path.is_dir() {
+        let files = scan_folder(path).await?;
+        if files.is_empty() {
+            return Err(Error::Protocol("Folder is empty".to_string()));
+        }
+        Ok(files.into_iter().map(|(_, m)| m).collect())
+    } else {
+        Err(Error::Protocol(
+            "Path is neither a file nor a directory".to_string(),
+        ))
+    }
+}
+
+async fn scan_folder(folder_path: &Path) -> Result<Vec<(PathBuf, FileMetadata)>> {
+    let mut files = Vec::new();
+    let base_path = folder_path.parent().unwrap_or(folder_path);
+    let mut stack: std::collections::VecDeque<PathBuf> = std::collections::VecDeque::new();
+    stack.push_back(folder_path.to_path_buf());
+    while let Some(current) = stack.pop_front() {
+        let mut entries = fs::read_dir(&current).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            let metadata = entry.metadata().await?;
+            if metadata.is_file() {
+                let relative_path = path
+                    .strip_prefix(base_path)
+                    .map_err(|e| Error::Protocol(format!("Invalid path: {}", e)))?
+                    .to_path_buf();
+                let relative_path = sanitize_relative_path(&relative_path)?;
+                let size = metadata.len();
+                let modified = metadata
+                    .modified()
+                    .unwrap_or(SystemTime::UNIX_EPOCH)
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                files.push((
+                    relative_path.clone(),
+                    FileMetadata {
+                        path: relative_path.to_string_lossy().to_string(),
+                        size,
+                        modified,
+                        checksum: [0u8; 32],
+                    },
+                ));
+                trace!("Found file: {} ({} bytes)", path.display(), size);
+            } else if metadata.is_dir() {
+                stack.push_back(path);
             }
         }
-        Ok(files)
     }
+    Ok(files)
 }
 
 /// On-disk state for chunk-level resume. Embeds the negotiated
@@ -715,6 +725,13 @@ pub struct FolderTransferState {
     /// Negotiated config snapshot — must match what the `.partial` on
     /// disk was laid out with. Resume reads `config.chunk_size` directly.
     pub config: ConfigMessage,
+    /// SHA-256 fingerprint of the peer this transfer was negotiated with.
+    /// Stamped by `P2PSession::send_path` once the session is up. Lets a
+    /// fresh `send` find the right prior state to resume by matching on
+    /// `(peer, file list)` rather than a random UUID. `[0u8; 32]` until
+    /// the first save; never collides with a real fingerprint.
+    #[serde(default)]
+    pub peer_fingerprint: [u8; 32],
 }
 
 impl FolderTransferState {
@@ -735,6 +752,7 @@ impl FolderTransferState {
             transferred_bytes: 0,
             file_chunks: HashMap::new(),
             config: config.clone(),
+            peer_fingerprint: [0u8; 32],
         }
     }
 

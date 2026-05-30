@@ -20,6 +20,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 console = "0.15"
 dialoguer = "0.11"
 chrono = "0.4"
+directories = "5"
 
 [dev-dependencies]
 tempfile = "3.12"

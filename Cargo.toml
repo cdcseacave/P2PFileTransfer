@@ -32,12 +32,16 @@ anyhow = "1.0"
 # punch primitives directly (no STUN, no NAT — pure localhost smoke).
 p2p-rendezvous = { path = "./p2p-rendezvous" }
 # Used by tests/rendezvous_disconnect_resume_test.rs to exercise the
-# CLI-level send/receive/resume handlers end-to-end through a localhost
+# CLI-level send/receive handlers end-to-end through a localhost
 # rendezvous.
 p2p-cli = { path = "./p2p-cli" }
 tokio = { version = "1.40", features = ["full"] }
 tempfile = "3.12"
 sha2 = "0.10"
+# Capture the "Resuming transfer" log line emitted by handle_send so the
+# disconnect-resume test can assert phase 2 resumed rather than restarted.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt"] }
 
 [features]
 # Default: CLI only (small binary, ~5-10 MB)

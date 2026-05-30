@@ -23,9 +23,10 @@ NATs. Ships with a CLI and an optional Iced GUI.
 * **Relay fallback** — symmetric NATs that can't be punched directly
   fall through to a UDP forwarder; QUIC TLS still terminates
   end-to-end (the relay sees ciphertext only).
-* **Resume** — chunk-level bitmap persisted per transfer; reconnects
-  pick up where they left off. Chunk indices are `u64` end-to-end —
-  very large files transfer correctly.
+* **Resume** — interrupted transfers are persisted per (peer, source);
+  re-running the same `send` automatically continues where it left off
+  (`--no-resume` forces a fresh start). Chunk indices are `u64`
+  end-to-end — very large files transfer correctly.
 * **Integrity** — per-file SHA-256 exchanged both ways; receiver
   mismatch is a hard failure (no silent acceptance).
 * **Path safety** — every incoming relative path is sanitized; the
@@ -71,6 +72,11 @@ p2p-transfer send ./bigfile.bin \
 
 `--peer-fingerprint` is required and is the 64-hex-char SHA-256 of the
 receiver's cert (printed when the receiver starts up).
+
+If a previous `send` of the same source to the same peer was interrupted,
+`send` automatically picks up where it left off; pass `--no-resume` to
+force a fresh transfer. Resume state lives in a per-user directory by
+default (override with `--state-dir`).
 
 ### Send (LAN auto-discovery)
 
@@ -202,33 +208,6 @@ The installer compares the freshly built binary's SHA256 against the
 installed copy and only restarts the service when it actually changed, so
 no-op re-runs don't interrupt active pairings. A `clean-build` + later
 `install` works fine — cargo just rebuilds `target/` from scratch.
-
-### Resume
-
-`resume` accepts the same pairing flags as `send`/`receive` — either
-direct addressing or rendezvous-mediated. Pick whichever matches how the
-original `send` reached the peer.
-
-```
-# Direct (same LAN, or a stable port-forwarded receiver)
-p2p-transfer resume <transfer_id> \
-    --path ./bigfile.bin \
-    --peer 192.168.1.42:14567 \
-    --peer-fingerprint <hex>
-
-# Cross-NAT (the receiver is still listening through the same rendezvous + code)
-p2p-transfer resume <transfer_id> \
-    --path ./bigfile.bin \
-    --rendezvous rendezvous.example.com:14570 \
-    --code ABC123
-```
-
-Reads `transfer_<transfer_id>.json` (written when a transfer is
-interrupted) and continues from the chunk bitmap. The state file lives
-in the working directory where the transfer started — pass
-`--state-dir` if you started the original `send` from somewhere else.
-The original `--path` and pairing flags aren't stored, so you have to
-supply them again on resume.
 
 ### History
 

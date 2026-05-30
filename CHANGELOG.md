@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — 2026-05-30 — Resume folded into `send`
+- Resume is no longer a separate subcommand — the `resume` command is
+  **removed**. Re-running the same `send` auto-detects and continues a
+  prior incomplete transfer to the same peer.
+- Detection is keyed by `(peer fingerprint, file list)`: the state file
+  now records the negotiated peer fingerprint, and `send` enumerates the
+  source and matches it strictly on every file's `(path, size, mtime)`.
+  Any drift starts a fresh transfer; `--no-resume` forces one.
+- Resume state moved from the current working directory to a per-user
+  data dir by default (`%APPDATA%\p2p-transfer\state`,
+  `$XDG_DATA_HOME/p2p-transfer/state`, or
+  `~/Library/Application Support/p2p-transfer/state`), so a re-run from
+  any directory finds it. `--state-dir` still overrides.
+- `send_path` now persists a checkpoint each time a file completes, so an
+  abrupt kill (not just a recoverable network error) leaves resumable
+  state.
+
 ### Fixed — 2026-05-23 — Security & robustness audit (16 findings)
 
 Landed all 16 findings from a code review on the `quic` branch (4

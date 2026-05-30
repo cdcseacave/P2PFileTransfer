@@ -154,12 +154,20 @@ pub enum Commands {
         /// File or folder to send
         path: PathBuf,
 
-        /// Directory to write the resume state file into. Defaults to the
-        /// current working directory. Pass an absolute path here so
-        /// `p2p-transfer resume <id> --state-dir <same>` works regardless
-        /// of where the user runs the resume command from.
+        /// Directory holding resume state files. Defaults to a per-user
+        /// location (`%APPDATA%\p2p-transfer\state` on Windows,
+        /// `$XDG_DATA_HOME/p2p-transfer/state` on Linux,
+        /// `~/Library/Application Support/p2p-transfer/state` on macOS) so
+        /// a re-run from any working directory finds a prior incomplete
+        /// transfer. Override only if you want the state kept elsewhere.
         #[arg(long)]
         state_dir: Option<PathBuf>,
+
+        /// Force a fresh transfer even if a matching incomplete transfer
+        /// to the same peer exists. Use when the source content changed in
+        /// a way the size+mtime resume check can't detect.
+        #[arg(long)]
+        no_resume: bool,
 
         #[command(flatten)]
         session: SessionParams,
@@ -211,34 +219,6 @@ pub enum Commands {
         /// them — reports `direct`, `relay`, or `failed`.
         #[arg(long)]
         rendezvous: Option<String>,
-    },
-
-    /// Resume a previous transfer
-    ///
-    /// Reconnects to the original receiver and continues from the last
-    /// persisted chunk boundary. Use the same pairing flags you used for
-    /// the original `send`: either `--peer` + `--peer-fingerprint` (direct
-    /// mode) or `--rendezvous` + `--code` (cross-NAT).
-    Resume {
-        /// Transfer ID to resume (or state file path)
-        transfer_id: String,
-
-        /// Original file or folder path to resume from
-        #[arg(long)]
-        path: PathBuf,
-
-        /// Directory the resume state file lives in. Must match whatever
-        /// `--state-dir` the original `send` used; defaults to the current
-        /// working directory.
-        #[arg(long)]
-        state_dir: Option<PathBuf>,
-
-        /// Max reconnect attempts after a connection drop (0 = retry forever)
-        #[arg(long, default_value = "5")]
-        max_reconnect_attempts: u32,
-
-        #[command(flatten)]
-        session: SessionParams,
     },
 
     /// View transfer history

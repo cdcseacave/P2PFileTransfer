@@ -26,8 +26,7 @@ cargo build --release --features gui --no-default-features
 ./target/release/p2p-transfer receive --output ./downloads --port 14567 --auto-accept
 ./target/release/p2p-transfer receive --output ./downloads --rendezvous host:14570 --code ABC123
 ./target/release/p2p-transfer discover
-./target/release/p2p-transfer resume <transfer-id> --path <orig-path> --peer <ip:port> --peer-fingerprint <hex>
-./target/release/p2p-transfer resume <transfer-id> --path <orig-path> --rendezvous host:14570 --code ABC123
+# Resume is automatic: re-run the same `send` to continue an interrupted transfer (or --no-resume to start over)
 ./target/release/p2p-transfer nat-test
 ./target/release/p2p-transfer nat-test --rendezvous host:14570        # self-loop punch test
 ./target/release/p2p-transfer history
@@ -184,7 +183,7 @@ python3 test_transfer.py --size 50 --compressible  # ratio > 100×
 - **Don't nest Tokio runtimes.** Anything that calls `Iced::run` must be reached *outside* `block_on`; that's why `run_cli_sync` returns early for the GUI cases.
 - **The QUIC bidi control stream only materialises on the responder once the initiator writes to it.** Real handshake code does this immediately; tests that don't exchange messages must either send a marker first or use the same `oneshot` "hold the connection" pattern the existing tests use.
 - **Adaptive compression accounting**: track uncompressed size from `chunk_data.len()` *before* compression, not from the compressed payload, otherwise stats and SHA-256 boundaries break.
-- **Resume state files** are written as `transfer_<uuid>.json` in the working directory at the time of the transfer. Resume requires the original `--path`, `--peer`, and `--peer-fingerprint` because the file doesn't store any of them.
+- **Resume is automatic — there is no `resume` subcommand.** Re-running the same `send` finds a prior incomplete `transfer_<uuid>.json` by `(peer fingerprint, file list)` and continues it; `--no-resume` forces a fresh transfer. The state file records the negotiated `peer_fingerprint`, and lookup matches the source's `(path, size, mtime)` strictly. State lives in a per-user data dir by default (`p2p-cli`'s `default_state_dir`); `--state-dir` overrides.
 - **Receiver event loop**: the receiver stays alive after a transfer finishes and accepts further transfers on the same connection until the peer disconnects — don't add logic that exits after the first transfer.
 - **Chunk indices are `u64` end-to-end**. `ChunkReader::total_chunks`, `read_chunk`, `fold_chunk`, `ChunkWriter::write_chunk` and the wire format all use `u64`. Do not narrow back to `u32` anywhere on the chunk path — that's what previously truncated large files at `2^32` chunks.
 - **Sanitize before joining paths.** Anything written under the output directory goes through `transfer_folder::sanitize_relative_path` first — adding a new write site means routing it through the same sanitizer.

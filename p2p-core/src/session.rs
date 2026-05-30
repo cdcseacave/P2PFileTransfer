@@ -262,6 +262,13 @@ impl P2PSession {
             )));
         }
 
+        // Stamp the negotiated peer into every persisted checkpoint so a
+        // future `send` of the same source can locate this state by
+        // (peer, file list) instead of a random UUID. Available the moment
+        // the session is up; `[u8; 32]` and Copy, so capturing it here
+        // doesn't hold a borrow across the `&mut self.connection` below.
+        let peer_fp = self.peer_fingerprint();
+
         let mut attempt = 0;
 
         let fresh_state = || {
@@ -315,10 +322,31 @@ impl P2PSession {
                     transfer_id,
                 );
 
+                // Persist a fresh checkpoint each time a file completes, so
+                // an abrupt termination (Ctrl+C, kill, crash) still leaves a
+                // resumable state — not just the recoverable-error path
+                // below. The snapshot is stamped with the peer fingerprint
+                // so `find_resumable_state` can match it on the next run.
+                if let Some(state_file) = state_path {
+                    let path_buf = state_file.to_path_buf();
+                    folder_session.set_state_callback(Arc::new(move |st: &FolderTransferState| {
+                        let mut snapshot = st.clone();
+                        snapshot.peer_fingerprint = peer_fp;
+                        if let Ok(json) = serde_json::to_string_pretty(&snapshot) {
+                            let _ = std::fs::write(&path_buf, json);
+                        }
+                    }));
+                }
+
                 folder_session
                     .send(path, &mut state, progress.as_deref_mut())
                     .await
             };
+
+            // Make sure the error-path saves below also carry the peer
+            // identity (the in-memory `state` may have been (re)built inside
+            // `send` with the zero-fingerprint default).
+            state.peer_fingerprint = peer_fp;
 
             match result {
                 Ok(_) => {

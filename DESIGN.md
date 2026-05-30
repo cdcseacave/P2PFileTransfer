@@ -142,11 +142,23 @@ discovery toggle use this to pick the first responding peer.
 
 ## Resume
 
-Chunk-level resume uses `state::TransferState` (a `BitVec` of completed
-chunk indices per file) persisted to JSON. `P2PSession::send_path` loops
-on a recoverable error (network/timeout/QUIC), re-establishes the
-connection via `reconnect()`, and re-runs the folder send — which skips
-any chunk index already in the bitmap.
+Resume state is a `FolderTransferState` (the per-file completed-chunk
+bitmap, the completed-files index, and a snapshot of the negotiated
+`ConfigMessage`) persisted to `transfer_<uuid>.json`. The file also
+records the **peer fingerprint** it was negotiated with. `send_path`
+persists a fresh checkpoint each time a file completes (so an abrupt
+kill still leaves resumable state) and on every recoverable-error retry;
+on retry it re-establishes the connection via `reconnect()` and re-runs
+the folder send, skipping any chunk index already in the bitmap.
+
+There is no `resume` subcommand. Re-running the identical `send` finds
+the prior state by `(peer_fingerprint, file list)` rather than by UUID:
+`p2p-cli`'s `find_resumable_state` enumerates the source as a fresh send
+would, then scans the per-user state dir for a `transfer_*.json` whose
+stamped peer matches and whose recorded `(path, size, mtime)` list
+matches the source exactly. A strict match resumes; any drift (or
+`--no-resume`) starts fresh. State files live in a per-user data dir by
+default so a re-run from any working directory still finds them.
 
 ## Bandwidth
 

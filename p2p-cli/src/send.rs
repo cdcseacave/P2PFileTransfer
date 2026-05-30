@@ -17,11 +17,12 @@ use p2p_core::{
 
 use crate::cli::{SessionParams, TransferParams};
 use crate::rendezvous::establish_session;
-use crate::util::{derive_base_name, resolve_state_file};
+use crate::util::{default_state_dir, derive_base_name, find_resumable_state, resolve_state_file};
 
 pub async fn handle_send(
     path: PathBuf,
     state_dir: Option<PathBuf>,
+    no_resume: bool,
     session_params: SessionParams,
     transfer_params: TransferParams,
     identity_dir: Option<PathBuf>,
@@ -72,18 +73,83 @@ pub async fn handle_send(
         hex::encode(session.peer_fingerprint())
     );
 
+    let peer_fp = session.peer_fingerprint();
     let peer_addr = session.peer_addr().to_string();
 
+    // Resume bridge: with no `--state-dir`, prior state lives in a stable
+    // per-user location so a re-run from any working directory finds it.
+    let state_dir = state_dir.unwrap_or_else(default_state_dir);
+
+    // Auto-detect a prior incomplete transfer of this exact source to this
+    // exact peer and pick up where it left off. `--no-resume` forces a
+    // fresh transfer (e.g. when the source content changed in a way the
+    // size+mtime check can't see).
+    let (transfer_id, state_file, resume_from_bytes) =
+        match resolve_resume(&state_dir, &path, peer_fp, no_resume).await? {
+            Some((id, file, bytes)) => (id, file, bytes),
+            None => {
+                let id = Uuid::new_v4();
+                (
+                    id,
+                    resolve_state_file(Some(&state_dir), &id.to_string())?,
+                    0,
+                )
+            }
+        };
+
     tokio::select! {
-        result = send(&mut session, &path, state_dir.as_deref(), transfer_params.max_reconnect_attempts, &peer_addr) => result,
+        result = send(
+            &mut session,
+            &path,
+            &state_file,
+            transfer_id,
+            resume_from_bytes,
+            transfer_params.max_reconnect_attempts,
+            &peer_addr,
+        ) => result,
         _ = signal::ctrl_c() => Err(anyhow::anyhow!("Transfer interrupted by user (Ctrl+C)")),
     }
 }
 
+/// Returns `Some((transfer_id, state_file, already_transferred_bytes))`
+/// when a prior incomplete transfer should be resumed, or `None` for a
+/// fresh transfer (also `None` when `--no-resume` is set).
+async fn resolve_resume(
+    state_dir: &Path,
+    path: &Path,
+    peer_fp: [u8; 32],
+    no_resume: bool,
+) -> Result<Option<(Uuid, PathBuf, u64)>> {
+    if no_resume {
+        return Ok(None);
+    }
+    let Some((existing_path, existing_state)) =
+        find_resumable_state(state_dir, path, peer_fp).await?
+    else {
+        return Ok(None);
+    };
+    let pct = 100 * existing_state.transferred_bytes / existing_state.total_bytes.max(1);
+    info!(
+        "Resuming transfer {} ({}/{} bytes, {}% done)",
+        existing_state.transfer_id,
+        existing_state.transferred_bytes,
+        existing_state.total_bytes,
+        pct,
+    );
+    Ok(Some((
+        existing_state.transfer_id,
+        existing_path,
+        existing_state.transferred_bytes,
+    )))
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn send(
     session: &mut P2PSession,
     path: &Path,
-    state_dir: Option<&Path>,
+    state_file: &Path,
+    transfer_id: Uuid,
+    resume_from_bytes: u64,
     max_reconnect_attempts: u32,
     peer_addr: &str,
 ) -> Result<()> {
@@ -94,9 +160,12 @@ async fn send(
         info!("Sending folder: {}", base_name);
     }
 
-    let transfer_id = Uuid::new_v4();
-    let state_file = resolve_state_file(state_dir, &transfer_id.to_string())?;
     let mut progress = p2p_core::progress::ProgressState::new(0);
+    // Pre-account bytes a prior session already moved so the progress bar
+    // (and the recorded total) start at the resumed percentage rather than 0.
+    if resume_from_bytes > 0 {
+        progress.add_bytes(resume_from_bytes);
+    }
     let reconnect_config = p2p_core::reconnect::ReconnectConfig {
         max_attempts: max_reconnect_attempts,
         ..Default::default()
@@ -108,7 +177,7 @@ async fn send(
         .send_path(
             path,
             &reconnect_config,
-            Some(&state_file),
+            Some(state_file),
             Some(&mut progress),
         )
         .await;
@@ -116,7 +185,7 @@ async fn send(
     match result {
         Ok(summary) => {
             if state_file.exists() {
-                let _ = tokio::fs::remove_file(&state_file).await;
+                let _ = tokio::fs::remove_file(state_file).await;
             }
             // Prefer the per-file list from the summary so folder
             // transfers record every file rather than just the folder
@@ -136,13 +205,13 @@ async fn send(
         }
         Err(e) => {
             if state_file.exists() {
-                warn!("Transfer interrupted");
-                warn!("State saved to: {}", state_file.display());
                 warn!(
-                    "Resume with: p2p-transfer resume {} --path <orig-path> \
-                     (then your original pairing flags: --peer + --peer-fingerprint, \
-                     or --rendezvous + --code)",
-                    transfer_id
+                    "Transfer interrupted; state saved to {}",
+                    state_file.display()
+                );
+                warn!(
+                    "Re-run the same `send` command to resume from here \
+                     (or pass --no-resume to start over)."
                 );
             }
             record.fail(e.to_string());
