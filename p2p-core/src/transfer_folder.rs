@@ -708,10 +708,12 @@ async fn scan_folder(folder_path: &Path) -> Result<Vec<(PathBuf, FileMetadata)>>
 }
 
 /// On-disk state for chunk-level resume. Embeds the negotiated
-/// [`ConfigMessage`] verbatim so resume rehydrates the same chunk_size and
-/// compression settings the original session used — without this the
-/// `.partial` on disk (laid out under the original chunk_size) and the
-/// resumed session's offsets disagree, silently corrupting the file.
+/// [`ConfigMessage`] verbatim so a resuming `send` can *validate* that its
+/// current chunk_size still matches the one the `.partial` files were laid
+/// out under. If it differs (the user re-ran with a different
+/// `--chunk-size`), the offsets would disagree and silently corrupt the
+/// file, so the resume scanner rejects the mismatch and starts fresh
+/// instead (see `find_resumable_state` in p2p-cli).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FolderTransferState {
     pub transfer_id: Uuid,
@@ -722,8 +724,10 @@ pub struct FolderTransferState {
     pub total_bytes: u64,
     pub transferred_bytes: u64,
     pub file_chunks: HashMap<usize, Vec<u64>>,
-    /// Negotiated config snapshot — must match what the `.partial` on
-    /// disk was laid out with. Resume reads `config.chunk_size` directly.
+    /// Negotiated config snapshot — must match what the `.partial` on disk
+    /// was laid out with. A resuming `send` compares `config.chunk_size`
+    /// against its current negotiated size and refuses to resume on a
+    /// mismatch (starting fresh) rather than corrupting the file.
     pub config: ConfigMessage,
     /// SHA-256 fingerprint of the peer this transfer was negotiated with.
     /// Stamped by `P2PSession::send_path` once the session is up. Lets a

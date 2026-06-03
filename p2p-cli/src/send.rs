@@ -84,18 +84,25 @@ pub async fn handle_send(
     // exact peer and pick up where it left off. `--no-resume` forces a
     // fresh transfer (e.g. when the source content changed in a way the
     // size+mtime check can't see).
-    let (transfer_id, state_file, resume_from_bytes) =
-        match resolve_resume(&state_dir, &path, peer_fp, no_resume).await? {
-            Some((id, file, bytes)) => (id, file, bytes),
-            None => {
-                let id = Uuid::new_v4();
-                (
-                    id,
-                    resolve_state_file(Some(&state_dir), &id.to_string())?,
-                    0,
-                )
-            }
-        };
+    let (transfer_id, state_file, resume_from_bytes) = match resolve_resume(
+        &state_dir,
+        &path,
+        peer_fp,
+        session.config().chunk_size,
+        no_resume,
+    )
+    .await?
+    {
+        Some((id, file, bytes)) => (id, file, bytes),
+        None => {
+            let id = Uuid::new_v4();
+            (
+                id,
+                resolve_state_file(Some(&state_dir), &id.to_string())?,
+                0,
+            )
+        }
+    };
 
     tokio::select! {
         result = send(
@@ -118,13 +125,14 @@ async fn resolve_resume(
     state_dir: &Path,
     path: &Path,
     peer_fp: [u8; 32],
+    chunk_size: u32,
     no_resume: bool,
 ) -> Result<Option<(Uuid, PathBuf, u64)>> {
     if no_resume {
         return Ok(None);
     }
     let Some((existing_path, existing_state)) =
-        find_resumable_state(state_dir, path, peer_fp).await?
+        find_resumable_state(state_dir, path, peer_fp, chunk_size).await?
     else {
         return Ok(None);
     };

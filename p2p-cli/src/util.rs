@@ -73,15 +73,22 @@ pub fn resolve_state_file(state_dir: Option<&Path>, transfer_id: &str) -> Result
 /// list matches the source as it exists on disk right now.
 ///
 /// Matching is **strict**: every file must agree on `(relative path, size,
-/// modified time)`. Any drift — a resized file, a touched mtime, a file
-/// added or removed — is treated as a different transfer and yields `None`
-/// (i.e. a fresh transfer). When more than one state file matches, the
-/// newest (by file mtime) is chosen and a warning is logged; the stale
-/// ones are removed by their own success path on a later run.
+/// modified time)` and the saved `config.chunk_size` must equal
+/// `current_chunk_size`. Any drift — a resized file, a touched mtime, a
+/// file added or removed, or a changed `--chunk-size` — is treated as a
+/// different transfer and yields `None` (i.e. a fresh transfer). The chunk
+/// size matters because the `.partial` byte offsets on disk were laid out
+/// under the saved size; resuming under a different size would skip or
+/// overwrite the wrong ranges.
+///
+/// When more than one state file matches, the newest (by file mtime) is
+/// resumed and the older duplicates are deleted on the spot, so a later
+/// identical `send` can't accidentally pick up a stale checkpoint.
 pub async fn find_resumable_state(
     state_dir: &Path,
     source_root: &Path,
     peer_fingerprint: [u8; 32],
+    current_chunk_size: u32,
 ) -> Result<Option<(PathBuf, FolderTransferState)>> {
     // Enumerate the source exactly as a fresh send would. If it can't be
     // enumerated (empty folder, vanished path) there's nothing to resume;
@@ -97,8 +104,12 @@ pub async fn find_resumable_state(
         Err(_) => return Ok(None),
     };
 
-    let mut best: Option<(PathBuf, SystemTime, FolderTransferState)> = None;
-    let mut matches = 0usize;
+    // Every state file that matches peer + file list + chunk size, paired
+    // with its mtime so we can pick the newest and delete the rest.
+    let mut matches: Vec<(PathBuf, SystemTime, FolderTransferState)> = Vec::new();
+    // A candidate matched peer + file list but differed only on chunk size:
+    // worth a warning so the user understands why resume restarted.
+    let mut chunk_size_mismatch = false;
     while let Some(entry) = entries.next_entry().await? {
         let path = entry.path();
         if !is_transfer_state_file(&path) {
@@ -116,31 +127,60 @@ pub async fn find_resumable_state(
         if sorted_file_keys(&state.files) != current_key {
             continue;
         }
-        matches += 1;
+        if state.config.chunk_size != current_chunk_size {
+            chunk_size_mismatch = true;
+            continue;
+        }
         let mtime = entry
             .metadata()
             .await
             .ok()
             .and_then(|m| m.modified().ok())
             .unwrap_or(SystemTime::UNIX_EPOCH);
-        let is_newer = match &best {
-            Some((_, best_mtime, _)) => mtime > *best_mtime,
-            None => true,
-        };
-        if is_newer {
-            best = Some((path, mtime, state));
-        }
+        matches.push((path, mtime, state));
     }
 
-    if matches > 1 {
+    if chunk_size_mismatch && matches.is_empty() {
         warn!(
-            "{} resumable state files match this source and peer; resuming the newest. \
-             Stale ones are removed when their transfer next completes.",
-            matches
+            "A prior transfer of this source to this peer used a different chunk size; \
+             its on-disk layout is incompatible, so starting a fresh transfer."
         );
     }
 
-    Ok(best.map(|(path, _, state)| (path, state)))
+    // Pick the newest match; delete every other match so it can't resurface
+    // as the "newest" on a later run once this one completes and is removed.
+    let newest_idx = matches
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, (_, mtime, _))| *mtime)
+        .map(|(i, _)| i);
+    let Some(newest_idx) = newest_idx else {
+        return Ok(None);
+    };
+
+    if matches.len() > 1 {
+        warn!(
+            "{} resumable state files match this source and peer; resuming the newest \
+             and removing the {} stale duplicate(s).",
+            matches.len(),
+            matches.len() - 1,
+        );
+    }
+
+    let mut chosen = None;
+    for (i, (path, _, state)) in matches.into_iter().enumerate() {
+        if i == newest_idx {
+            chosen = Some((path, state));
+        } else {
+            // Best-effort: a stale duplicate we fail to delete is harmless
+            // until the chosen transfer completes, by which point it would
+            // be the newest — but a delete failure here is rare and the
+            // strict (peer, files, chunk_size) match still guards resume.
+            let _ = tokio::fs::remove_file(&path).await;
+        }
+    }
+
+    Ok(chosen)
 }
 
 fn is_transfer_state_file(path: &Path) -> bool {
@@ -229,15 +269,30 @@ mod tests {
         tmp
     }
 
-    /// Persist a state file (stamped with `peer_fp`) describing `files`.
+    /// Default chunk size every helper saves under unless told otherwise;
+    /// the matcher must be queried with the same value to find a match.
+    const CHUNK: u32 = p2p_core::DEFAULT_CHUNK_SIZE;
+
+    /// Persist a state file (stamped with `peer_fp`, chunked at `CHUNK`)
+    /// describing `files`.
     async fn save_state(state_dir: &Path, files: Vec<FileMetadata>, peer_fp: [u8; 32]) -> PathBuf {
+        save_state_chunked(state_dir, files, peer_fp, CHUNK).await
+    }
+
+    /// Like [`save_state`] but with an explicit `chunk_size`, for exercising
+    /// the chunk-size match guard.
+    async fn save_state_chunked(
+        state_dir: &Path,
+        files: Vec<FileMetadata>,
+        peer_fp: [u8; 32],
+        chunk_size: u32,
+    ) -> PathBuf {
         tokio::fs::create_dir_all(state_dir).await.unwrap();
-        let mut state = FolderTransferState::new(
-            Uuid::new_v4(),
-            "src".into(),
-            files,
-            &ConfigMessage::default(),
-        );
+        let config = ConfigMessage {
+            chunk_size,
+            ..ConfigMessage::default()
+        };
+        let mut state = FolderTransferState::new(Uuid::new_v4(), "src".into(), files, &config);
         state.peer_fingerprint = peer_fp;
         let path = state_dir.join(format!("transfer_{}.json", state.transfer_id));
         state.save_to_file(&path).await.unwrap();
@@ -253,7 +308,7 @@ mod tests {
         let files = enumerate_files(&src).await.unwrap();
         let saved = save_state(&state_dir, files, fp).await;
 
-        let (path, state) = find_resumable_state(&state_dir, &src, fp)
+        let (path, state) = find_resumable_state(&state_dir, &src, fp, CHUNK)
             .await
             .unwrap()
             .expect("matching peer + file list should resume");
@@ -269,7 +324,7 @@ mod tests {
         let files = enumerate_files(&src).await.unwrap();
         save_state(&state_dir, files, [1u8; 32]).await;
 
-        let found = find_resumable_state(&state_dir, &src, [2u8; 32])
+        let found = find_resumable_state(&state_dir, &src, [2u8; 32], CHUNK)
             .await
             .unwrap();
         assert!(found.is_none(), "a different peer must not match");
@@ -285,7 +340,9 @@ mod tests {
         files[0].size += 1; // pretend the file used to be a different size
         save_state(&state_dir, files, fp).await;
 
-        let found = find_resumable_state(&state_dir, &src, fp).await.unwrap();
+        let found = find_resumable_state(&state_dir, &src, fp, CHUNK)
+            .await
+            .unwrap();
         assert!(found.is_none(), "size drift must not match");
     }
 
@@ -299,7 +356,9 @@ mod tests {
         files[0].modified ^= 0xFFFF; // perturb the recorded mtime
         save_state(&state_dir, files, fp).await;
 
-        let found = find_resumable_state(&state_dir, &src, fp).await.unwrap();
+        let found = find_resumable_state(&state_dir, &src, fp, CHUNK)
+            .await
+            .unwrap();
         assert!(found.is_none(), "mtime drift must not match");
     }
 
@@ -313,7 +372,9 @@ mod tests {
         files.pop(); // state knows about fewer files than exist now
         save_state(&state_dir, files, fp).await;
 
-        let found = find_resumable_state(&state_dir, &src, fp).await.unwrap();
+        let found = find_resumable_state(&state_dir, &src, fp, CHUNK)
+            .await
+            .unwrap();
         assert!(found.is_none(), "file-set drift must not match");
     }
 
@@ -324,9 +385,58 @@ mod tests {
         let state_dir = tmp.path().join("state");
         tokio::fs::create_dir_all(&state_dir).await.unwrap();
 
-        let found = find_resumable_state(&state_dir, &src, [9u8; 32])
+        let found = find_resumable_state(&state_dir, &src, [9u8; 32], CHUNK)
             .await
             .unwrap();
         assert!(found.is_none(), "no state files → no match");
+    }
+
+    /// Finding 1: a state saved under a different chunk size must NOT
+    /// resume — its `.partial` byte offsets are laid out for that size, so
+    /// resuming under the current size would corrupt the file.
+    #[tokio::test]
+    async fn rejects_when_chunk_size_differs() {
+        let tmp = make_source(&[("a.txt", b"hello")]).await;
+        let src = tmp.path().join("src");
+        let state_dir = tmp.path().join("state");
+        let fp = [6u8; 32];
+        let files = enumerate_files(&src).await.unwrap();
+        save_state_chunked(&state_dir, files, fp, CHUNK).await;
+
+        let found = find_resumable_state(&state_dir, &src, fp, CHUNK * 2)
+            .await
+            .unwrap();
+        assert!(found.is_none(), "a different chunk size must not resume");
+    }
+
+    /// Finding 2: when several state files match, resume the newest and
+    /// delete the stale duplicates so a later `send` can't pick one up.
+    #[tokio::test]
+    async fn keeps_only_newest_match_and_deletes_stale() {
+        let tmp = make_source(&[("a.txt", b"hello")]).await;
+        let src = tmp.path().join("src");
+        let state_dir = tmp.path().join("state");
+        let fp = [8u8; 32];
+        let files = enumerate_files(&src).await.unwrap();
+
+        let older = save_state(&state_dir, files.clone(), fp).await;
+        let newer = save_state(&state_dir, files, fp).await;
+        // Force a strictly newer mtime on the second file so "newest" is
+        // unambiguous regardless of filesystem mtime granularity.
+        let later = SystemTime::now() + std::time::Duration::from_secs(10);
+        std::fs::File::options()
+            .write(true)
+            .open(&newer)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+
+        let (path, _) = find_resumable_state(&state_dir, &src, fp, CHUNK)
+            .await
+            .unwrap()
+            .expect("a match should resume");
+        assert_eq!(path, newer, "the newest state file should be chosen");
+        assert!(!older.exists(), "the stale duplicate should be deleted");
+        assert!(newer.exists(), "the chosen state file should remain");
     }
 }
