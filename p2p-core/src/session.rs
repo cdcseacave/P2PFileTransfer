@@ -10,8 +10,8 @@
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use tracing::{debug, info, trace, warn};
 use uuid::Uuid;
@@ -26,6 +26,12 @@ use crate::transfer_folder::{
     AcceptDecision, FolderTransferSession, FolderTransferState, TransferSummary,
 };
 use crate::traversal::{establish_via_rendezvous, RendezvousParams, DEFAULT_STUN_SERVERS};
+
+/// Minimum wall-clock gap between on-disk resume checkpoints during a
+/// transfer. Bounds checkpoint writes to ~one per interval regardless of
+/// file count (otherwise persisting after every completed file is
+/// O(files²) serialization plus a blocking write per file).
+const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(2);
 
 /// An established connection plus the parameters needed to resurrect it.
 pub struct P2PSession {
@@ -262,6 +268,13 @@ impl P2PSession {
             )));
         }
 
+        // Stamp the negotiated peer into every persisted checkpoint so a
+        // future `send` of the same source can locate this state by
+        // (peer, file list) instead of a random UUID. Available the moment
+        // the session is up; `[u8; 32]` and Copy, so capturing it here
+        // doesn't hold a borrow across the `&mut self.connection` below.
+        let peer_fp = self.peer_fingerprint();
+
         let mut attempt = 0;
 
         let fresh_state = || {
@@ -315,10 +328,55 @@ impl P2PSession {
                     transfer_id,
                 );
 
+                // Persist a checkpoint as files complete, so an abrupt
+                // termination (Ctrl+C, kill, crash) still leaves a resumable
+                // state — not just the recoverable-error path below. The
+                // snapshot is stamped with the peer fingerprint so
+                // `find_resumable_state` can match it on the next run.
+                //
+                // Throttled to at most once per `CHECKPOINT_INTERVAL`: a
+                // write after *every* file would serialize the whole
+                // (growing) state each time — O(files²) — and block a Tokio
+                // worker on disk I/O per file. The gate is checked before any
+                // clone/serialize, so skipped ticks are nearly free; the
+                // actual write runs off-worker via `spawn_blocking` and is
+                // atomic (tmp + rename) so a reader never sees a torn file.
+                if let Some(state_file) = state_path {
+                    let path_buf = state_file.to_path_buf();
+                    let last_checkpoint = Arc::new(Mutex::new(Instant::now()));
+                    folder_session.set_state_callback(Arc::new(move |st: &FolderTransferState| {
+                        {
+                            let mut last = last_checkpoint.lock().unwrap();
+                            if last.elapsed() < CHECKPOINT_INTERVAL {
+                                return;
+                            }
+                            *last = Instant::now();
+                        }
+                        let mut snapshot = st.clone();
+                        snapshot.peer_fingerprint = peer_fp;
+                        let Ok(json) = serde_json::to_vec(&snapshot) else {
+                            return;
+                        };
+                        let dest = path_buf.clone();
+                        tokio::task::spawn_blocking(move || {
+                            let mut tmp = dest.clone();
+                            tmp.set_extension("json.tmp");
+                            if std::fs::write(&tmp, &json).is_ok() {
+                                let _ = std::fs::rename(&tmp, &dest);
+                            }
+                        });
+                    }));
+                }
+
                 folder_session
                     .send(path, &mut state, progress.as_deref_mut())
                     .await
             };
+
+            // Make sure the error-path saves below also carry the peer
+            // identity (the in-memory `state` may have been (re)built inside
+            // `send` with the zero-fingerprint default).
+            state.peer_fingerprint = peer_fp;
 
             match result {
                 Ok(_) => {

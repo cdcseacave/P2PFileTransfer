@@ -19,13 +19,19 @@ If you add a new command, add it to the `Commands` enum in `cli.rs` and its matc
 src/
 ├── lib.rs        # run_cli_sync, run_cli_async, init_logging
 ├── cli.rs        # clap definitions: Cli, Commands, SessionParams, TransferParams
-├── send.rs       # handle_send
+├── send.rs       # handle_send (auto-resumes a prior interrupted send)
 ├── receive.rs    # handle_receive
 ├── discover.rs   # handle_discover
 ├── nat_test.rs   # handle_nat_test
-├── resume.rs     # handle_resume
+├── util.rs       # base-name + resume-state location (find_resumable_state)
 └── history.rs    # handle_history
 ```
+
+There is no `resume` command. A re-run of `send` finds a prior incomplete
+transfer via `util::find_resumable_state` — matching the source against a
+`transfer_*.json` by `(peer fingerprint, file list)` — and continues it.
+`--no-resume` forces a fresh transfer; `--state-dir` overrides the
+per-user default state location.
 
 Each command module exposes a single `handle_*` entry point taking the parsed args. Keep CLI translation (prompts, progress bars, formatting) in these files; push protocol/transfer logic into `p2p-core`.
 

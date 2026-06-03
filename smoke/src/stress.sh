@@ -4,7 +4,7 @@
 # Uses the new capabilities:
 #   --identity-dir <PATH>            distinct identities per process
 #   --max-reconnect-attempts N       finite retries (default 5)
-#   resume <ID> --path FILE          works for single files now
+#   send … (re-run)                  auto-resumes a prior interrupted transfer
 #   history --limit N                works at any -v level + records from CLI
 #
 # Run from repo root:   bash smoke/src/stress_v4.sh
@@ -165,9 +165,9 @@ sleep 1; killtree "$RECV"; wait "$RECV" 2>/dev/null
 killtree "$RV"; wait "$RV" 2>/dev/null
 
 ############################################################
-# T10 — single-file resume (now possible because resume accepts files)
-note "T10  single-file resume + bounded retries"
-mkdir -p t10/in t10/out
+# T10 — single-file auto-resume (re-running the same `send` continues it)
+note "T10  single-file auto-resume + bounded retries"
+mkdir -p t10/in t10/out t10/state
 head -c 8388608 /dev/urandom > t10/in/resume.bin   # 8 MB at 1 MB/s = 8 s
 SH_IN=$(sha256 t10/in/resume.bin)
 "$BIN" -v info --identity-dir "$ID_R" receive --port 26590 --auto-accept --output t10/out > t10r.log 2>&1 &
@@ -176,7 +176,8 @@ FP=$(grep -oE '[0-9a-f]{64}' t10r.log | head -1)
 
 # default max_reconnect_attempts=5 with 3+6+12+24+48 backoff = ~93s total max,
 # but we kill the receiver permanently so each reconnect attempt fails fast.
-"$BIN" -v info --identity-dir "$ID_S" send t10/in/resume.bin --peer 127.0.0.1:26590 --peer-fingerprint "$FP" --max-speed 1M > t10s.log 2>&1 &
+# --state-dir pins the checkpoint location so the re-run below finds it.
+"$BIN" -v info --identity-dir "$ID_S" send t10/in/resume.bin --peer 127.0.0.1:26590 --peer-fingerprint "$FP" --max-speed 1M --state-dir t10/state > t10s.log 2>&1 &
 SEND=$!
 sleep 3                           # ~3 MB in
 echo "T10  killing receiver (sender must persist state, then bounded retries)…"
@@ -186,24 +187,26 @@ wait "$SEND" 2>/dev/null
 SEND_RC=$?
 echo "T10  sender exited rc=$SEND_RC"
 
-STATE=$(ls transfer_*.json 2>/dev/null | head -1)
+STATE=$(ls t10/state/transfer_*.json 2>/dev/null | head -1)
 if [[ -n "$STATE" ]]; then
   ok "T10a  state file written ($STATE)"
-  TID=$(echo "$STATE" | sed -E 's/transfer_(.+)\.json/\1/')
 
   "$BIN" -v info --identity-dir "$ID_R" receive --port 26590 --auto-accept --output t10/out > t10r2.log 2>&1 &
   RECV2=$!; sleep 3
   FP2=$(grep -oE '[0-9a-f]{64}' t10r2.log | head -1)
 
-  # Resume with a FILE path — this is the bug we fixed.
-  "$BIN" -v info --identity-dir "$ID_S" resume "$TID" --to 127.0.0.1:26590 --peer-fingerprint "$FP2" --path t10/in/resume.bin > t10res.log 2>&1
+  # Re-run the IDENTICAL send (same source, same peer, same --state-dir).
+  # It must auto-detect the prior checkpoint and resume — no `resume`
+  # subcommand, no transfer id.
+  "$BIN" -v info --identity-dir "$ID_S" send t10/in/resume.bin --peer 127.0.0.1:26590 --peer-fingerprint "$FP2" --state-dir t10/state > t10res.log 2>&1
   RC=$?
   sleep 1; killtree "$RECV2"; wait "$RECV2" 2>/dev/null
 
-  if [[ $RC -eq 0 && -f t10/out/resume.bin && "$SH_IN" == "$(sha256 t10/out/resume.bin)" ]]; then
-    ok "T10b  single-file resume completed, sha256 match"
+  RESUMED=$(grep -c "Resuming transfer" t10res.log)
+  if [[ $RC -eq 0 && -f t10/out/resume.bin && "$SH_IN" == "$(sha256 t10/out/resume.bin)" && $RESUMED -ge 1 ]]; then
+    ok "T10b  single-file auto-resume completed, sha256 match"
   else
-    bad "T10b  rc=$RC  file_present=$([[ -f t10/out/resume.bin ]] && echo yes || echo no)"
+    bad "T10b  rc=$RC  file_present=$([[ -f t10/out/resume.bin ]] && echo yes || echo no)  resumed=$RESUMED"
     tail -10 t10res.log
   fi
 else

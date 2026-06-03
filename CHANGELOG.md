@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — 2026-05-30 — Resume folded into `send`
+- Resume is no longer a separate subcommand — the `resume` command is
+  **removed**. Re-running the same `send` auto-detects and continues a
+  prior incomplete transfer to the same peer.
+- Detection is keyed by `(peer fingerprint, file list)`: the state file
+  now records the negotiated peer fingerprint, and `send` enumerates the
+  source and matches it strictly on every file's `(path, size, mtime)`.
+  Any drift starts a fresh transfer; `--no-resume` forces one.
+- Resume state moved from the current working directory to a per-user
+  data dir by default (`%APPDATA%\p2p-transfer\state`,
+  `$XDG_DATA_HOME/p2p-transfer/state`, or
+  `~/Library/Application Support/p2p-transfer/state`), so a re-run from
+  any directory finds it. `--state-dir` still overrides.
+- `send_path` now persists a checkpoint as files complete (throttled to
+  at most once every 2s, written off the async runtime), so an abrupt
+  kill — not just a recoverable network error — leaves resumable state.
+
+### Fixed — 2026-06-03 — PR #4 review (auto-resume)
+- **Chunk-size mismatch no longer corrupts resume.** Resume detection now
+  also requires the saved `config.chunk_size` to match the current
+  invocation's; a re-run with a different `--chunk-size` (whose `.partial`
+  layout is incompatible) starts a fresh transfer with a warning instead
+  of skipping or overwriting the wrong byte ranges.
+- **Stale duplicate state files are cleaned up.** When more than one
+  checkpoint matches the same source and peer, `send` resumes the newest
+  and deletes the older duplicates immediately, so a later identical
+  `send` can't pick up a stale checkpoint after the chosen one completes.
+- **Checkpoint write is no longer O(files²) / blocking.** The per-file
+  checkpoint is throttled (≤ once per 2s), serialized compactly, and
+  written via `spawn_blocking` with an atomic temp+rename, instead of a
+  full pretty-JSON serialize and blocking `std::fs::write` on a Tokio
+  worker after every completed file.
+
 ### Fixed — 2026-05-23 — Security & robustness audit (16 findings)
 
 Landed all 16 findings from a code review on the `quic` branch (4

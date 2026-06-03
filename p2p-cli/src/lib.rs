@@ -5,9 +5,8 @@
 //! - `send`: Send operations for files and folders
 //! - `receive`: Receive operations
 //! - `discover`: Peer discovery functionality
-//! - `resume`: Resume interrupted transfers
 
-// `cli`, `send`, `receive`, and `resume` are `pub` so the workspace-level
+// `cli`, `send`, and `receive` are `pub` so the workspace-level
 // integration test in `tests/rendezvous_disconnect_resume_test.rs` can
 // drive the same handler functions the binary dispatches to. The rest
 // stay private — they're not stable surface for external consumers.
@@ -17,7 +16,6 @@ mod history;
 mod nat_test;
 pub mod receive;
 mod rendezvous;
-pub mod resume;
 pub mod send;
 mod util;
 
@@ -132,10 +130,11 @@ async fn run_cli_async(cli: Cli) -> Result<()> {
         Some(cli::Commands::Send {
             path,
             state_dir,
+            no_resume,
             session,
             transfer,
         }) => {
-            send::handle_send(path, state_dir, session, transfer, identity_dir).await?;
+            send::handle_send(path, state_dir, no_resume, session, transfer, identity_dir).await?;
         }
         Some(cli::Commands::Receive {
             output,
@@ -152,23 +151,6 @@ async fn run_cli_async(cli: Cli) -> Result<()> {
             rendezvous,
         }) => {
             nat_test::handle_nat_test(stun_server, rendezvous).await?;
-        }
-        Some(cli::Commands::Resume {
-            transfer_id,
-            path,
-            state_dir,
-            max_reconnect_attempts,
-            session,
-        }) => {
-            resume::handle_resume(
-                transfer_id,
-                path,
-                state_dir,
-                max_reconnect_attempts,
-                session,
-                identity_dir,
-            )
-            .await?;
         }
         Some(cli::Commands::History {
             limit,
